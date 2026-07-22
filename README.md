@@ -1,9 +1,28 @@
-# SDD Plugin Suite for Claude Code
+# SDD Plugin Suite
 
 **Spec-driven development from planning to implementation.**
 
-This repository is a collection of Claude Code plugins that automate software development workflows using Spec-Driven Development (SDD). Designed for developers and QA engineers who want structured, adaptive workflows without rigid templates.
+This repository is a collection of skills that automate software development workflows using Spec-Driven Development (SDD). Designed for developers and QA engineers who want structured, adaptive workflows without rigid templates.
 
+---
+
+## Installation
+
+You can install this repository in two ways:
+
+### Option 1: Claude Code plugin marketplace
+
+```bash
+/plugin marketplace add https://github.com/onur-aslan/sdd
+```
+
+### Option 2: skills.sh installer
+
+If you want to copy the skills into your project for local editing and customization, you can also install them with `skills.sh`:
+
+```bash
+npx skills@latest add onur-aslan/sdd
+```
 ---
 
 ## Plugins
@@ -113,7 +132,7 @@ Code quality and session management utilities.
 
 ### Handoff Workflow
 
-Use this 3-step workflow to transfer session knowledge between Claude Code sessions:
+Use this 3-step workflow to transfer session knowledge between sessions:
 
 ```
 /handoff -> /clear -> /handoff-resume
@@ -122,82 +141,6 @@ Use this 3-step workflow to transfer session knowledge between Claude Code sessi
 1. **`/handoff`** — Captures current session context, decisions, and progress into a handoff file.
 2. **`/clear`** — Clears the conversation history to start fresh.
 3. **`/handoff-resume`** — Loads the handoff file and restores session context for the next skill.
-
----
-
-## Installation
-
-You can install this repository in two ways:
-
-### Option 1: Claude Code plugin marketplace
-
-```bash
-/plugin marketplace add https://github.com/onur-aslan/sdd
-```
-
-### Option 2: skills.sh installer
-
-If you want to copy the skills into your project for local editing and customization, you can also install them with `skills.sh`:
-
-```bash
-npx skills@latest add onur-aslan/sdd
-```
-
----
-
-## Project Structure
-
-```
-.
-+-- README.md                 # This file
-+-- sdd/                     # SDD Core plugin (v2.3.0)
-|   +-- plugin.json
-|   +-- README.md
-|   +-- skills/
-|       +-- workflow-gateway/
-|       +-- deep-spec/
-|       +-- spec-to-prd/
-|       +-- prd-to-task/
-|       +-- implementer/
-|       +-- feature-implementer/
-|       +-- chicago-tdd/
-|       +-- prd-test-writer/
-|       +-- feature-e2e-verifier/
-|
-+-- sdd-frontend/            # Frontend skills (v1.2.0)
-|   +-- plugin.json
-|   +-- README.md
-|   +-- skills/
-|       +-- frontend-design/
-|       +-- frontend-init/
-|       +-- frontend-enhancement/
-|       +-- bug-fix-frontend/
-|       +-- feature-e2e-verifier/
-|       +-- verify-with-playwright-mcp/
-|       +-- using-playwright-mcp/
-|       +-- git-cleanup-playwright-artifacts/
-|
-+-- sdd-backend/             # Backend skills (v1.1.0)
-|   +-- plugin.json
-|   +-- README.md
-|   +-- skills/
-|       +-- bug-fix-backend/
-|       +-- backend-enhancement/
-|       +-- verify-with-curl/
-|
-+-- sdd-utilty/              # Utility skills (v1.3.0)
-|   +-- plugin.json
-|   +-- README.md
-|   +-- skills/
-|       +-- code-slop-review/
-|       +-- gap-analysis/
-|       +-- glossary-builder/
-|       +-- using-glossary/
-|       +-- ask-first/
-|       +-- handoff/
-|       +-- handoff-resume/
-|       +-- init-feature/
-```
 
 ---
 
