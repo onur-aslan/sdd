@@ -1,5 +1,6 @@
 ---
 name: ui-heuristic-click-audit
+description: Audit the UI by discovering clickable elements and checking their behavior heuristically.
 disable-model-invocation: true
 ---
 

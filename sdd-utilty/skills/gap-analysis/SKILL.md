@@ -1,5 +1,6 @@
 ---
 name: gap-analysis
+description: Compare implementation results against requirements to find missing or incorrect work.
 disable-model-invocation: true
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: frontend-enhancement
+description: Guide frontend enhancement work through interview and UI planning.
 disable-model-invocation: true
 ---
 

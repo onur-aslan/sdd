@@ -127,8 +127,20 @@ Use this 3-step workflow to transfer session knowledge between Claude Code sessi
 
 ## Installation
 
+You can install this repository in two ways:
+
+### Option 1: Claude Code plugin marketplace
+
 ```bash
 /plugin marketplace add https://github.com/onur-aslan/sdd
+```
+
+### Option 2: skills.sh installer
+
+If you want to copy the skills into your project for local editing and customization, you can also install them with `skills.sh`:
+
+```bash
+npx skills@latest add onur-aslan/sdd
 ```
 
 ---

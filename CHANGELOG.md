@@ -8,7 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Notes
 - No new unreleased changes at the moment.
-- The repository is currently aligned with the published `v1.0.0` release.
+- The repository is currently aligned with the published `v1.0.1` release.
+
+## [1.0.1] - 2026-07-22
+
+### Changed
+- Updated plugin and marketplace metadata versions from `1.0.0` to `1.0.1`.
+- Added required `description` frontmatter fields to installable `SKILL.md` files so they are accepted by `skills.sh`.
+
+### Fixed
+- Resolved missing `description` frontmatter warnings for skill installation compatibility.
 
 ## [1.0.0] - 2026-07-22
 

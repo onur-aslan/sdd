@@ -1,5 +1,6 @@
 ---
 name: ask-first
+description: Pause before implementation and ask for approval on non-trivial changes.
 disable-model-invocation: true
 ---
 

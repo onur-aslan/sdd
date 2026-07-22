@@ -1,6 +1,6 @@
 {
   "name": "sdd",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Automated workflows for feature development and bug fixing using plan-driven development. Spec-Driven Development (SDD) from planning to Jira export. Modular plugin structure with sdd-frontend, sdd-init, and sdd-utilty sub-plugins.",
   "author": "Onur ASLAN",
   "license": "MIT",

@@ -1,5 +1,6 @@
 ---
 name: using-playwright-mcp
+description: Run browser automation through Playwright MCP for user-requested UI actions.
 disable-model-invocation: true
 ---
 

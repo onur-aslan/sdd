@@ -1,5 +1,6 @@
 ---
 name: code-slop-review
+description: Review code quality across multiple layers and report issues clearly.
 disable-model-invocation: true
 ---
 

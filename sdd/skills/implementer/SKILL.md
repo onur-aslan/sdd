@@ -1,5 +1,6 @@
 ---
 name: implementer
+description: Implement the current context into code and verify it builds cleanly.
 disable-model-invocation: true
 ---
 

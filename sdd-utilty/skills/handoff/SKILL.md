@@ -1,5 +1,6 @@
 ---
 name: handoff
+description: Capture session context and decisions for another agent or follow-up session.
 disable-model-invocation: true
 ---
 

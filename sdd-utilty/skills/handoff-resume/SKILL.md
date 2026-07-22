@@ -1,5 +1,6 @@
 ---
 name: handoff-resume
+description: Resume work from a previous handoff document and recover session context.
 disable-model-invocation: true
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: backend-enhancement
+description: Guide backend feature enhancement through interview and implementation steps.
 disable-model-invocation: true
 ---
 

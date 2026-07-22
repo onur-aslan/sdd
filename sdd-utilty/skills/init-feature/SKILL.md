@@ -1,6 +1,7 @@
 ---
 name: init-feature
-disable-model-invoation: true
+description: Initialize a new feature with the required structure and starting artifacts.
+disable-model-invocation: true
 ---
 
 Scan the codebase to identify existing features and spawn subagents to write PRDs for each.

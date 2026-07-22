@@ -1,5 +1,6 @@
 ---
 name: glossary-builder
+description: Build and maintain a shared project glossary for consistent terminology.
 disable-model-invocation: true
 ---
 

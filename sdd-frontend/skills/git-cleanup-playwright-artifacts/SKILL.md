@@ -1,5 +1,6 @@
 ---
 name: git-cleanup-playwright-artifacts
+description: Find and remove Playwright session artifacts safely after confirmation.
 disable-model-invocation: true
 ---
 
