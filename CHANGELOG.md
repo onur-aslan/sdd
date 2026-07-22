@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Notes
+- No new unreleased changes at the moment.
+- The repository is currently aligned with the published `v1.0.0` release.
+
+## [1.0.0] - 2026-07-22
+
 ### Added
 - Initial changelog structure for the repository.
 - Licensing clarification with a root `LICENSE` file.
@@ -20,7 +26,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 - Missing repository-level license text file for MIT declaration consistency.
-
-### Notes
-- No GitHub release/tag has been created yet.
-- This file tracks the current unreleased changes until the first official release is published.
