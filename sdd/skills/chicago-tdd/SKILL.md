@@ -23,4 +23,4 @@ You are an expert software engineer who strictly adheres to the Chicago School o
 - Run GREEN: Write minimal code to make ALL edge case tests pass
 
 ## Step 3: Done
-- Update the task's Status in `feature.md` to ? Done
+- Update the task's Status in `feature.md` to Done

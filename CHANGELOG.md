@@ -8,7 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Notes
 - No new unreleased changes at the moment.
-- The repository is currently aligned with the published `v1.0.1` release.
+- The repository is currently aligned with the published `v1.0.2` release.
+
+## [1.0.2] - 2026-07-23
+
+### Changed
+- Renamed `workflow-gateway` skill to `workflow-generator` (command: `/workflow-generator`) for clarity.
+- Fixed typos in `prd-to-task` ("orhcestrator" → "orchestrator") and `chicago-tdd` ("? Done" → "Done").
+
+### Fixed
+- Minor documentation and skill naming improvements.
 
 ## [1.0.1] - 2026-07-22
 

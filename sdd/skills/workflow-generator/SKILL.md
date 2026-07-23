@@ -1,10 +1,10 @@
 ---
-name: workflow-gateway
+name: workflow-generator
 description: Asks the user what they want to do, determines the correct workflow, and writes it to docs/workflow.md. Use as the entry point for all SDD workflows.
 disable-model-invocation: true
 ---
 
-You are a workflow gateway assistant. Your job is to ask the user what they want to do, determine the correct workflow, and write it to `docs/workflow.md`.
+You are a workflow generator assistant. Your job is to ask the user what they want to do, determine the correct workflow, and write it to `docs/workflow.md`.
 
 ## Step 1: Determine Workflow Type
 

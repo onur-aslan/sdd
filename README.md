@@ -40,6 +40,25 @@ npx skills@latest add onur-aslan/sdd
 
 Automated workflows that guide you from specification to implementation. The **workflow-gateway** skill selects the right workflow based on your task type.
 
+### Getting Started
+
+**1. Run workflow-generator to select your workflow:**
+
+```bash
+/workflow-generator
+```
+
+This will:
+- Ask you to choose: Feature Development, Bug Fix, Enhancement, or Help me decide
+- Detect if it's Backend, Frontend, or Both
+- Write the selected workflow to `docs/workflow.md`
+
+**2. Follow the steps in `docs/workflow.md`:**
+
+Each workflow file contains a sequence of skills to run in order. Run them one by one:
+
+---
+
 ### Workflows
 
 #### 1. Feature Development (Frontend)
@@ -70,7 +89,7 @@ frontend|backend-enhancement -> verify-with-playwright-mcp|verify-with-curl
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| `workflow-gateway` | `/workflow-gateway` | Entry point -- selects workflow, writes `docs/workflow.md` |
+| `workflow-generator` | `/workflow-generator` | Entry point -- selects workflow, writes `docs/workflow.md` |
 | `deep-spec` | `/deep-spec` | Interview-driven spec creation |
 | `spec-to-prd` | `/spec-to-prd` | Convert spec.md to PRD |
 | `prd-to-task` | `/prd-to-task` | Split PRD into tasks with Gherkin scenarios |
