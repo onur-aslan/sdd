@@ -2,7 +2,9 @@
   "name": "sdd-utilty",
   "version": "1.0.1",
   "description": "Utility skills for compressed communication and session knowledge handoff.",
-  "author": "Onur ASLAN",
+  "author": {
+    "name":"Onur ASLAN"
+  },
   "license": "MIT",
   "homepage": "https://github.com/onur-aslan/sdd"
 }
