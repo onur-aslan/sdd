@@ -12,6 +12,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.0.3] - 2026-08-25
 
+### Changed
+- Renamed `sdd-utilty` → `sdd-utility` (git mv).
+- Fixed typos in multiple `SKILL.md` files: `spec-to-prd`, `prd-to-task`, and `workflow-generator`.
+
+### Fixed
+- Minor documentation clarifications and frontmatter consistency for skills.
+
+## [1.0.3] - 2026-08-25
+
 ### Added
 - Added utility skills: `buy-before-build`, `grounded-mode`, `gap-analysis`, and `ask-first`.
 - Added `code-slop-review` skill and its layered reference docs (`structural-slop`, `test-slop`, `error-handling-slop`, `dead-code-slop`, `architecture-slop`).
