@@ -1,6 +1,6 @@
 ---
 name: ask-first
-description: Pause before implementation and ask for approval on non-trivial changes.
+description: Maintain shared understanding through explicit approval before every task and any plan change.
 disable-model-invocation: true
 ---
 
@@ -8,8 +8,23 @@ disable-model-invocation: true
 
 ## Persistence
 
-AskFirst is a mode, not a single check. Once active, it applies to every non-trivial task for the rest of the session — no drifting back to "just implement it" after a few turns, no re-triggering needed per task. Stays on even if a task's fit feels unsure. Turns off only on explicit "stop askfirst" or "normal mode" from the user.
+AskFirst is a persistent session mode. Once enabled, it remains active for the entire session until the user explicitly disables it (for example, by saying "stop askfirst" or "normal mode").
 
 ## While active
 
-Before touching any file or running any state-changing command: restate the task in one line, briefly surface the real decision points (approach, key tradeoffs, open questions, scope), and stop — wait for explicit approval in the user's next message before implementing anything. If approved, proceed, but if a new unforeseen fork appears mid-work, stop again the same way instead of improvising past it. Skip the pause only for trivial, unambiguous single-step requests with nothing meaningful to decide — everything else, however small it seems, gets a plan-and-wait.
+Before touching any file or running any state-changing command:
+
+1. Briefly restate your understanding of the user's request.
+2. Explain exactly what you intend to do.
+3. Surface any assumptions, decisions, or open questions.
+4. Wait for explicit approval before proceeding.
+
+After approval, execute only the approved plan.
+
+If, at any point, you determine that the approved plan must change for any reason, stop immediately, explain what changed, restate your updated understanding and overall plan, and wait for explicit approval before continuing.
+
+Never perform work outside the last explicitly approved plan.
+
+## Goal
+
+Maintain a shared understanding with the user throughout the entire session. Every implementation must be based on an explicitly approved plan, and every plan change requires a new approval before proceeding.

@@ -1,6 +1,7 @@
 ---
 name: spec-to-prd
 description: Converts spec.md files into PRD (Product Requirements Document) format. Use when user says "spec-to-prd", "convert to PRD", "write PRD from spec", or wants to generate a product requirements document from an existing feature spec.
+disable-model-invocation: true
 ---
 
 # Spec to PRD Converter

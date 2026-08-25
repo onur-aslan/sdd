@@ -58,7 +58,7 @@ B) Done — finalize spec
 ✅ Recommended: [A/B] — [one-line reason based on plan complexity]
 ```
 
-**If user selects A (Zoom deeper):** Announce `🎯 Starting Tour {N+1} at L{M-1}...` and Go To Step 2.
+**If user selects A (Zoom deeper):** Announce `🎯 Starting Tour {N+1} at L{M-1}...`, keep `askedQuestions` intact (do not reset), and Go To Step 2. Probe only new, deeper questions that have not been asked before — never re-ask a question from an earlier tour.
 
 **If user selects B (Done):** Read [spec-format.md](spec-format.md) and write `docs/sdd/features/<feature-name>/spec.md` directly with the collected decisions.
 
