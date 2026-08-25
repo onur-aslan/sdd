@@ -1,4 +1,4 @@
- ---
+---
 name: buy-before-build
 description: Prefer industry best practices and proven solutions before building custom ones.
 disable-model-invocation: true
