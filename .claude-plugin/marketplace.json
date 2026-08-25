@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "sdd-plugin-suite",
   "description": "Spec-Driven Development (SDD) plugin suite — core workflows, frontend, backend, and utility skills from planning to implementation.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "owner": {
     "name": "Onur ASLAN"
   },
@@ -20,7 +20,7 @@
   "plugins": [
     {
       "name": "sdd",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Core SDD workflow - spec-driven development from planning to Jira export. Includes deep-spec, spec-to-prd, prd-to-task, feature-tdd, feature-to-jira, bug-analyzer, and plan-critic skills.",
       "author": {
         "name": "Onur ASLAN"
@@ -41,7 +41,7 @@
     },
     {
       "name": "sdd-frontend",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "description": "Frontend development skills - UI design, enhancement, and Playwright-based testing. Includes frontend-design, frontend-enhancement, frontend-init, playwright-task-tester, and ui-heuristic-click-audit skills.",
       "author": {
         "name": "Onur ASLAN"
@@ -61,13 +61,13 @@
       ]
     },
     {
-      "name": "sdd-utilty",
-      "version": "1.0.1",
+      "name": "sdd-utility",
+      "version": "1.0.3",
       "description": "Utility skills for compressed communication, session knowledge handoff, PRD generation, and AI code quality review. Includes caveman, handoff, handoff-resume, init-feature, ask-first, and code-slop-review skills.",
       "author": {
         "name": "Onur ASLAN"
       },
-      "source": "./sdd-utilty",
+      "source": "./sdd-utility",
       "category": "utilities",
       "homepage": "https://github.com/onur-aslan/sdd",
       "license": "MIT",
@@ -86,7 +86,7 @@
     },
     {
       "name": "sdd-backend",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "description": "Backend development skills for API, database, and server-side logic with unit testing. Includes bug-fix-backend and backend-enhancement skills.",
       "author": {
         "name": "Onur ASLAN"
