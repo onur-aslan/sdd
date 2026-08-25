@@ -38,7 +38,7 @@ Find and read `docs/sdd/features/<feature-name>/spec.md`. Extract:
 
 **Announce:** "Step 3: Generating prd.md..."
 
-- Read [references/prd-format.md](references/prd-format.md). Use strictliy this format and  write `docs/sdd/features/<feature-name>/prd.md` following the template structure.
+	- Read [references/prd-format.md](references/prd-format.md). Use strictly this format and write `docs/sdd/features/<feature-name>/prd.md` following the template structure.
 
 ---
 

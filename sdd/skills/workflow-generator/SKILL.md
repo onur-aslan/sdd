@@ -25,7 +25,7 @@ If the user chooses **D**, ask clarifying questions to determine the right workf
 
 ## Step 2: Detect Project Scope
 
-auto-detect the project type by looking codebase.
+	auto-detect the project type by looking at the codebase.
 
 If auto-detection is inconclusive or the project is full-stack, ask the user:
 
