@@ -7,30 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Notes
-- No new unreleased changes at the moment.
-- The repository is currently aligned with the published `v1.0.3` release.
 
 ## [1.0.3] - 2026-08-25
 
 ### Changed
-- Renamed `sdd-utilty` → `sdd-utility` (git mv).
-- Fixed typos in multiple `SKILL.md` files: `spec-to-prd`, `prd-to-task`, and `workflow-generator`.
 
 ### Fixed
-- Minor documentation clarifications and frontmatter consistency for skills.
 
 ## [1.0.3] - 2026-08-25
-
-### Added
-- Added utility skills: `buy-before-build`, `grounded-mode`, `gap-analysis`, and `ask-first`.
 - Added `code-slop-review` skill and its layered reference docs (`structural-slop`, `test-slop`, `error-handling-slop`, `dead-code-slop`, `architecture-slop`).
 
-### Changed
 - Renamed `sdd-utilty` → `sdd-utility` (git mv).
 - Bumped package and plugin metadata to `1.0.3` (marketplace and `plugin.json` files updated).
 - Fixed typos in multiple `SKILL.md` files: `spec-to-prd`, `prd-to-task`, and `workflow-generator`.
-
-### Fixed
 - Minor documentation clarifications and frontmatter consistency for skills.
 
 ## [1.0.2] - 2026-07-23
