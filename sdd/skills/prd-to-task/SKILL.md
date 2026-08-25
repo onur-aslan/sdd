@@ -3,7 +3,7 @@ name: prd-to-task
 description: Convert a PRD into an ordered task list with explicit implementation steps.
 disable-model-invocation: true
 ---
-This skill processes workflow step by step. Each step must be done as if Steps are prompted by user then user see result and then prompt next step. You are like an orchestrator for user prompt. **Wait user confirmation at the and of each step**.
+This skill processes workflow step by step. Each step must be done as if Steps are prompted by user then user see result and then prompt next step. You are like an orchestrator for user prompt. **Wait user confirmation at the end of each step**.
 
 Gherkin Scenario outcomes (`Then` `And` blocks) must be **implementation-agnostic** and testable at the service/use-case boundary. Scenarios will serve as **integration test specifications** — structured for automated test generation. Avoid flakky test scenarios.
 
