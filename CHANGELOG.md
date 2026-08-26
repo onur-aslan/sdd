@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Notes
 
+## [1.0.4] - 2026-08-26
+
+### Changed
+
+### Fixed
+- Apply patch for minor fixes and documentation updates; prepared for release.
+
 ## [1.0.3] - 2026-08-25
 
 ### Changed
