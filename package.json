@@ -1,0 +1,23 @@
+{
+  "name": "@onuraslan/sdd",
+  "version": "1.0.2",
+  "type": "module",
+  "description": "Spec-Driven Development skill package and interactive installer for AI coding agents.",
+  "license": "MIT",
+  "bin": {
+    "sdd": "bin/sdd.js"
+  },
+  "files": [
+    "bin",
+    "cli",
+    "sdd",
+    "sdd-backend",
+    "sdd-frontend",
+    "sdd-utility",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  }
+}

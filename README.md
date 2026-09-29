@@ -8,21 +8,33 @@ This repository is a collection of skills that automate software development wor
 
 ## Installation
 
-You can install this repository in two ways:
+You can install SDD in two ways:
 
-### Option 1: Claude Code plugin marketplace
+### Option 1: npm package installation (recommended)
+
+Install the package and run the interactive installer from the npm bundle itself:
+
+```bash
+npx @onuraslan/sdd install
+```
+
+This installer reads the skill content from the installed npm package and copies it directly to the target agent directory. It does not clone the GitHub repository at runtime.
+
+### Option 2: Claude Code plugin marketplace
 
 ```bash
 /plugin marketplace add https://github.com/onur-aslan/sdd
 ```
 
-### Option 2: skills.sh installer
+### Option 3: skills.sh installer
 
 If you want to copy the skills into your project for local editing and customization, you can also install them with `skills.sh`:
 
 ```bash
-npx skills@latest add onur-aslan/sdd
+npx skills@latest add onuraslan/sdd
 ```
+
+> The npm package route is the recommended runtime distribution path for the installer. The repository is kept as the source of truth for publishing and release management.
 ---
 
 ## Plugins
