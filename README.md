@@ -12,13 +12,27 @@ You can install SDD in two ways:
 
 ### Option 1: npm package installation (recommended)
 
-Install the package and run the interactive installer from the npm bundle itself:
+Install or update the package and run the interactive installer from the npm bundle itself:
 
 ```bash
-npx @onuraslan/sdd install
+npx @onuraslan/sdd@latest install
 ```
 
 This installer reads the skill content from the installed npm package and copies it directly to the target agent directory. It does not clone the GitHub repository at runtime.
+
+#### Update an existing installation
+
+To upgrade the installed skill set to the latest published version, simply rerun the same command:
+
+```bash
+npx @onuraslan/sdd@latest install
+```
+
+If you installed it globally instead of via npx, update it with:
+
+```bash
+npm update -g @onuraslan/sdd
+```
 
 ### Option 2: Claude Code plugin marketplace
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { targets } from '../cli/targets.js';
+import { targets, resolveTargetPath } from '../cli/targets.js';
 import { getSkillGroups } from '../cli/skills.js';
 import { installSelectedSkills } from '../cli/install.js';
 import { run } from '../cli/index.js';
@@ -20,24 +20,68 @@ test('skill groups cover core frontend backend and utility', () => {
   assert.deepEqual(Object.keys(groups).sort(), ['backend', 'core', 'frontend', 'utility']);
 });
 
-test('install flattens skills directly under the target skill directory and adds Playwright MCP config for each target format', async () => {
+test('OpenCode uses the global config directory for user-scoped installs', () => {
+  const resolved = resolveTargetPath('opencode', 'user', process.cwd());
+
+  assert.equal(resolved.skillDirectory, path.join('.config', 'opencode', 'skills'));
+  assert.equal(resolved.mcpConfigPath, path.join(os.homedir(), '.config', 'opencode', 'opencode.json'));
+  assert.equal(resolved.installRoot, path.join(os.homedir(), '.config', 'opencode', 'skills'));
+});
+
+test('install uses the Claude CLI for MCP setup instead of editing config files directly', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-install-'));
-  const claudeResult = await installSelectedSkills({
-    targetId: 'claude',
-    plugins: ['core', 'frontend'],
-    scope: 'project',
-    cwd: tempRoot,
-    version: '1.0.2'
-  });
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-bin-'));
+  const logPath = path.join(fakeBin, 'claude-log.txt');
+  const originalPath = process.env.PATH;
 
-  assert.ok(fs.existsSync(path.join(tempRoot, '.claude', 'skills', 'deep-spec', 'SKILL.md')));
-  assert.ok(fs.existsSync(path.join(tempRoot, '.mcp.json')));
-  assert.equal(claudeResult.installedCount, 15);
+  if (process.platform === 'win32') {
+    const cmdPath = path.join(fakeBin, 'claude.cmd');
+    fs.writeFileSync(cmdPath, `@echo off\r\n> "%CLAUDE_LOG%" echo %*\r\n`);
+    process.env.CLAUDE_LOG = logPath;
+  } else {
+    const cmdPath = path.join(fakeBin, 'claude');
+    fs.writeFileSync(cmdPath, "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$CLAUDE_LOG\"\n");
+    fs.chmodSync(cmdPath, 0o755);
+    process.env.CLAUDE_LOG = logPath;
+  }
 
-  const claudeConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, '.mcp.json'), 'utf8'));
-  assert.ok(claudeConfig.playwright);
-  assert.equal(claudeConfig.playwright.command, 'npx');
-  assert.deepEqual(claudeConfig.playwright.args, ['@playwright/mcp']);
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`;
+
+  try {
+    const claudeResult = await installSelectedSkills({
+      targetId: 'claude',
+      plugins: ['core', 'frontend'],
+      scope: 'project',
+      cwd: tempRoot,
+      version: '1.0.2'
+    });
+
+    assert.ok(fs.existsSync(path.join(tempRoot, '.claude', 'skills', 'deep-spec', 'SKILL.md')));
+    assert.equal(claudeResult.installedCount, 15);
+    assert.ok(!fs.existsSync(path.join(tempRoot, '.mcp.json')));
+
+    const projectArgs = fs.readFileSync(logPath, 'utf8').trim();
+    assert.match(projectArgs, /mcp/);
+    assert.match(projectArgs, /add/);
+    assert.match(projectArgs, /--scope/);
+    assert.match(projectArgs, /project/);
+    assert.match(projectArgs, /playwright/);
+
+    await installSelectedSkills({
+      targetId: 'claude',
+      plugins: ['frontend'],
+      scope: 'user',
+      cwd: tempRoot,
+      version: '1.0.2'
+    });
+
+    const userArgs = fs.readFileSync(logPath, 'utf8').trim();
+    assert.match(userArgs, /--scope/);
+    assert.match(userArgs, /user/);
+  } finally {
+    process.env.PATH = originalPath;
+    delete process.env.CLAUDE_LOG;
+  }
 
   const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-codex-'));
   await installSelectedSkills({
@@ -64,7 +108,61 @@ test('install flattens skills directly under the target skill directory and adds
 
   const opencodeConfig = JSON.parse(fs.readFileSync(path.join(opencodeRoot, 'opencode.json'), 'utf8'));
   assert.ok(opencodeConfig.mcp.playwright);
-  assert.equal(opencodeConfig.mcp.playwright.command, 'npx');
+  assert.equal(opencodeConfig.mcp.playwright.type, 'local');
+  assert.deepEqual(opencodeConfig.mcp.playwright.command, ['npx', '-y', '@playwright/mcp']);
+  assert.equal(opencodeConfig.mcp.playwright.enabled, true);
+});
+
+test('reinstalling skills overwrites existing copies by default', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-reinstall-'));
+
+  await installSelectedSkills({
+    targetId: 'claude',
+    plugins: ['core'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '1.0.2'
+  });
+
+  await installSelectedSkills({
+    targetId: 'claude',
+    plugins: ['core'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '1.0.2'
+  });
+
+  const deepSpecPath = path.join(tempRoot, '.claude', 'skills', 'deep-spec', 'SKILL.md');
+  assert.ok(fs.existsSync(deepSpecPath));
+});
+
+test('duplicate Claude MCP server entries are treated as a successful no-op', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-duplicate-mcp-'));
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-duplicate-'));
+  const originalPath = process.env.PATH;
+
+  if (process.platform === 'win32') {
+    const cmdPath = path.join(fakeBin, 'claude.cmd');
+    fs.writeFileSync(cmdPath, '@echo off\r\nif "%1"=="mcp" if "%2"=="add" echo MCP server playwright already exists in user config 1>&2\r\nexit /b 1\r\n');
+  } else {
+    const cmdPath = path.join(fakeBin, 'claude');
+    fs.writeFileSync(cmdPath, "#!/bin/sh\nprintf '%s\n' 'MCP server playwright already exists in user config' >&2\nexit 1\n");
+    fs.chmodSync(cmdPath, 0o755);
+  }
+
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`;
+
+  try {
+    await assert.doesNotReject(() => installSelectedSkills({
+      targetId: 'claude',
+      plugins: ['frontend'],
+      scope: 'user',
+      cwd: tempRoot,
+      version: '1.0.2'
+    }));
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });
 
 test('help output includes install and version commands', async () => {

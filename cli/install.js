@@ -17,8 +17,37 @@ function writeMetadata(metadataPath, targetId, plugins, version) {
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
 }
 
-function writeMcpConfig(target, selectedPlugins) {
+async function writeMcpConfig(target, selectedPlugins, scope = 'project', cwd = process.cwd()) {
   if (!selectedPlugins.includes('frontend')) {
+    return;
+  }
+
+  if (target.id === 'claude') {
+    const { spawnSync } = await import('node:child_process');
+    const commandArgs = ['mcp', 'add', '--scope', scope, '--transport', 'stdio', 'playwright', '--', 'npx', '-y', '@playwright/mcp'];
+
+    const result = process.platform === 'win32'
+      ? spawnSync('cmd.exe', ['/d', '/s', '/c', 'claude', ...commandArgs], { cwd, stdio: ['inherit', 'pipe', 'pipe'], env: process.env })
+      : spawnSync('claude', commandArgs, { cwd, stdio: ['inherit', 'pipe', 'pipe'], env: process.env });
+
+    const combinedOutput = [result.stdout?.toString() || '', result.stderr?.toString() || ''].join('\n');
+
+    if (result.error && (result.error.code === 'ENOENT' || result.error.code === 'EINVAL')) {
+      return;
+    }
+
+    if (result.error) {
+      throw new Error(`Claude MCP setup failed: ${result.error.message}`);
+    }
+
+    if (result.status !== 0) {
+      const duplicateMatch = /already exists/i.test(combinedOutput);
+      if (duplicateMatch) {
+        return;
+      }
+      throw new Error(`Claude MCP setup exited with code ${result.status}.`);
+    }
+
     return;
   }
 
@@ -58,9 +87,10 @@ function writeMcpConfig(target, selectedPlugins) {
       mcp: {
         ...(existing.mcp || {}),
         playwright: {
-          type: 'stdio',
-          command: 'npx',
-          args: ['@playwright/mcp']
+          ...(existing.mcp?.playwright || {}),
+          type: 'local',
+          command: ['npx', '-y', '@playwright/mcp'],
+          enabled: true
         }
       }
     };
@@ -69,18 +99,24 @@ function writeMcpConfig(target, selectedPlugins) {
     return;
   }
 
-  const existing = fs.existsSync(mcpConfigPath)
-    ? JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'))
-    : {};
+  let existing = {};
+  if (fs.existsSync(mcpConfigPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
+    } catch {
+      existing = {};
+    }
+  }
 
   const nextConfig = {
     ...existing,
     mcpServers: {
       ...(existing.mcpServers || {}),
       playwright: playwrightConfig
-    },
-    playwright: playwrightConfig
+    }
   };
+
+  delete nextConfig.playwright;
 
   const dir = path.dirname(mcpConfigPath);
   fs.mkdirSync(dir, { recursive: true });
@@ -120,19 +156,18 @@ export async function installSelectedSkills({
       const destination = path.join(target.installRoot, skillName);
 
       if (fs.existsSync(destination)) {
-        if (conflictHandler) {
-          const action = await conflictHandler({ skillName, destination, source, pluginId });
-          if (action === 'skip') {
-            continue;
-          }
-          if (action === 'abort') {
-            throw new Error(`Installation aborted while processing Skill: ${skillName}`);
-          }
-          if (action === 'overwrite') {
-            fs.rmSync(destination, { recursive: true, force: true });
-          }
-        } else {
-          throw new Error(`Skill already exists: ${skillName}`);
+        const action = conflictHandler
+          ? await conflictHandler({ skillName, destination, source, pluginId })
+          : 'overwrite';
+
+        if (action === 'skip') {
+          continue;
+        }
+        if (action === 'abort') {
+          throw new Error(`Installation aborted while processing Skill: ${skillName}`);
+        }
+        if (action === 'overwrite' || action === undefined) {
+          fs.rmSync(destination, { recursive: true, force: true });
         }
       }
 
@@ -142,7 +177,7 @@ export async function installSelectedSkills({
   }
 
   writeMetadata(target.metadataPath, targetId, consistentPlugins, version);
-  writeMcpConfig(target, consistentPlugins);
+  await writeMcpConfig(target, consistentPlugins, scope, cwd);
 
   return {
     installedCount,
