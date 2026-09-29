@@ -1,0 +1,46 @@
+name: Publish SDD to npm
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+      - name: Validate release version matches package.json
+        run: |
+          RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+          echo "GitHub Release: ${RELEASE_VERSION}"
+          echo "Package version: ${PACKAGE_VERSION}"
+
+          if [ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Version mismatch. Publishing aborted."
+            exit 1
+          fi
+
+      - name: Validate package contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
