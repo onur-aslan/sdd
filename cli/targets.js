@@ -55,15 +55,26 @@ export function resolveTargetPath(targetId, scope = 'project', cwd = process.cwd
   }
 
   const baseDir = resolveInstallBase(scope, cwd);
-  const installRoot = path.resolve(baseDir, target.skillDirectory);
-  const metadataPath = path.resolve(baseDir, path.dirname(target.skillDirectory), 'sdd.json');
-  const mcpConfigPath = path.resolve(baseDir, target.mcpConfigPath);
+  const isOpenCodeUserScope = target.id === 'opencode' && scope === 'user';
+  const skillDirectory = isOpenCodeUserScope
+    ? path.join('.config', 'opencode', 'skills')
+    : target.skillDirectory;
+  const effectiveMcpConfigPath = target.id === 'claude' && scope === 'user'
+    ? '.claude.json'
+    : target.id === 'opencode' && scope === 'user'
+      ? path.join('.config', 'opencode', 'opencode.json')
+      : target.mcpConfigPath;
+
+  const installRoot = path.resolve(baseDir, skillDirectory);
+  const metadataPath = path.resolve(baseDir, path.dirname(skillDirectory), 'sdd.json');
+  const mcpConfigPath = path.resolve(baseDir, effectiveMcpConfigPath);
 
   return {
     ...target,
     baseDir,
     installRoot,
     metadataPath,
-    mcpConfigPath
+    mcpConfigPath,
+    skillDirectory
   };
 }
