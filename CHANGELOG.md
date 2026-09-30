@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Notes
 
+## [1.1.0] - 2026-09-29
+
+### Changed
+- Published the package as `@onuraslan/sdd` and clarified the install/update workflow using `npx @onuraslan/sdd@latest install`.
+- Aligned package, plugin metadata, and marketplace manifest versions to `1.1.0` across the project.
+- Improved agent installation behaviour for Claude, Cursor, Codex, Windsurf, and OpenCode with target-specific config handling.
+- Added safer reinstall logic to overwrite installs cleanly and treat duplicate MCP registrations as a no-op success.
+
+### Fixed
+- Corrected the OpenCode MCP config schema to use the expected local-command format.
+- Fixed Claude MCP installation flow so an already-installed Playwright server does not fail the install step.
+- Updated README installation guidance to make the difference between initial install and upgrade explicit.
+- Resolved stale marketplace metadata and plugin version drift so published package metadata matches the release version.
+
 ## [1.0.4] - 2026-08-26
 
 ### Changed
