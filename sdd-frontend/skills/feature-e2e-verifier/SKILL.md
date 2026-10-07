@@ -7,48 +7,31 @@ You are an orchestrator agent that runs E2E verification on User Stories by test
 
 # Workflow
 
-## Step 1: Confirm Fullstack Setup and Present Verification Plan
+## Step 1: Prepare Verification Plan
 
-Present the user with the following information in a single message:
+- Ensure the fullstack environment is running; if backend or frontend is not up, start it. Identify the frontend URL from the running services or project configuration, and wait until it is reachable. If the environment cannot be started, report and stop.
+- Enumerate all User Stories with their Acceptance Criteria from the spec, and record the verification plan.
 
-1. **Fullstack Setup Confirmation**: Ask the user to confirm that the fullstack environment is running.
+## Step 2: Verify Each User Story
 
-2. **User Stories to Verify**: Display the list of User Stories with their Acceptance Criteria.
+For each User Story, sequentially, in a separate `general_purpose` subagent:
 
-Then ask the user to confirm if they want to proceed with the verification.
+- Spawn a fresh subagent with the prompt at [reference/e2e-verifier.md](reference/e2e-verifier.md).
+- Pass that User Story with **all its Acceptance Criteria** and the **frontend URL** (e.g. for US-04, pass all its ACs together — the e2e-verifier tests all ACs in that User Story in one run).
+- Wait for the subagent to complete before starting the next User Story.
 
-- If user confirms: Proceed to Step 2
-- If user declines: Exit the skill
+## Step 3: Track Results
 
-## Step 2: Find Next Pending User Story
-
-Track which User Stories have been processed. Find the next User Story that hasn't been verified yet.
-
-If all User Stories have been verified, report completion to the user and stop.
-
-## Step 3: Invoke E2E-Verifier for One User Story
-
-Spawn a fresh `general_purpose` subagent with prompt [reference/e2e-verifier.md](reference/e2e-verifier.md).
-
-Pass the **current User Story** with **all its Acceptance Criteria** to the e2e-verifier agent.
-
-**Example**: If verifying US-04, pass all 3 ACs from US-04 together. The e2e-verifier will test all ACs in that User Story in one run.
-
-Wait for e2e-verifier to complete.
-
-## Step 4: Track Results
-
-After e2e-verifier completes:
+After each subagent completes:
 1. Record the result: verified, fixed-and-verified, or unresolved issues
-2. Record which ACs passed/failed for this User Story
+2. Record which ACs passed/failed for that User Story
 3. Record any fixes applied
-4. Continue to the next User Story
 
-Repeat Steps 3-5 until all User Stories are verified.
+Continue until every User Story has been verified.
 
 # Principles
 
-- **Fullstack-first**: Verify fullstack setup is running before any E2E test
+- **Bring up if needed**: Start the fullstack environment if it is not running before any E2E test
 - **AC-based verification**: Each User Story is verified by testing all its Acceptance Criteria together
 - **One US at a time**: Process one User Story per e2e-verifier run (with all its ACs)
 - **No parallel verifications**: Wait for each e2e-verifier to complete before starting the next

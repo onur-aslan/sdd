@@ -66,4 +66,4 @@ B) Done — finalize spec
 
 ## Next Step
 
-**→ `/spec-to-prd`**
+**→ Small scope: `/implementer` · Large scope: `/spec-to-task`**

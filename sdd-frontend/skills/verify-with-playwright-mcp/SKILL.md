@@ -6,7 +6,7 @@ description: >
   "verify-with-playwright-mcp".
 ---
 
-Verifies work done in the current context using Playwright MCP tools. Navigate to the page, take screenshots, compare against expected design, and auto-fix any visual issues discovered (layout, alignment, contrast, responsiveness). Repeat the snapshot → compare → fix loop until the UI matches the plan. This skill does NOT write tests - visual verification only.
+Verifies work done in the current context using Playwright MCP tools in a separate `general_purpose` subagent. Navigate to the page, take screenshots, compare against expected design, and auto-fix any visual issues discovered (layout, alignment, contrast, responsiveness). Repeat the snapshot → compare → fix loop until the UI matches the plan. This skill does NOT write tests - visual verification only.
 
 When done, clean up screenshots:
 ```bash

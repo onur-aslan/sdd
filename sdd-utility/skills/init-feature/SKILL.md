@@ -4,7 +4,7 @@ description: Initialize a new feature with the required structure and starting a
 disable-model-invocation: true
 ---
 
-Scan the codebase to identify existing features and spawn subagents to write PRDs for each.
+Scan the codebase to identify existing features and spawn subagents to write specs for each.
 
 ---
 
@@ -15,8 +15,6 @@ Scan the codebase to identify existing features and spawn subagents to write PRD
 **Announce:** "Step 1: Analyzing external interfaces..."
 
 Analyze the codebase to identify architectural layers and external interfaces. Show layers as ASCII diagram and list all bottom external interfaces.
-
-Wait for user confirmation.
 
 ---
 
@@ -32,23 +30,21 @@ Wait for the Explore agent to complete.
 
 ---
 
-### Step 3: Present Findings to User
+### Step 3: Select Features
 
-Show the user the list of identified features:
+Show the user the list of identified features.
 
-Which features should I generate PRDs for? (e.g., "1,3,4" or "all" or "none")
-
-Wait for user to specify which features to process. Do not proceed without explicit confirmation.
+Process all identified features. If the user specified particular features when invoking this skill, process only those.
 
 ---
 
-### Step 4: Spawn PRD Writer Subagents
+### Step 4: Spawn Spec Writer Subagents
 
-**Announce:** "Step 4: Spawning PRD writer subagents..."
+**Announce:** "Step 4: Spawning spec writer subagents..."
 
-For each confirmed feature:
+For each selected feature:
 
-1. Spawn an Explore subagent with the prompt from [references/prd-writer-prompt.md](references/prd-writer-prompt.md)
+1. Spawn an Explore subagent with the prompt from [references/spec-writer-prompt.md](references/spec-writer-prompt.md)
 2. Replace `[feature name]`, `[feature key]`, and `[feature description]` placeholders with actual values from Step 3
 3. Run all subagents in parallel
 
@@ -58,6 +54,6 @@ Wait for all subagents to complete.
 
 ### Step 5: Report Results
 
-**Announce:** "Step 5: PRD generation complete"
+**Announce:** "Step 5: Spec generation complete"
 
 Report to the user.

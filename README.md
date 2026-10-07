@@ -56,28 +56,34 @@ npx skills@latest add onuraslan/sdd
 | Plugin | Description |
 |--------|-------------|
 | [**SDD Core**](sdd/) | Automated workflows from spec design to implementation |
-| [**SDD Frontend**](sdd-frontend/) | Frontend-specific skills for UI design, enhancement, and testing |
+| [**SDD Frontend**](sdd-frontend/) | Frontend-specific skills for UI enhancement, bug fixing, and testing |
 | [**SDD Backend**](sdd-backend/) | Backend development skills for API, database, and server-side logic |
-| [**SDD Utility**](sdd-utilty/) | Code quality analysis, gap analysis, session handoff, and glossary |
+| [**SDD Utility**](sdd-utility/) | Code quality analysis, gap analysis, session handoff, and glossary |
 
 ---
 
 ## SDD Core Plugin
 
-Automated workflows that guide you from specification to implementation. The **workflow-gateway** skill selects the right workflow based on your task type.
+Automated workflows that guide you from specification to implementation. The `sdd workflow` command selects the right workflow based on your task type.
 
 ### Getting Started
 
-**1. Run workflow-generator to select your workflow:**
+**1. Generate your workflow:**
 
 ```bash
-/workflow-generator
+npx @onuraslan/sdd@latest workflow
 ```
 
 This will:
-- Ask you to choose: Feature Development, Bug Fix, Enhancement, or Help me decide
-- Detect if it's Backend, Frontend, or Both
+- Ask you to choose: Feature Development, Bug Fix, or Enhancement
+- Ask if it's Backend, Frontend, or Both
 - Write the selected workflow to `docs/workflow.md`
+
+You can also select non-interactively:
+
+```bash
+npx @onuraslan/sdd@latest workflow --type feature --scope backend
+```
 
 **2. Follow the steps in `docs/workflow.md`:**
 
@@ -90,13 +96,13 @@ Each workflow file contains a sequence of skills to run in order. Run them one b
 #### 1. Feature Development (Frontend)
 
 ```
-deep-spec -> spec-to-prd -> [small scope: implementer] | [large PRD: prd-to-task -> feature-implementer] -> feature-e2e-verifier -> prd-test-writer -> gap-analysis -> code-slop-review
+deep-spec -> [small scope: implementer] | [large spec: spec-to-task -> feature-implementer] -> feature-e2e-verifier -> spec-test-writer -> gap-analysis -> code-slop-review
 ```
 
 #### 2. Feature Development (Backend)
 
 ```
-deep-spec -> spec-to-prd -> [small scope: implementer -> verify-with-curl] | [large PRD: prd-to-task -> chicago-tdd (per task)] -> feature-e2e-verifier -> prd-test-writer -> gap-analysis -> code-slop-review
+deep-spec -> [small scope: implementer -> verify-with-curl] | [large spec: spec-to-task -> feature-tdd | feature-implementer] -> feature-e2e-verifier -> spec-test-writer -> gap-analysis -> code-slop-review
 ```
 
 #### 3. Bug Fix
@@ -115,21 +121,18 @@ frontend|backend-enhancement -> verify-with-playwright-mcp|verify-with-curl
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| `workflow-generator` | `/workflow-generator` | Entry point -- selects workflow, writes `docs/workflow.md` |
 | `deep-spec` | `/deep-spec` | Interview-driven spec creation |
-| `spec-to-prd` | `/spec-to-prd` | Convert spec.md to PRD |
-| `prd-to-task` | `/prd-to-task` | Split PRD into tasks with Gherkin scenarios |
+| `spec-to-task` | `/spec-to-task` | Split spec into tasks with Gherkin scenarios |
 | `implementer` | `/implementer` | Implement from conversation context (no files needed) |
 | `feature-implementer` | `/feature-implementer <feature.md>` | Implement tasks sequentially |
-| `chicago-tdd` | `/chicago-tdd <task.md>` | TDD for a single task (Red-Green-Refactor) |
-| `prd-test-writer` | `/prd-test-writer <prd.md>` | Write acceptance tests in parallel |
-| `feature-e2e-verifier` | `/feature-e2e-verifier <prd.md>` | E2E verify User Stories |
+| `feature-tdd` | `/feature-tdd <feature.md>` | Run Chicago TDD for each task sequentially (Red-Green cycle) |
+| `spec-test-writer` | `/spec-test-writer <spec.md>` | Write acceptance tests in parallel |
 
 ---
 
 ## SDD Frontend Plugin
 
-Frontend-specific skills for UI design, enhancement, and verification.
+Frontend-specific skills for UI enhancement, bug fixing, and verification.
 
 ### Core Skills
 
@@ -137,9 +140,8 @@ Frontend-specific skills for UI design, enhancement, and verification.
 |-------|---------|-------------|
 | `frontend-enhancement` | `/frontend-enhancement` | Interview-driven UI enhancement with ASCII mockup planning |
 | `bug-fix-frontend` | `/bug-fix-frontend "<description>"` | Senior-level frontend bug fixing with auto-verification |
-| `feature-e2e-verifier` | `/feature-e2e-verifier <prd.md>` | E2E verify User Stories by testing all Acceptance Criteria sequentially |
+| `feature-e2e-verifier` | `/feature-e2e-verifier <spec.md>` | E2E verify User Stories by testing all Acceptance Criteria sequentially |
 | `verify-with-playwright-mcp` | `/verify-with-playwright-mcp` | Visual verification with auto-fix loop |
-| `using-playwright-mcp` | `/using-playwright-mcp` | General-purpose Playwright browser automation |
 | `git-cleanup-playwright-artifacts` | `/git-cleanup-playwright-artifacts` | Clean up Playwright screenshots and test artifacts |
 
 ---
@@ -171,6 +173,8 @@ Code quality and session management utilities.
 | `glossary-builder` | `/glossary-builder` | Build domain glossary for project |
 | `using-glossary` | `/using-glossary` | Use glossary for consistent terminology |
 | `ask-first` | `/ask-first` | Plan before implement — pause for approval on non-trivial tasks |
+| `buy-before-build` | `/buy-before-build` | Prefer industry best practices and proven solutions before custom builds |
+| `grounded-mode` | `/grounded-mode` | Persistent grounded response mode, toggleable by the user |
 | `handoff` | `/handoff` | Capture session knowledge for the next skill |
 | `handoff-resume` | `/handoff-resume` | Resume session from handoff file |
 | `init-feature` | `/init-feature` | Initialize a new feature |

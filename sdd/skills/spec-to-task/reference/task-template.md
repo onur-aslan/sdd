@@ -2,11 +2,12 @@
 
 ## Rules
 
-- Task definition files must be self-contained — do not reference spec.md or prd.md. Copy all necessary context, decisions, and constraints into the task file
-- No gap between the task files and prd. Cumulative tasks context must cover prd.
+- Task definition files must be self-contained — do not reference spec.md. Copy all necessary context, decisions, and constraints into the task file
+- No gap between the task files and spec. Cumulative tasks context must cover spec.
 - All context must be in the task file to implement.
 - If Gherkin applies: every task must have at least one happy path, one edge case, one negative path scenario — in that order
-- Never invent quantitative or hardware constraint values — only use values explicitly stated in prd.md
+- Never invent quantitative or hardware constraint values — only use values explicitly stated in spec.md
+- Carry over the `SP-n` decision IDs and `AC-<US>.<n>` acceptance criterion IDs from spec.md into the task file
 
 ## Location
 Path: `docs/sdd/features/<feature-name>/tasks/<task-name>.md`
@@ -26,18 +27,18 @@ Path: `docs/sdd/features/<feature-name>/tasks/<task-name>.md`
 
 ### [Category]
 
-**Decision:** [What was chosen]
+**SP-1 — [What was chosen]**
 
-**Decision:** [What was chosen]
+**SP-2 — [What was chosen]**
 
 ## Visual Mock
 [If there are any visual/UI decisions, include visual mockups, wireframes, or layout descriptions here. If none, omit this section.]
 
-## Implmenetation Steps
+## Implementation Steps
 [Pre non-tdd task]
-[A short implementations steps in order to do this task.]
+[A short implementation steps in order to do this task.]
 
-## Out of Scopes
+## Out of Scope
 [Not to be done in this task]
 
 ## Scenarios
@@ -50,10 +51,17 @@ Path: `docs/sdd/features/<feature-name>/tasks/<task-name>.md`
 **And**   `[if critical]`
 
 ### ⬜ [Edge Case]
-> AC: PROJ-10
+> Covers: AC-02.1
 **Given** [precondition]
 **When**  `[call + invalid / bad input]`
-**Then**  `[error / signal / rejection]` 
+**Then**  `[error / signal / rejection]`
+**And**   `[if critical]`
+
+### 🚫 [Negative Path]
+> Covers: AC-02.2
+**Given** [precondition]
+**When**  `[call / action that must be rejected]`
+**Then**  `[refusal / validation error / no side effect]`
 **And**   `[if critical]`
 
 ## Conventions

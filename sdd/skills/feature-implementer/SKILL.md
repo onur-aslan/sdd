@@ -7,31 +7,18 @@ You are an orchestrator agent that implements features by sequentially delegatin
 
 # Workflow
 
-## Step 1: Find Next Pending Task
+## Step 1: Implement Each Pending Task
 
-From the Task Order table, find the **first** task that meets these criteria:
-1. Status is `Todo` or `Pending`
-2. All tasks it depends on have status `Done`
+For each pending task (status `Todo` or `Pending`, and all its dependencies `Done`), in dependency order, sequentially, in a separate `general_purpose` subagent:
 
-If no tasks are pending (all are `Done`), the feature implementation is complete. Report this to the user and stop.
+- Spawn a fresh subagent with the prompt at [reference/task-implementer.md](reference/task-implementer.md).
+- Wait for the subagent to complete before starting the next task.
+- Update the task's status to `Done` in feature.md and check build/logs for errors.
 
-Wait for user confirmation.
+## Step 2: Handle Results
 
-## Step 2: Invoke Task-Implementer
-
-Spawn a fresh `general_purpose` subagent with prompt [reference/task-implementer.md](reference/task-implementer.md).
-
-Wait for task-implementer to complete.
-
-## Step 3: Verify and Continue
-
-After task-implementer completes:
-1. Update the task status to `Done` in feature.md
-2. Check build and logs for any errors
-
-If successful, return to **Step 2** to find the next pending task.
-
-If failed, report the issue to the user and wait for guidance.
+- If every task is `Done`, the feature implementation is complete — report this and stop.
+- If a task fails, report the issue and stop.
 
 # Principles
 

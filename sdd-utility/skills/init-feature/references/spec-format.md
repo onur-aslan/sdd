@@ -1,26 +1,26 @@
 # Spec Format
 
-Write the following file at `docs/sdd/features/<feature-name>/spec.md`.
+Generate the following file at `docs/sdd/features/<feature-name>/spec.md`.
 
-Use the collected design decisions from all tours to fill it in. Nothing else.
+Reverse-engineer the content from the existing codebase. Capture only what the code actually does.
 
 ```markdown
 # Feature: [Feature Name]
 
 ## Overview
-[One-paragraph summary of what this feature does, derived from the user's initial request and tour context.]
+[One-paragraph summary of what this feature does, derived from the codebase scan.]
 
 ## Specs
 
 ### [Category]
 
-**SP-1 — [What was chosen]**
+**SP-1 — [What the code does / chose]**
 
-**SP-2 — [What was chosen]**
+**SP-2 — [What the code does / chose]**
 
 ### [Category]
 
-**SP-3 — [What was chosen]**
+**SP-3 — [What the code does / chose]**
 
 ## User Stories
 
@@ -38,12 +38,8 @@ Use the collected design decisions from all tours to fill it in. Nothing else.
 - Group decisions by logical category (UI, data, architecture, integration, etc.)
 - Give every design decision a sequential ID: `SP-1`, `SP-2`, `SP-3`, ... Numbering is continuous across all categories
 - Capture the final decision only — do NOT add a Reasoning line
-- Include constraints and assumptions discovered during questioning
+- Include constraints and assumptions discovered during the codebase scan
 - Do NOT include any code
-- Do NOT invent new decisions — only what was explicitly captured during tours
+- Do NOT invent behavior — only what the codebase actually does
 - Do NOT include task lists, vertical slices, priorities, or implementation plans — this file is decisions only
 - Every Acceptance Criterion gets an ID prefixed with its User Story ID: `AC-<US number>.<n>` (e.g. `AC-01.1`, `AC-01.2`)
-
-## Deriving User Stories
-
-When the design decisions imply user-facing behavior, derive User Stories and Acceptance Criteria. Do NOT fabricate needs that the tours never touched.
