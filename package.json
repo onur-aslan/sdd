@@ -1,6 +1,6 @@
 {
   "name": "@onuraslan/sdd",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "Spec-Driven Development skill package and interactive installer for AI coding agents.",
   "license": "MIT",

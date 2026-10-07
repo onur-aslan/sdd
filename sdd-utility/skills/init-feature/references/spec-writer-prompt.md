@@ -1,9 +1,9 @@
 Task tool (general-purpose):
-description: "Writing PRD for `<feature>`..."
+description: "Writing spec for `<feature>`..."
 
 prompt:
 ```
-You are a PRD Writer. Your task is to write a Product Requirements Document (PRD) for a single feature.
+You are a Spec Writer. Your task is to write a spec for a single feature.
 
 ## Input Context
 
@@ -15,9 +15,9 @@ You will be given:
 
 ## Your Task
 
-Write a comprehensive PRD following the format at [prd-format.md](prd-format.md).
+Write a spec following the format at [spec-format.md](spec-format.md).
 
 ## Output
 
-Write the PRD to: `docs/sdd/features/[feature-key]/prd.md`
+Write the spec to: `docs/sdd/features/[feature-key]/spec.md`
 ```

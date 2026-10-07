@@ -1,24 +1,24 @@
 ---
-name: prd-test-writer
-description: Orchestrates test writing for each User Story's Acceptance Criteria (AC) in a PRD. Uses general-purpose Task Tool in parallel for each US. Orchestrator writes all reports from agent output.
+name: spec-test-writer
+description: Orchestrates test writing for each User Story's Acceptance Criteria (AC) in a spec. Uses general-purpose Task Tool in parallel for each US. Orchestrator writes all reports from agent output.
 disable-model-invocation: true
 ---
 
-# PRD Test Writer
+# Spec Test Writer
 
-Announce at start: "prd-test-writer: Analyzing PRD for User Stories and Acceptance Criteria..."
+Announce at start: "spec-test-writer: Analyzing spec for User Stories and Acceptance Criteria..."
 
 ---
 
 ## Workflow
 
-### Step 1. Read PRD and Extract User Stories
+### Step 1. Read Spec and Extract User Stories
 
-Read `docs/sdd/features/<feature-name>/prd.md` and extract:
-- All User Stories from the User Stories table (Section 5)
-- For each User Story: ID (US-01, US-02, etc.), description, and Acceptance Criteria list
+Read `docs/sdd/features/<feature-name>/spec.md` and extract:
+- All User Stories from the User Stories table
+- For each User Story: ID (US-01, US-02, etc.), description, and Acceptance Criteria list with their IDs (AC-01.1, AC-01.2, etc.)
 
-**Validation:** If no User Stories found, exit with: "No User Stories found in PRD"
+**Validation:** If no User Stories found, exit with: "No User Stories found in spec"
 
 ### Step 2. Spawn Task Tools in Parallel
 
@@ -30,7 +30,7 @@ Read the template at [references/user-story-test-writer-prompt.md](references/us
 |---|---|
 | `<us-id>` | e.g. US-01 |
 | `<us-description>` | Full User Story text |
-| `<ac-list>` | Bulleted Acceptance Criteria (one per line, each prefixed with `- `) |
+| `<ac-list>` | Bulleted Acceptance Criteria (one per line, each prefixed with `- ` and its `AC-<US>.<n>` ID) |
 
 **Announce:** "Launching <N> test-writer tasks in parallel..."
 
@@ -59,7 +59,7 @@ Write `docs/sdd/features/<feature-name>/test-report.md`:
 | Metadata | Value |
 |----------|-------|
 | Feature | <feature-name> |
-| PRD | docs/sdd/features/<feature-name>/prd.md |
+| Spec | docs/sdd/features/<feature-name>/spec.md |
 | Total User Stories | <N> |
 | Tests Written | <N> |
 

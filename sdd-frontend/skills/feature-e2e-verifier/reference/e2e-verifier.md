@@ -1,5 +1,5 @@
 Task tool (general-purpose):
-description: "E2E verifiy Task N: [task name]"
+description: "E2E verify Task N: [task name]"
 mcpServers:
   - plugin:sdd-frontend:playwright
 prompt:
