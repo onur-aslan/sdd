@@ -38,8 +38,5 @@ Reverse-engineer the content from the existing codebase. Capture only what the c
 - Group decisions by logical category (UI, data, architecture, integration, etc.)
 - Give every design decision a sequential ID: `SP-1`, `SP-2`, `SP-3`, ... Numbering is continuous across all categories
 - Capture the final decision only — do NOT add a Reasoning line
-- Include constraints and assumptions discovered during the codebase scan
-- Do NOT include any code
-- Do NOT invent behavior — only what the codebase actually does
-- Do NOT include task lists, vertical slices, priorities, or implementation plans — this file is decisions only
+- Capture constraints and assumptions discovered during the codebase scan as SP entries under Specs
 - Every Acceptance Criterion gets an ID prefixed with its User Story ID: `AC-<US number>.<n>` (e.g. `AC-01.1`, `AC-01.2`)

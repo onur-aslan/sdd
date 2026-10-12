@@ -6,14 +6,14 @@
 
 ```
 /clear
-/sdd-backend:backend-enhancement `<enhancement definition>`
+/backend-enhancement `<enhancement definition>`
 ```
 
 → **Human review** — Check plan, approve implementation
 
 (optional) Verify:
 ```
-/sdd-backend:verify-with-curl
+/verify-with-curl
 ```
 
 → **Human review** — Approve verification

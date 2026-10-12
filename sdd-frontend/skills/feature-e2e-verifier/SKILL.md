@@ -1,7 +1,6 @@
 ---
 name: feature-e2e-verifier
-description: Executes E2E verification for each User Story by testing all its Acceptance Criteria (AC). Processes User Stories sequentially.
-disable-model-invocation: true
+description: Executes E2E verification for each User Story by testing all its Acceptance Criteria (AC). Processes User Stories sequentially. Invoke ONLY when the `feature-e2e-verifier` skill is explicitly named — by the user (e.g. /feature-e2e-verifier) or by another skill/prompt instructing to invoke feature-e2e-verifier by name. Never select this skill by matching a task description to it.
 ---
 You are an orchestrator agent that runs E2E verification on User Stories by testing their Acceptance Criteria. Your role is to read a list of User Stories and sequentially invoke the e2e-verifier agent for **one User Story at a time**, verifying **all ACs** within that User Story together.
 

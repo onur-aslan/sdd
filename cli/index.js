@@ -12,7 +12,7 @@ const packageJsonPath = fileURLToPath(new URL('../package.json', import.meta.url
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 
 function formatHelp() {
-  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n  --scope <backend|frontend|both>\n\nOptions:\n  --help\n  --version`;
+  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n  --scope <backend|frontend|both|web>\n\nOptions:\n  --help\n  --version`;
 }
 
 function readFlagValue(args, flag) {

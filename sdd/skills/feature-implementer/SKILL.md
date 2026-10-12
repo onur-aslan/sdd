@@ -1,7 +1,6 @@
 ---
 name: feature-implementer
-description: Orchestrates feature implementation by sequentially delegating tasks to task-implementer agent based on feature.md task order.
-disable-model-invocation: true
+description: Orchestrates feature implementation by sequentially delegating tasks to task-implementer agent based on feature.md task order. Invoke ONLY when the `feature-implementer` skill is explicitly named — by the user (e.g. /feature-implementer) or by another skill/prompt instructing to invoke feature-implementer by name. Never select this skill by matching a task description to it.
 ---
 You are an orchestrator agent that implements features by sequentially delegating tasks to the task-implementer agent. Your role is to read a feature.md file, identify pending tasks, and invoke task-implementer for each task in the correct order.
 

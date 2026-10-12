@@ -14,13 +14,15 @@ const workflowTypes = [
 const workflowScopes = [
   { id: 'backend', name: 'Backend' },
   { id: 'frontend', name: 'Frontend' },
-  { id: 'both', name: 'Both' }
+  { id: 'both', name: 'Both' },
+  { id: 'web', name: 'Web (one-shot autonomous pipeline)' }
 ];
 
 const templates = {
   feature: {
     backend: 'workflow-feature-development-backend.md',
-    frontend: 'workflow-feature-frontend-development.md'
+    frontend: 'workflow-feature-frontend-development.md',
+    web: 'workflow-feature-web-development.md'
   },
   'bug-fix': {
     backend: 'workflow-bug-fix-backend.md',
@@ -36,8 +38,14 @@ export function getWorkflowTypes() {
   return workflowTypes.map((entry) => ({ ...entry }));
 }
 
-export function getWorkflowScopes() {
-  return workflowScopes.map((entry) => ({ ...entry }));
+export function getWorkflowScopes(type = null) {
+  if (!type || !templates[type]) {
+    return workflowScopes.map((entry) => ({ ...entry }));
+  }
+
+  return workflowScopes
+    .filter((entry) => entry.id === 'both' || templates[type][entry.id])
+    .map((entry) => ({ ...entry }));
 }
 
 export function buildWorkflowContent(type, scope) {
@@ -54,6 +62,10 @@ export function buildWorkflowContent(type, scope) {
   if (scope === 'both') {
     // Fullstack selected: use the frontend development workflow as the guide
     return fs.readFileSync(path.join(workflowsDir, typeTemplates['frontend']), 'utf8').trimEnd();
+  }
+
+  if (!typeTemplates[scope]) {
+    throw new Error(`The "${scope}" scope is only available for the feature workflow type.`);
   }
 
   return fs.readFileSync(path.join(workflowsDir, typeTemplates[scope]), 'utf8').trimEnd();
@@ -93,7 +105,8 @@ export async function askWorkflowSelection({ type = null, scope = null } = {}) {
 
   try {
     const selectedType = type ?? (await promptChoice(rl, 'What do you want to do?', workflowTypes));
-    const selectedScope = scope ?? (await promptChoice(rl, 'Is this Backend, Frontend, or Both?', workflowScopes));
+    const scopeEntries = getWorkflowScopes(selectedType);
+    const selectedScope = scope ?? (await promptChoice(rl, 'Choose a scope:', scopeEntries));
 
     return { type: selectedType, scope: selectedScope };
   } finally {

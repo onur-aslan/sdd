@@ -6,13 +6,13 @@
 
 ```
 /clear
-/sdd-frontend:bug-fix-frontend `<bug fix definition>`
+/bug-fix-frontend `<bug fix definition>`
 ```
 
 → **Human review** — Check fix, approve
 
 ```
-/sdd-frontend:verify-with-playwright-mcp
+/verify-with-playwright-mcp
 ```
 
 → **Human review** — Approve verification
