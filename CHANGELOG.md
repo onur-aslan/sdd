@@ -4,9 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-10-12
 
-### Notes
+> ⚠️ **Breaking release.** The `gap-analysis`, `code-slop-review`, `handoff`, and `handoff-resume` skills were removed; post-implementation review is now a single `/sdd-review` step. Review the Removed section before upgrading.
+
+### Added
+- `feature-web-developer` skill in the `sdd-frontend` plugin: a one-shot pipeline that takes a `spec.md` or `feature.md` path, implements it (`implementer` for a spec, `feature-implementer`/`feature-tdd` for a feature), then verifies it with `feature-e2e-verifier` — fully autonomously, no prompts.
+- `sdd-review` skill in the `sdd` plugin: a single post-implementation review with two passes — Spec (Missing/Extra/Incorrect against the requirements) and Slop (design-level code quality in the diff) — plus a Fix Mode.
+- `web` scope in `sdd workflow` (feature type only): generates a one-shot workflow built around `feature-web-developer` (`sdd workflow --type feature --scope web`); the interactive scope prompt is now filtered by the selected workflow type.
+
+### Changed
+- Removed `disable-model-invocation` from `implementer`, `feature-implementer`, `feature-tdd`, and `feature-e2e-verifier` so the `feature-web-developer` pipeline can invoke them.
+- Feature development workflows (`workflow-feature-development-backend`, `workflow-feature-frontend-development`) now end with a single `/sdd-review` step instead of `/gap-analysis` + `/code-slop-review`.
+- Description-first explicit-name rule for the skills that stay model-invokable (`implementer`, `feature-implementer`, `feature-tdd`, `sdd-review`, `feature-e2e-verifier`, `verify-with-curl`, `verify-with-playwright-mcp`): their descriptions now state they must be invoked only when named explicitly (by the user or by another skill), so they are no longer auto-selected by task inference.
+- Workflow templates now use bare slash commands without the plugin prefix (`/sdd:deep-spec` → `/deep-spec`), matching how the skills are installed.
+- `deep-spec` and the `init-feature` spec format: constraints and assumptions discovered during the interview or codebase scan are captured as `SP-n` entries under Specs, and the spec is written in the language the user writes in.
+- `ask-first`: when an approved plan must change, the skill now stops, restates the updated plan, and waits for explicit re-approval before continuing.
+
+### Removed
+- `gap-analysis` skill — replaced by the Spec pass of `sdd-review`.
+- `code-slop-review` skill and its reference docs — replaced by the Slop pass of `sdd-review`.
+- `handoff` and `handoff-resume` skills and the README Handoff Workflow section.
 
 ## [2.0.0] - 2026-10-06
 

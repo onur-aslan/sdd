@@ -6,14 +6,14 @@
 
 ```
 /clear
-/sdd-backend:bug-fix-backend `<bug fix definition>`
+/bug-fix-backend `<bug fix definition>`
 ```
 
 → **Human review** — Check fix, approve
 
 (optional) Verify:
 ```
-/sdd-backend:verify-with-curl
+/verify-with-curl
 ```
 
 → **Human review** — Approve verification

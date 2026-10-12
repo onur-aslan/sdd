@@ -21,7 +21,7 @@ Before touching any file or running any state-changing command:
 
 After approval, execute only the approved plan.
 
-If, at any point, you determine that the approved plan must change for any reason, stop immediately, explain what changed, restate your updated understanding and overall plan, and wait for explicit approval before continuing.
+If, at any point, you determine that the approved plan must change for any reason, stop immediately, explain what changed, restate your updated understanding and overall full plan, and wait for explicit approval before continuing.
 
 Never perform work outside the last explicitly approved plan.
 

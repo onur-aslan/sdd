@@ -35,13 +35,11 @@ Use the collected design decisions from all tours to fill it in. Nothing else.
 
 ## Rules
 
+- Write the spec content in the language the user writes in
 - Group decisions by logical category (UI, data, architecture, integration, etc.)
 - Give every design decision a sequential ID: `SP-1`, `SP-2`, `SP-3`, ... Numbering is continuous across all categories
 - Capture the final decision only — do NOT add a Reasoning line
-- Include constraints and assumptions discovered during questioning
-- Do NOT include any code
-- Do NOT invent new decisions — only what was explicitly captured during tours
-- Do NOT include task lists, vertical slices, priorities, or implementation plans — this file is decisions only
+- Capture constraints and assumptions discovered during questioning as SP entries under Specs
 - Every Acceptance Criterion gets an ID prefixed with its User Story ID: `AC-<US number>.<n>` (e.g. `AC-01.1`, `AC-01.2`)
 
 ## Deriving User Stories

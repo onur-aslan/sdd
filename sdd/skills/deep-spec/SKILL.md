@@ -6,6 +6,8 @@ disable-model-invocation: true
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. Ask very detailed design questions. Expose hidden assumptions. Ask the questions one at a time. Do not use AskUserQuestion Tool. Do not implement, write code, or modify source files — this skill only creates the spec.
 
+Converse and write the spec in the language the user writes in.
+
 ## Zoom & Tour Integration
 
 **Zoom Levels:** L5:Domain → L4:System → L3:Component → L2:Function → L1:Line
