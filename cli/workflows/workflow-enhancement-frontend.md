@@ -6,13 +6,13 @@
 
 ```
 /clear
-/sdd-frontend:frontend-enhancement `<enhancement definition>`
+/frontend-enhancement `<enhancement definition>`
 ```
 
 → **Human review** — Check plan, approve implementation
 
 ```
-/sdd-frontend:verify-with-playwright-mcp
+/verify-with-playwright-mcp
 ```
 
 → **Human review** — Approve verification

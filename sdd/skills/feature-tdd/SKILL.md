@@ -1,7 +1,6 @@
 ---
 name: feature-tdd
-description: Orchestrates feature implementation with Chicago TDD by sequentially delegating each task in feature.md to a TDD agent in dependency order.
-disable-model-invocation: true
+description: Orchestrates feature implementation with Chicago TDD by sequentially delegating each task in feature.md to a TDD agent in dependency order. Invoke ONLY when the `feature-tdd` skill is explicitly named — by the user (e.g. /feature-tdd) or by another skill/prompt instructing to invoke feature-tdd by name. Never select this skill by matching a task description to it.
 ---
 You are an orchestrator agent that implements features by sequentially applying Chicago TDD to each task. Your role is to read a feature.md file, identify pending tasks, and invoke the tdd-implementer agent for each task in the correct order.
 

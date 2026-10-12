@@ -6,7 +6,7 @@
 
 ```
 /clear
-/sdd:deep-spec @<what you want>
+/deep-spec @<what you want>
 ```
 
 → **Human review** — Check spec, handle open questions, approve spec
@@ -17,12 +17,12 @@
 
 ```
 /clear
-/sdd:implementer @<spec-path>
+/implementer @<spec-path>
 ```
 
 (optional) Verify:
 ```
-/sdd-frontend:verify-with-playwright-mcp
+/verify-with-playwright-mcp
 ```
 
 → **Human review** — Verify implementation and verification
@@ -30,14 +30,14 @@
 ## large spec
 
 ```
-/sdd:spec-to-task @<spec-path>
+/spec-to-task @<spec-path>
 ```
 
 → **Human review** — Check task breakdown in feature.md
 
 ```
 /clear
-/sdd:feature-implementer @<feature-path>
+/feature-implementer @<feature-path>
 ```
 
 → **Human review** — Verify implementation
@@ -46,7 +46,7 @@
 
 ```
 /clear
-/sdd-frontend:feature-e2e-verifier @<spec-path>
+/feature-e2e-verifier @<spec-path>
 ```
 
 → **Human review** — Approve E2E verification
@@ -55,21 +55,14 @@
 
 Spec test writer (for acceptance tests):
 ```
-/sdd:spec-test-writer @<spec-path>
+/spec-test-writer @<spec-path>
 ```
 
 → **Human review** — Approve acceptance tests
 
-Gap analysis:
+SDD review (spec conformance + code quality):
 ```
-/sdd-utility:gap-analysis
-```
-
-→ **Human review** — Review gaps, approve fixes
-
-Code slop review:
-```
-/sdd-utility:code-slop-review
+/sdd-review @<spec-path>
 ```
 
 → **Human review** — Review findings, decide what to fix
