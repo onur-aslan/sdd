@@ -76,7 +76,7 @@ npx @onuraslan/sdd@latest workflow
 
 This will:
 - Ask you to choose: Feature Development, Bug Fix, or Enhancement
-- Ask if it's Backend, Frontend, Both, or Web
+- Ask if it's Backend, Frontend, Both, Web, or Core
 - Write the selected workflow to `docs/workflow.md`
 
 You can also select non-interactively:
@@ -85,7 +85,7 @@ You can also select non-interactively:
 npx @onuraslan/sdd@latest workflow --type feature --scope backend
 ```
 
-The `web` scope generates a one-shot autonomous pipeline (`feature-web-developer`) for feature development.
+The `web` scope generates a one-shot autonomous pipeline (`feature-web-developer`) for feature development, including E2E verification. The `core` scope generates the domain-agnostic one-shot pipeline (`feature-developer`) — implement then report-only review, with no E2E verification.
 
 **2. Follow the steps in `docs/workflow.md`:**
 
@@ -115,13 +115,21 @@ One command runs the whole pipeline autonomously (implement → E2E verify → r
 deep-spec -> [large spec: spec-to-task] -> feature-web-developer -> sdd-review fix
 ```
 
-#### 4. Bug Fix
+#### 4. Feature Development (Core)
+
+One command runs the whole pipeline autonomously (implement → report-only review, no E2E verification):
+
+```
+deep-spec -> [large spec: spec-to-task] -> feature-developer -> sdd-review fix
+```
+
+#### 5. Bug Fix
 
 ```
 bug-fix-frontend|backend -> verify-with-playwright-mcp|verify-with-curl
 ```
 
-#### 5. Enhancement
+#### 6. Enhancement
 
 ```
 frontend|backend-enhancement -> verify-with-playwright-mcp|verify-with-curl

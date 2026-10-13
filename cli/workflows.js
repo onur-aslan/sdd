@@ -15,14 +15,16 @@ const workflowScopes = [
   { id: 'backend', name: 'Backend' },
   { id: 'frontend', name: 'Frontend' },
   { id: 'both', name: 'Both' },
-  { id: 'web', name: 'Web (one-shot autonomous pipeline)' }
+  { id: 'web', name: 'Web (one-shot autonomous pipeline)' },
+  { id: 'core', name: 'Core (one-shot autonomous pipeline, no E2E)' }
 ];
 
 const templates = {
   feature: {
     backend: 'workflow-feature-development-backend.md',
     frontend: 'workflow-feature-frontend-development.md',
-    web: 'workflow-feature-web-development.md'
+    web: 'workflow-feature-web-development.md',
+    core: 'workflow-feature-core-development.md'
   },
   'bug-fix': {
     backend: 'workflow-bug-fix-backend.md',
