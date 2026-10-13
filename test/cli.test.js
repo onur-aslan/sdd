@@ -203,13 +203,24 @@ test('workflow scope "web" uses the feature-web-developer pipeline', () => {
   assert.match(content, /\/feature-web-developer/);
 });
 
-test('workflow scopes are filtered by type: web only for feature', () => {
+test('workflow scope "core" uses the feature-developer pipeline', () => {
+  const content = buildWorkflowContent('feature', 'core');
+
+  assert.match(content, /Feature Development \(Core\)/);
+  assert.match(content, /\/feature-developer/);
+  assert.doesNotMatch(content, /\/feature-e2e-verifier/);
+});
+
+test('workflow scopes are filtered by type: web and core only for feature', () => {
   const featureScopes = getWorkflowScopes('feature').map((entry) => entry.id);
   const bugFixScopes = getWorkflowScopes('bug-fix').map((entry) => entry.id);
 
   assert.ok(featureScopes.includes('web'));
+  assert.ok(featureScopes.includes('core'));
   assert.ok(!bugFixScopes.includes('web'));
+  assert.ok(!bugFixScopes.includes('core'));
   assert.throws(() => buildWorkflowContent('bug-fix', 'web'), /only available for the feature/);
+  assert.throws(() => buildWorkflowContent('bug-fix', 'core'), /only available for the feature/);
 });
 
 test('unknown workflow selections are rejected', () => {

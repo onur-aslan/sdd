@@ -1,6 +1,6 @@
 {
   "name": "sdd-utility",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Utility skills for spec generation, glossary management, and working conventions.",
   "author": {
     "name":"Onur ASLAN"

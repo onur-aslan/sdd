@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "sdd-plugin-suite",
   "description": "Spec-Driven Development (SDD) plugin suite — core workflows, frontend, backend, and utility skills from planning to implementation.",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "owner": {
     "name": "Onur ASLAN"
   },
@@ -20,7 +20,7 @@
   "plugins": [
     {
       "name": "sdd",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "description": "Core SDD workflow - spec-driven development from planning to implementation. Includes deep-spec, spec-to-task, implementer, feature-implementer, feature-tdd, feature-developer, spec-test-writer, and sdd-review skills.",
       "author": {
         "name": "Onur ASLAN"
@@ -39,7 +39,7 @@
     },
     {
       "name": "sdd-frontend",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "description": "Frontend development skills - UI enhancement, bug fixing, and Playwright-based testing. Includes bug-fix-frontend, feature-e2e-verifier, feature-web-developer, frontend-enhancement, git-cleanup-playwright-artifacts, and verify-with-playwright-mcp skills.",
       "author": {
         "name": "Onur ASLAN"
@@ -60,7 +60,7 @@
     },
     {
       "name": "sdd-utility",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "description": "Utility skills for spec generation, glossary management, and working conventions. Includes ask-first, buy-before-build, glossary-builder, grounded-mode, init-feature, and using-glossary skills.",
       "author": {
         "name": "Onur ASLAN"
@@ -79,7 +79,7 @@
     },
     {
       "name": "sdd-backend",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "description": "Backend development skills for API, database, and server-side logic with unit testing. Includes bug-fix-backend, backend-enhancement, and verify-with-curl skills.",
       "author": {
         "name": "Onur ASLAN"

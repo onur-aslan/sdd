@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-10-13
+
+### Added
+- `core` scope in `sdd workflow` (feature type only): generates a one-shot workflow built around `feature-developer` (`sdd workflow --type feature --scope core`).
+
 ## [3.1.0] - 2026-10-13
 
 > ℹ️ The npm `3.0.0` package was published before the skills below were deleted from the repository, so they still shipped inside the `3.0.0` tarball. This release is where they are actually removed for end users.
