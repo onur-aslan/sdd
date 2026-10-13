@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-10-13
+
+> ℹ️ The npm `3.0.0` package was published before the skills below were deleted from the repository, so they still shipped inside the `3.0.0` tarball. This release is where they are actually removed for end users.
+
+### Added
+- `feature-developer` skill in the `sdd` plugin: a one-shot pipeline that takes a `spec.md` or `feature.md` path, implements it (`implementer` for a spec, `feature-implementer`/`feature-tdd` for a feature), then runs a report-only `sdd-review` — fully autonomously, no prompts. Unlike `feature-web-developer`, it performs no E2E verification.
+
+### Removed
+- `gap-analysis` skill — replaced by the Spec pass of `sdd-review`.
+- `code-slop-review` skill and its reference docs — replaced by the Slop pass of `sdd-review`.
+- `handoff` and `handoff-resume` skills.
+
 ## [3.0.0] - 2026-10-12
 
 > ⚠️ **Breaking release.** The `gap-analysis`, `code-slop-review`, `handoff`, and `handoff-resume` skills were removed; post-implementation review is now a single `/sdd-review` step. Review the Removed section before upgrading.
@@ -25,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `gap-analysis` skill — replaced by the Spec pass of `sdd-review`.
 - `code-slop-review` skill and its reference docs — replaced by the Slop pass of `sdd-review`.
 - `handoff` and `handoff-resume` skills and the README Handoff Workflow section.
+
+> ⚠️ Correction: the `3.0.0` npm package was published before these deletions were committed, so the four skills above were still present in the published `3.0.0` package. They are removed in `3.1.0` — see that release.
 
 ## [2.0.0] - 2026-10-06
 

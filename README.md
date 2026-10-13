@@ -136,6 +136,7 @@ frontend|backend-enhancement -> verify-with-playwright-mcp|verify-with-curl
 | `implementer` | `/implementer` | Implement from conversation context (no files needed) |
 | `feature-implementer` | `/feature-implementer <feature.md>` | Implement tasks sequentially |
 | `feature-tdd` | `/feature-tdd <feature.md>` | Run Chicago TDD for each task sequentially (Red-Green cycle) |
+| `feature-developer` | `/feature-developer <spec.md\|feature.md>` | One-shot pipeline: implement then report-only review, autonomously (no E2E verification) |
 | `spec-test-writer` | `/spec-test-writer <spec.md>` | Write acceptance tests in parallel |
 | `sdd-review` | `/sdd-review <spec.md>` | Post-implementation review: spec conformance (Missing/Extra/Incorrect) + code-slop findings |
 
