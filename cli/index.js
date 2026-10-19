@@ -1,18 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import readline from 'node:readline/promises';
 
 import { installSelectedSkills } from './install.js';
-import { getSkillGroups } from './skills.js';
+import { getSkillGroups, getSkillsForGroup } from './skills.js';
 import { askInteractiveInstall } from './prompts.js';
 import { askWorkflowSelection, writeWorkflow } from './workflows.js';
+import { resolveTargetPath, targets } from './targets.js';
 
 const packageJsonPath = fileURLToPath(new URL('../package.json', import.meta.url));
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 
 function formatHelp() {
-  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n  --scope <backend|frontend|both|web|core>\n\nOptions:\n  --help\n  --version`;
+  const targetIds = Object.keys(targets).join('|');
+  const pluginIds = Object.keys(getSkillGroups()).join(', ');
+
+  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nInstall options (for "sdd install"):\n  --target <${targetIds}>\n  --user              Install to the user directory instead of the current project\n  --all               Install every plugin (${pluginIds})\n  --non-interactive   Skip the interactive prompts\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n\nOptions:\n  --help\n  --version`;
 }
 
 function readFlagValue(args, flag) {
@@ -61,13 +64,18 @@ export async function run(argv = process.argv.slice(2)) {
       return `Installed ${result.installedCount} skills to ${result.installRoot}.`;
     }
 
-    const requestedTargets = args.includes('--all') ? Object.keys(getSkillGroups()) : ['core'];
-    const targetId = args.includes('--target') ? args[args.indexOf('--target') + 1] : 'claude';
+    const requestedPlugins = args.includes('--all') ? Object.keys(getSkillGroups()) : ['sdd'];
+    const targetId = args.includes('--target') ? readFlagValue(args, '--target') : 'claude';
+
+    if (!targetId) {
+      throw new Error('Missing value for --target.');
+    }
+
     const scope = args.includes('--user') ? 'user' : 'project';
 
     const result = await installSelectedSkills({
       targetId,
-      plugins: requestedTargets,
+      plugins: requestedPlugins,
       scope,
       version: packageJson.version
     });
@@ -78,25 +86,59 @@ export async function run(argv = process.argv.slice(2)) {
   if (command === 'workflow') {
     const args = rest;
     let type = readFlagValue(args, '--type');
-    let scope = readFlagValue(args, '--scope');
 
-    if ((!type || !scope) && process.stdin.isTTY) {
-      const selection = await askWorkflowSelection({ type, scope });
+    if (!type && process.stdin.isTTY) {
+      const selection = await askWorkflowSelection({ type });
       type = selection.type;
-      scope = selection.scope;
     }
 
-    if (!type || !scope) {
-      throw new Error('Missing --type and --scope for non-interactive workflow generation.');
+    if (!type) {
+      throw new Error('Missing --type for non-interactive workflow generation.');
     }
 
-    const result = writeWorkflow({ type, scope, cwd: process.cwd() });
+    const result = writeWorkflow({ type, cwd: process.cwd() });
 
-    return `Wrote ${result.type} (${result.scope}) workflow to ${result.path}.`;
+    return `Wrote ${result.type} workflow to ${result.path}.`;
   }
 
   if (command === 'list') {
-    return `SDD ${packageJson.version}\nInstalled targets:\nClaude Code`;
+    const lines = [`SDD ${packageJson.version}`, 'Installed targets:'];
+
+    for (const targetId of Object.keys(targets)) {
+      const installs = [];
+
+      for (const targetScope of ['project', 'user']) {
+        const { metadataPath, installRoot } = resolveTargetPath(targetId, targetScope, process.cwd());
+
+        if (!fs.existsSync(metadataPath)) {
+          continue;
+        }
+
+        let plugins = [];
+
+        try {
+          plugins = JSON.parse(fs.readFileSync(metadataPath, 'utf8')).plugins || [];
+        } catch {
+          plugins = [];
+        }
+
+        if (plugins.length === 0) {
+          installs.push(`${targetScope}: unknown plugin selection`);
+          continue;
+        }
+
+        const expectedSkills = plugins.flatMap((pluginId) => getSkillsForGroup(pluginId));
+        const presentSkills = expectedSkills.filter((skillName) => fs.existsSync(path.join(installRoot, skillName)));
+
+        installs.push(`${targetScope}: ${plugins.join(', ')} (${presentSkills.length}/${expectedSkills.length} skills)`);
+      }
+
+      lines.push(installs.length > 0
+        ? `  ${targets[targetId].name}: ${installs.join('; ')}`
+        : `  ${targets[targetId].name}: not installed`);
+    }
+
+    return lines.join('\n');
   }
 
   if (command === 'update') {

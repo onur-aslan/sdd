@@ -7,18 +7,19 @@ import assert from 'node:assert/strict';
 import { targets, resolveTargetPath } from '../cli/targets.js';
 import { getSkillGroups, getSkillsForGroup } from '../cli/skills.js';
 import { installSelectedSkills } from '../cli/install.js';
-import { buildWorkflowContent, getWorkflowScopes, writeWorkflow } from '../cli/workflows.js';
+import { buildWorkflowContent, getWorkflowTypes, writeWorkflow } from '../cli/workflows.js';
 import { run } from '../cli/index.js';
 
-test('supported targets include Claude Code and Cursor', () => {
-  assert.ok(targets.claude);
-  assert.ok(targets.cursor);
+test('supported targets are Claude Code, Cursor, Codex, and OpenCode', () => {
+  assert.deepEqual(Object.keys(targets).sort(), ['claude', 'codex', 'cursor', 'opencode']);
   assert.equal(targets.claude.skillDirectory, '.claude/skills');
+  assert.equal(targets.codex.skillDirectory, '.agents/skills');
+  assert.throws(() => resolveTargetPath('windsurf', 'project', process.cwd()), /Unknown installation target/);
 });
 
-test('skill groups cover core frontend backend and utility', () => {
+test('skill groups cover sdd and vibecoding only', () => {
   const groups = getSkillGroups();
-  assert.deepEqual(Object.keys(groups).sort(), ['backend', 'core', 'frontend', 'utility']);
+  assert.deepEqual(Object.keys(groups).sort(), ['sdd', 'vibecoding']);
 });
 
 test('OpenCode uses the global config directory for user-scoped installs', () => {
@@ -51,14 +52,14 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
   try {
     const claudeResult = await installSelectedSkills({
       targetId: 'claude',
-      plugins: ['core', 'frontend'],
+      plugins: ['sdd'],
       scope: 'project',
       cwd: tempRoot,
       version: '1.0.2'
     });
 
     assert.ok(fs.existsSync(path.join(tempRoot, '.claude', 'skills', 'deep-spec', 'SKILL.md')));
-    const expectedCount = getSkillsForGroup('core').length + getSkillsForGroup('frontend').length;
+    const expectedCount = getSkillsForGroup('sdd').length;
     assert.equal(claudeResult.installedCount, expectedCount);
     assert.ok(!fs.existsSync(path.join(tempRoot, '.mcp.json')));
 
@@ -71,7 +72,7 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
 
     await installSelectedSkills({
       targetId: 'claude',
-      plugins: ['frontend'],
+      plugins: ['sdd'],
       scope: 'user',
       cwd: tempRoot,
       version: '1.0.2'
@@ -88,7 +89,7 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
   const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-codex-'));
   await installSelectedSkills({
     targetId: 'codex',
-    plugins: ['frontend'],
+    plugins: ['sdd'],
     scope: 'project',
     cwd: codexRoot,
     version: '1.0.2'
@@ -97,22 +98,167 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
   const codexConfig = fs.readFileSync(path.join(codexRoot, '.codex', 'config.toml'), 'utf8');
   assert.match(codexConfig, /\[mcp_servers\.playwright\]/);
   assert.match(codexConfig, /command = "npx"/);
-  assert.match(codexConfig, /args = \["@playwright\/mcp"\]/);
+  assert.match(codexConfig, /args = \["-y", "@playwright\/mcp"\]/);
+
+  assert.ok(fs.existsSync(path.join(codexRoot, '.agents', 'skills', 'deep-spec', 'SKILL.md')));
+  assert.ok(!fs.existsSync(path.join(codexRoot, '.codex', 'skills')));
 
   const opencodeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-opencode-'));
   await installSelectedSkills({
     targetId: 'opencode',
-    plugins: ['frontend'],
+    plugins: ['sdd'],
     scope: 'project',
     cwd: opencodeRoot,
     version: '1.0.2'
   });
 
   const opencodeConfig = JSON.parse(fs.readFileSync(path.join(opencodeRoot, 'opencode.json'), 'utf8'));
-  assert.ok(opencodeConfig.mcp.playwright);
-  assert.equal(opencodeConfig.mcp.playwright.type, 'local');
-  assert.deepEqual(opencodeConfig.mcp.playwright.command, ['npx', '-y', '@playwright/mcp']);
-  assert.equal(opencodeConfig.mcp.playwright.enabled, true);
+  assert.deepEqual(opencodeConfig.mcp.playwright, {
+    type: 'local',
+    command: ['npx', '-y', '@playwright/mcp'],
+    enabled: true
+  });
+  assert.equal(opencodeConfig.mcp.servers, undefined);
+});
+
+test('vibecoding install does not configure the Playwright MCP server', async () => {
+  const vibecodingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-vibecoding-'));
+
+  await installSelectedSkills({
+    targetId: 'opencode',
+    plugins: ['vibecoding'],
+    scope: 'project',
+    cwd: vibecodingRoot,
+    version: '1.0.2'
+  });
+
+  assert.ok(fs.existsSync(path.join(vibecodingRoot, '.opencode', 'skills', 'ask-first', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(vibecodingRoot, '.opencode', 'skills', 'git-cleanup-playwright-artifacts', 'SKILL.md')));
+  assert.ok(!fs.existsSync(path.join(vibecodingRoot, 'opencode.json')));
+});
+
+test('Cursor installs configure the Playwright MCP server', async () => {
+  const cursorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-cursor-'));
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: cursorRoot,
+    version: '1.0.2'
+  });
+
+  const cursorConfig = JSON.parse(fs.readFileSync(path.join(cursorRoot, '.cursor', 'mcp.json'), 'utf8'));
+  assert.deepEqual(cursorConfig.mcpServers.playwright, { command: 'npx', args: ['-y', '@playwright/mcp'] });
+});
+
+test('existing MCP servers are preserved when the Playwright entry is written', async () => {
+  const cursorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-cursor-merge-'));
+  fs.mkdirSync(path.join(cursorRoot, '.cursor'), { recursive: true });
+  fs.writeFileSync(
+    path.join(cursorRoot, '.cursor', 'mcp.json'),
+    JSON.stringify({ mcpServers: { existing: { command: 'node', args: ['server.js'] } } }, null, 2),
+    'utf8'
+  );
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: cursorRoot,
+    version: '1.0.2'
+  });
+
+  const cursorConfig = JSON.parse(fs.readFileSync(path.join(cursorRoot, '.cursor', 'mcp.json'), 'utf8'));
+  assert.deepEqual(cursorConfig.mcpServers.existing, { command: 'node', args: ['server.js'] });
+  assert.ok(cursorConfig.mcpServers.playwright);
+
+  const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-codex-merge-'));
+  fs.mkdirSync(path.join(codexRoot, '.codex'), { recursive: true });
+  fs.writeFileSync(
+    path.join(codexRoot, '.codex', 'config.toml'),
+    '[mcp_servers.existing]\r\ncommand = "node"\r\nargs = ["server.js"]\r\n',
+    'utf8'
+  );
+
+  await installSelectedSkills({
+    targetId: 'codex',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: codexRoot,
+    version: '1.0.2'
+  });
+
+  await installSelectedSkills({
+    targetId: 'codex',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: codexRoot,
+    version: '1.0.2'
+  });
+
+  const codexConfig = fs.readFileSync(path.join(codexRoot, '.codex', 'config.toml'), 'utf8');
+  assert.match(codexConfig, /\[mcp_servers\.existing\]/);
+  assert.match(codexConfig, /args = \["server\.js"\]/);
+  assert.equal(codexConfig.match(/\[mcp_servers\.playwright\]/g).length, 1);
+  assert.ok(!/(^|[^\r])\n/.test(codexConfig), 'config.toml must keep the CRLF line endings it had');
+
+  const opencodeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-opencode-merge-'));
+  fs.writeFileSync(
+    path.join(opencodeRoot, 'opencode.json'),
+    JSON.stringify({
+      model: 'anthropic/claude-sonnet-4-5',
+      mcp: {
+        servers: { existing: { type: 'remote', url: 'https://mcp.example.com/mcp' } }
+      }
+    }, null, 2),
+    'utf8'
+  );
+
+  await installSelectedSkills({
+    targetId: 'opencode',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: opencodeRoot,
+    version: '1.0.2'
+  });
+
+  const opencodeConfig = JSON.parse(fs.readFileSync(path.join(opencodeRoot, 'opencode.json'), 'utf8'));
+  assert.equal(opencodeConfig.model, 'anthropic/claude-sonnet-4-5');
+  assert.deepEqual(opencodeConfig.mcp.servers.existing, { type: 'remote', url: 'https://mcp.example.com/mcp' });
+  assert.deepEqual(opencodeConfig.mcp.playwright, {
+    type: 'local',
+    command: ['npx', '-y', '@playwright/mcp'],
+    enabled: true
+  });
+});
+
+test('an unparseable MCP config file is left untouched', async () => {
+  const cursorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-cursor-broken-'));
+  const originalWarn = console.warn;
+  const warnings = [];
+  const brokenConfig = '{\n  // keep my comment\n  "mcpServers": {\n  }\n';
+
+  fs.mkdirSync(path.join(cursorRoot, '.cursor'), { recursive: true });
+  fs.writeFileSync(path.join(cursorRoot, '.cursor', 'mcp.json'), brokenConfig, 'utf8');
+  console.warn = (message) => warnings.push(message);
+
+  try {
+    await installSelectedSkills({
+      targetId: 'cursor',
+      plugins: ['sdd'],
+      scope: 'project',
+      cwd: cursorRoot,
+      version: '4.0.0'
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(fs.readFileSync(path.join(cursorRoot, '.cursor', 'mcp.json'), 'utf8'), brokenConfig);
+  assert.ok(fs.existsSync(path.join(cursorRoot, '.cursor', 'skills', 'deep-spec', 'SKILL.md')));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /is not valid JSON/);
 });
 
 test('reinstalling skills overwrites existing copies by default', async () => {
@@ -120,7 +266,7 @@ test('reinstalling skills overwrites existing copies by default', async () => {
 
   await installSelectedSkills({
     targetId: 'claude',
-    plugins: ['core'],
+    plugins: ['sdd'],
     scope: 'project',
     cwd: tempRoot,
     version: '1.0.2'
@@ -128,7 +274,7 @@ test('reinstalling skills overwrites existing copies by default', async () => {
 
   await installSelectedSkills({
     targetId: 'claude',
-    plugins: ['core'],
+    plugins: ['sdd'],
     scope: 'project',
     cwd: tempRoot,
     version: '1.0.2'
@@ -157,7 +303,7 @@ test('duplicate Claude MCP server entries are treated as a successful no-op', as
   try {
     await assert.doesNotReject(() => installSelectedSkills({
       targetId: 'claude',
-      plugins: ['frontend'],
+      plugins: ['sdd'],
       scope: 'user',
       cwd: tempRoot,
       version: '1.0.2'
@@ -172,58 +318,139 @@ test('help output includes install and version commands', async () => {
   assert.match(output, /Usage:/);
   assert.match(output, /install/);
   assert.match(output, /workflow/);
+  assert.match(output, /--type <feature\|bug-fix\|enhancement>/);
+  assert.match(output, /--target <claude\|cursor\|codex\|opencode>/);
+  assert.match(output, /--non-interactive/);
+  assert.doesNotMatch(output, /--scope/);
   assert.match(output, /--version/);
+});
+
+test('install rejects a --target flag without a value', async () => {
+  await assert.rejects(
+    () => run(['install', '--non-interactive', '--target']),
+    /Missing value for --target/
+  );
+});
+
+test('list reports the installation state of every supported target', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-list-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-list-home-'));
+  const originalCwd = process.cwd();
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
+  const sddSkillCount = getSkillsForGroup('sdd').length;
+
+  try {
+    process.chdir(tempRoot);
+    process.env.USERPROFILE = fakeHome;
+    process.env.HOME = fakeHome;
+
+    const emptyOutput = await run(['list']);
+    assert.match(emptyOutput, /Claude Code: not installed/);
+    assert.match(emptyOutput, /Cursor: not installed/);
+    assert.match(emptyOutput, /Codex: not installed/);
+    assert.match(emptyOutput, /OpenCode: not installed/);
+
+    await installSelectedSkills({
+      targetId: 'cursor',
+      plugins: ['sdd'],
+      scope: 'project',
+      cwd: tempRoot,
+      version: '4.0.0'
+    });
+
+    const output = await run(['list']);
+    assert.match(output, new RegExp(`Cursor: project: sdd \\(${sddSkillCount}/${sddSkillCount} skills\\)`));
+    assert.match(output, /Claude Code: not installed/);
+    assert.match(output, /OpenCode: not installed/);
+  } finally {
+    process.chdir(originalCwd);
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
+  }
+});
+
+test('a missing Claude CLI falls back to writing .mcp.json instead of failing', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-fallback-'));
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-missing-'));
+  const originalPath = process.env.PATH;
+  const originalWarn = console.warn;
+  const warnings = [];
+
+  if (process.platform === 'win32') {
+    fs.writeFileSync(
+      path.join(fakeBin, 'claude.cmd'),
+      "@echo off\r\necho 'claude' is not recognized as an internal or external command 1>&2\r\nexit /b 1\r\n"
+    );
+  } else {
+    const cmdPath = path.join(fakeBin, 'claude');
+    fs.writeFileSync(cmdPath, '#!/bin/sh\necho "claude: command not found" >&2\nexit 1\n');
+    fs.chmodSync(cmdPath, 0o755);
+  }
+
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`;
+  console.warn = (message) => warnings.push(message);
+
+  try {
+    await installSelectedSkills({
+      targetId: 'claude',
+      plugins: ['sdd'],
+      scope: 'project',
+      cwd: tempRoot,
+      version: '4.0.0'
+    });
+  } finally {
+    process.env.PATH = originalPath;
+    console.warn = originalWarn;
+  }
+
+  const fallbackConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, '.mcp.json'), 'utf8'));
+  assert.deepEqual(fallbackConfig.mcpServers.playwright, { command: 'npx', args: ['-y', '@playwright/mcp'] });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Claude CLI was not found/);
 });
 
 test('workflow generation writes the selected template to docs/workflow.md', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-workflow-'));
 
-  const result = writeWorkflow({ type: 'feature', scope: 'backend', cwd: tempRoot });
+  const result = writeWorkflow({ type: 'feature', cwd: tempRoot });
 
   assert.equal(result.path, path.join(tempRoot, 'docs', 'workflow.md'));
 
   const content = fs.readFileSync(result.path, 'utf8');
-  assert.match(content, /Feature Development \(Backend\)/);
+  assert.match(content, /Feature Development/);
   assert.match(content, /Generated by sdd workflow/);
   assert.match(content, /\/deep-spec/);
 });
 
-test('workflow scope "both" uses the frontend template as the fullstack guide', () => {
-  const bothContent = buildWorkflowContent('bug-fix', 'both');
-  const frontendContent = buildWorkflowContent('bug-fix', 'frontend');
+test('workflow templates are domain-agnostic and use the surviving skills', () => {
+  const featureContent = buildWorkflowContent('feature');
+  const bugFixContent = buildWorkflowContent('bug-fix');
+  const enhancementContent = buildWorkflowContent('enhancement');
 
-  assert.match(bothContent, /Bug Fix \(Frontend\)/);
-  assert.equal(bothContent, frontendContent);
+  assert.match(featureContent, /\/sdd-developer/);
+  assert.match(featureContent, /\/spec-to-task/);
+  assert.doesNotMatch(featureContent, /\/implementer/);
+  assert.doesNotMatch(featureContent, /\/feature-implementer/);
+  assert.doesNotMatch(featureContent, /\/feature-web-developer/);
+  assert.doesNotMatch(featureContent, /\/verify-with-curl/);
+  assert.doesNotMatch(featureContent, /\/verify-with-playwright-mcp/);
+  assert.doesNotMatch(featureContent, /\/sdd-review/);
+  assert.doesNotMatch(featureContent, /\/spec-test-writer/);
+
+  assert.match(bugFixContent, /Bug Fix/);
+  assert.match(bugFixContent, /\/bug-fix/);
+
+  assert.match(enhancementContent, /Enhancement/);
+  assert.match(enhancementContent, /\/enhancement/);
 });
 
-test('workflow scope "web" uses the feature-web-developer pipeline', () => {
-  const content = buildWorkflowContent('feature', 'web');
-
-  assert.match(content, /Feature Development \(Web\)/);
-  assert.match(content, /\/feature-web-developer/);
-});
-
-test('workflow scope "core" uses the feature-developer pipeline', () => {
-  const content = buildWorkflowContent('feature', 'core');
-
-  assert.match(content, /Feature Development \(Core\)/);
-  assert.match(content, /\/feature-developer/);
-  assert.doesNotMatch(content, /\/feature-e2e-verifier/);
-});
-
-test('workflow scopes are filtered by type: web and core only for feature', () => {
-  const featureScopes = getWorkflowScopes('feature').map((entry) => entry.id);
-  const bugFixScopes = getWorkflowScopes('bug-fix').map((entry) => entry.id);
-
-  assert.ok(featureScopes.includes('web'));
-  assert.ok(featureScopes.includes('core'));
-  assert.ok(!bugFixScopes.includes('web'));
-  assert.ok(!bugFixScopes.includes('core'));
-  assert.throws(() => buildWorkflowContent('bug-fix', 'web'), /only available for the feature/);
-  assert.throws(() => buildWorkflowContent('bug-fix', 'core'), /only available for the feature/);
+test('workflow types cover feature, bug-fix, and enhancement', () => {
+  const types = getWorkflowTypes().map((entry) => entry.id);
+  assert.deepEqual(types, ['feature', 'bug-fix', 'enhancement']);
 });
 
 test('unknown workflow selections are rejected', () => {
-  assert.throws(() => buildWorkflowContent('nope', 'backend'), /Unknown workflow type/);
-  assert.throws(() => buildWorkflowContent('feature', 'nope'), /Unknown workflow scope/);
+  assert.throws(() => buildWorkflowContent('nope'), /Unknown workflow type/);
+  assert.throws(() => buildWorkflowContent('feature-web'), /Unknown workflow type/);
 });

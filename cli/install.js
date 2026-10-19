@@ -1,10 +1,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getPackageSkillsRoot, getSkillGroups, getSkillsForGroup } from './skills.js';
+import { getSkillGroups, getSkillsForGroup } from './skills.js';
 import { resolveTargetPath } from './targets.js';
 
 function ensureDirectory(targetPath) {
   fs.mkdirSync(targetPath, { recursive: true });
+}
+
+// Reads an MCP config file, warning instead of destroying a file we cannot parse.
+// Returns null when the existing file is not valid JSON.
+function readJsonConfig(configPath) {
+  if (!fs.existsSync(configPath)) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch {
+    console.warn(`[sdd] ${configPath} is not valid JSON, so it was left untouched and the Playwright MCP server was not configured.`);
+    return null;
+  }
 }
 
 function writeMetadata(metadataPath, targetId, plugins, version) {
@@ -18,7 +33,7 @@ function writeMetadata(metadataPath, targetId, plugins, version) {
 }
 
 async function writeMcpConfig(target, selectedPlugins, scope = 'project', cwd = process.cwd()) {
-  if (!selectedPlugins.includes('frontend')) {
+  if (!selectedPlugins.includes('sdd')) {
     return;
   }
 
@@ -31,30 +46,44 @@ async function writeMcpConfig(target, selectedPlugins, scope = 'project', cwd = 
       : spawnSync('claude', commandArgs, { cwd, stdio: ['inherit', 'pipe', 'pipe'], env: process.env });
 
     const combinedOutput = [result.stdout?.toString() || '', result.stderr?.toString() || ''].join('\n');
+    // A missing `claude` binary is an ENOENT spawn error on POSIX, but through cmd.exe on
+    // Windows it is a "not recognized" shell error with a non-zero exit code. Both shapes
+    // mean the same thing: fall back to writing the MCP config file ourselves.
+    const claudeCliMissing = Boolean(result.error && (result.error.code === 'ENOENT' || result.error.code === 'EINVAL'))
+      || /is not recognized|command not found|no such file or directory/i.test(combinedOutput);
 
-    if (result.error && (result.error.code === 'ENOENT' || result.error.code === 'EINVAL')) {
+    if (!claudeCliMissing) {
+      if (result.error) {
+        throw new Error(`Claude MCP setup failed: ${result.error.message}`);
+      }
+
+      if (result.status !== 0) {
+        const duplicateMatch = /already exists/i.test(combinedOutput);
+        if (duplicateMatch) {
+          return;
+        }
+        throw new Error(`Claude MCP setup exited with code ${result.status}.`);
+      }
+
       return;
     }
 
-    if (result.error) {
-      throw new Error(`Claude MCP setup failed: ${result.error.message}`);
-    }
-
-    if (result.status !== 0) {
-      const duplicateMatch = /already exists/i.test(combinedOutput);
-      if (duplicateMatch) {
+    if (fs.existsSync(target.mcpConfigPath)) {
+      try {
+        JSON.parse(fs.readFileSync(target.mcpConfigPath, 'utf8'));
+      } catch {
+        console.warn(`[sdd] The Claude CLI was not found and ${target.mcpConfigPath} is not valid JSON, so it was left untouched. Register the Playwright MCP server manually.`);
         return;
       }
-      throw new Error(`Claude MCP setup exited with code ${result.status}.`);
     }
 
-    return;
+    console.warn(`[sdd] The Claude CLI was not found; writing the Playwright MCP server to ${target.mcpConfigPath} directly.`);
   }
 
   const { mcpConfigPath, mcpFormat } = target;
   const playwrightConfig = {
     command: 'npx',
-    args: ['@playwright/mcp']
+    args: ['-y', '@playwright/mcp']
   };
 
   if (mcpFormat === 'toml') {
@@ -63,25 +92,46 @@ async function writeMcpConfig(target, selectedPlugins, scope = 'project', cwd = 
     const existing = fs.existsSync(mcpConfigPath)
       ? fs.readFileSync(mcpConfigPath, 'utf8')
       : '';
-    const lines = existing.trim() ? existing.trim().split('\n') : [];
+    const lineEnding = existing.includes('\r\n') ? '\r\n' : '\n';
+    const lines = existing.trim() ? existing.trim().split(/\r?\n/) : [];
     const section = '[mcp_servers.playwright]';
     const block = [
       section,
       'command = "npx"',
-      'args = ["@playwright/mcp"]'
+      'args = ["-y", "@playwright/mcp"]'
     ];
 
-    const filtered = lines.filter((line) => !line.startsWith('[mcp_servers.playwright]') && !line.startsWith('command = ') && !line.startsWith('args = '));
-    const nextContent = [...filtered, '', ...block, ''].join('\n');
-    fs.writeFileSync(mcpConfigPath, `${nextContent}\n`, 'utf8');
+    const kept = [];
+    let skipping = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (trimmed.startsWith('[')) {
+        skipping = trimmed === section || trimmed.startsWith(`${section}.`);
+      }
+
+      if (!skipping) {
+        kept.push(line);
+      }
+    }
+
+    const sections = [kept.join(lineEnding).trim(), block.join(lineEnding)].filter(Boolean);
+    fs.writeFileSync(mcpConfigPath, `${sections.join(lineEnding + lineEnding)}${lineEnding}`, 'utf8');
     return;
   }
 
   if (mcpFormat === 'json-opencode') {
-    const existing = fs.existsSync(mcpConfigPath)
-      ? JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'))
-      : {};
+    const existing = readJsonConfig(mcpConfigPath);
 
+    if (existing === null) {
+      return;
+    }
+
+    // OpenCode 2 groups servers under `mcp.servers`, but OpenCode 1 rejects that key
+    // outright ("Invalid input mcp.servers"), which invalidates the whole config file.
+    // OpenCode's V1 migration guide keeps V1 MCP entries with a `type` working in 2,
+    // so this entry is the only shape both accept.
     const nextConfig = {
       ...existing,
       mcp: {
@@ -99,13 +149,10 @@ async function writeMcpConfig(target, selectedPlugins, scope = 'project', cwd = 
     return;
   }
 
-  let existing = {};
-  if (fs.existsSync(mcpConfigPath)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
-    } catch {
-      existing = {};
-    }
+  const existing = readJsonConfig(mcpConfigPath);
+
+  if (existing === null) {
+    return;
   }
 
   const nextConfig = {

@@ -1,0 +1,32 @@
+{
+  "name": "sdd-plugin-suite",
+  "interface": {
+    "displayName": "SDD Plugin Suite"
+  },
+  "plugins": [
+    {
+      "name": "sdd",
+      "source": {
+        "source": "local",
+        "path": "./sdd"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
+      "name": "vibecoding",
+      "source": {
+        "source": "local",
+        "path": "./vibecoding"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "utilities"
+    }
+  ]
+}
