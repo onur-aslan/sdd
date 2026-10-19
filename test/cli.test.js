@@ -7,8 +7,14 @@ import assert from 'node:assert/strict';
 import { targets, resolveTargetPath } from '../cli/targets.js';
 import { getSkillGroups, getSkillsForGroup } from '../cli/skills.js';
 import { installSelectedSkills } from '../cli/install.js';
+import { uninstallSkills } from '../cli/uninstall.js';
 import { buildWorkflowContent, getWorkflowTypes, writeWorkflow } from '../cli/workflows.js';
 import { run } from '../cli/index.js';
+
+function createSkillDirectory(skillsRoot, skillName) {
+  fs.mkdirSync(path.join(skillsRoot, skillName), { recursive: true });
+  fs.writeFileSync(path.join(skillsRoot, skillName, 'SKILL.md'), `# ${skillName}\n`, 'utf8');
+}
 
 test('supported targets are Claude Code, Cursor, Codex, and OpenCode', () => {
   assert.deepEqual(Object.keys(targets).sort(), ['claude', 'codex', 'cursor', 'opencode']);
@@ -447,6 +453,319 @@ test('a pre-4.0.0 Codex skill directory is reported and left alone', async () =>
   assert.ok(fs.existsSync(path.join(tempRoot, '.agents', 'skills', 'deep-spec', 'SKILL.md')));
 });
 
+test('uninstall removes the recorded skills, the metadata file, and the Playwright MCP server', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-'));
+  const skillsRoot = path.join(tempRoot, '.cursor', 'skills');
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: Object.keys(getSkillGroups()),
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  createSkillDirectory(skillsRoot, 'my-own-skill');
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot });
+
+  assert.equal(result.foundInstallation, true);
+  assert.deepEqual(result.removedSkills, [...getSkillsForGroup('sdd'), ...getSkillsForGroup('vibecoding')].sort());
+  assert.equal(result.targets[0].removedMetadata, true);
+  assert.equal(result.targets[0].mcp, 'removed');
+  assert.ok(!fs.existsSync(path.join(tempRoot, '.cursor', 'sdd.json')));
+  assert.ok(!fs.existsSync(path.join(tempRoot, '.cursor', 'mcp.json')), 'a config file that only held our server is dropped');
+  assert.ok(!fs.existsSync(path.join(skillsRoot, 'deep-spec')));
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'my-own-skill', 'SKILL.md')));
+});
+
+test('uninstall keeps MCP servers and skills it does not own', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-keep-'));
+  const cursorRoot = path.join(tempRoot, '.cursor');
+  const skillsRoot = path.join(cursorRoot, 'skills');
+
+  fs.mkdirSync(cursorRoot, { recursive: true });
+  fs.writeFileSync(path.join(cursorRoot, 'mcp.json'), JSON.stringify({
+    mcpServers: {
+      existing: { command: 'node', args: ['server.js'] },
+      playwright: { command: 'npx', args: ['-y', '@playwright/mcp'] }
+    }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(cursorRoot, 'sdd.json'), JSON.stringify({
+    version: '4.0.0',
+    plugins: ['sdd'],
+    skills: ['deep-spec', 'sdd-review'],
+    installedAt: '2026-01-01T00:00:00.000Z'
+  }, null, 2), 'utf8');
+  createSkillDirectory(skillsRoot, 'deep-spec');
+  createSkillDirectory(skillsRoot, 'sdd-review');
+  createSkillDirectory(skillsRoot, 'other-tool-skill');
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot });
+
+  assert.deepEqual(result.removedSkills, ['deep-spec', 'sdd-review']);
+  const config = JSON.parse(fs.readFileSync(path.join(cursorRoot, 'mcp.json'), 'utf8'));
+  assert.deepEqual(config.mcpServers, { existing: { command: 'node', args: ['server.js'] } });
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'other-tool-skill', 'SKILL.md')));
+  assert.ok(!fs.existsSync(path.join(skillsRoot, 'deep-spec')));
+});
+
+test('uninstall removes a pre-4.0.0 installation whose metadata only lists plugin ids', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-legacy-'));
+  const cursorRoot = path.join(tempRoot, '.cursor');
+  const skillsRoot = path.join(cursorRoot, 'skills');
+
+  for (const skillName of ['deep-spec', 'feature-developer', 'handoff', 'my-own-skill']) {
+    createSkillDirectory(skillsRoot, skillName);
+  }
+
+  fs.writeFileSync(path.join(cursorRoot, 'sdd.json'), JSON.stringify({
+    version: '3.1.1',
+    plugins: ['core', 'frontend'],
+    installedAt: '2026-01-01T00:00:00.000Z'
+  }, null, 2), 'utf8');
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot });
+
+  assert.deepEqual(result.removedSkills, ['deep-spec', 'feature-developer', 'handoff']);
+  assert.deepEqual(fs.readdirSync(skillsRoot), ['my-own-skill']);
+  assert.ok(!fs.existsSync(path.join(cursorRoot, 'sdd.json')));
+});
+
+test('uninstall clears a pre-4.0.0 Codex directory without touching unrecorded skills', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-codex-'));
+  const legacySkillsRoot = path.join(tempRoot, '.codex', 'skills');
+
+  createSkillDirectory(legacySkillsRoot, 'implementer');
+  createSkillDirectory(legacySkillsRoot, 'handoff-resume');
+  createSkillDirectory(legacySkillsRoot, 'not-ours');
+  createSkillDirectory(path.join(tempRoot, '.agents', 'skills'), 'deep-spec');
+  fs.writeFileSync(path.join(tempRoot, '.codex', 'sdd.json'), JSON.stringify({
+    version: '3.1.1',
+    plugins: ['core'],
+    installedAt: '2026-01-01T00:00:00.000Z'
+  }, null, 2), 'utf8');
+  fs.writeFileSync(
+    path.join(tempRoot, '.codex', 'config.toml'),
+    '[mcp_servers.playwright]\r\ncommand = "npx"\r\nargs = ["-y", "@playwright/mcp"]\r\n\r\n[mcp_servers.existing]\r\ncommand = "node"\r\nargs = ["server.js"]\r\n',
+    'utf8'
+  );
+
+  const result = await uninstallSkills({ targetIds: ['codex'], scope: 'project', cwd: tempRoot });
+
+  assert.deepEqual(result.removedSkills, []);
+  assert.deepEqual(result.targets[0].legacyCodexSkills, ['handoff-resume', 'implementer']);
+  assert.deepEqual(fs.readdirSync(legacySkillsRoot), ['not-ours']);
+  assert.ok(!fs.existsSync(path.join(tempRoot, '.codex', 'sdd.json')));
+  assert.ok(fs.existsSync(path.join(tempRoot, '.agents', 'skills', 'deep-spec', 'SKILL.md')), 'an unrecorded directory is never touched');
+
+  const codexConfig = fs.readFileSync(path.join(tempRoot, '.codex', 'config.toml'), 'utf8');
+  assert.ok(!codexConfig.includes('[mcp_servers.playwright]'));
+  assert.match(codexConfig, /\[mcp_servers\.existing\]/);
+  assert.ok(!/(^|[^\r])\n/.test(codexConfig), 'config.toml must keep the CRLF line endings it had');
+});
+
+test('uninstall --dry-run reports the cleanup without changing anything', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-dry-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-dry-home-'));
+  const originalCwd = process.cwd();
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
+  const expectedSkills = getSkillsForGroup('sdd').length + getSkillsForGroup('vibecoding').length;
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: Object.keys(getSkillGroups()),
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot, dryRun: true });
+
+  assert.equal(result.removedSkills.length, expectedSkills);
+  assert.equal(result.targets[0].mcp, 'would-remove');
+  assert.ok(fs.existsSync(path.join(tempRoot, '.cursor', 'sdd.json')), 'the metadata file survives a dry run');
+  assert.ok(fs.existsSync(path.join(tempRoot, '.cursor', 'skills', 'deep-spec', 'SKILL.md')));
+
+  try {
+    process.chdir(tempRoot);
+    process.env.USERPROFILE = fakeHome;
+    process.env.HOME = fakeHome;
+    const output = await run(['uninstall', '--target', 'cursor', '--dry-run']);
+    assert.match(output, /Dry run: nothing was removed\./);
+  } finally {
+    process.chdir(originalCwd);
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
+  }
+
+  assert.ok(fs.existsSync(path.join(tempRoot, '.cursor', 'skills', 'deep-spec', 'SKILL.md')));
+});
+
+test('uninstall --keep-mcp leaves the Playwright server registered', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-keepmcp-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-keepmcp-home-'));
+  const originalCwd = process.cwd();
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot, removeMcp: false });
+
+  assert.equal(result.targets[0].mcp, 'kept');
+  assert.ok(!fs.existsSync(path.join(tempRoot, '.cursor', 'skills', 'deep-spec')));
+
+  const config = JSON.parse(fs.readFileSync(path.join(tempRoot, '.cursor', 'mcp.json'), 'utf8'));
+  assert.ok(config.mcpServers.playwright);
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  try {
+    process.chdir(tempRoot);
+    process.env.USERPROFILE = fakeHome;
+    process.env.HOME = fakeHome;
+    const output = await run(['uninstall', '--target', 'cursor', '--keep-mcp']);
+    assert.match(output, /The Playwright MCP server was kept/);
+  } finally {
+    process.chdir(originalCwd);
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
+  }
+});
+
+test('uninstall handles the Claude MCP cleanup, missing CLI included', async () => {
+  const originalPath = process.env.PATH;
+  const originalWarn = console.warn;
+  const warnings = [];
+
+  const writeClaudeStub = (binDirectory, windowsBody, posixBody) => {
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(binDirectory, 'claude.cmd'), windowsBody);
+    } else {
+      const cmdPath = path.join(binDirectory, 'claude');
+      fs.writeFileSync(cmdPath, posixBody);
+      fs.chmodSync(cmdPath, 0o755);
+    }
+
+    process.env.PATH = `${binDirectory}${path.delimiter}${originalPath}`;
+  };
+
+  const writeClaudeInstall = (root, mcpConfig) => {
+    createSkillDirectory(path.join(root, '.claude', 'skills'), 'deep-spec');
+    fs.writeFileSync(path.join(root, '.claude', 'sdd.json'), JSON.stringify({
+      version: '4.0.0',
+      plugins: ['sdd'],
+      skills: ['deep-spec'],
+      installedAt: '2026-01-01T00:00:00.000Z'
+    }, null, 2), 'utf8');
+
+    if (mcpConfig !== undefined) {
+      fs.writeFileSync(path.join(root, '.mcp.json'), mcpConfig, 'utf8');
+    }
+  };
+
+  console.warn = (message) => warnings.push(message);
+
+  try {
+    // The CLI is installed and reports there is no server to remove.
+    const absentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-claude-absent-'));
+    const absentBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-absent-'));
+
+    writeClaudeStub(
+      absentBin,
+      '@echo off\r\necho No MCP server named playwright was found 1>&2\r\nexit /b 1\r\n',
+      "#!/bin/sh\nprintf '%s\n' 'No MCP server named playwright was found' >&2\nexit 1\n"
+    );
+    writeClaudeInstall(absentRoot);
+
+    const absentResult = await uninstallSkills({ targetIds: ['claude'], scope: 'project', cwd: absentRoot });
+
+    assert.equal(absentResult.targets[0].mcp, 'absent');
+    assert.deepEqual(absentResult.removedSkills, ['deep-spec']);
+
+    // A missing CLI falls back to editing .mcp.json directly.
+    const fallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-claude-fallback-'));
+    const fallbackBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-missing-cleanup-'));
+
+    writeClaudeStub(
+      fallbackBin,
+      "@echo off\r\necho 'claude' is not recognized as an internal or external command 1>&2\r\nexit /b 1\r\n",
+      '#!/bin/sh\necho "claude: command not found" >&2\nexit 1\n'
+    );
+    writeClaudeInstall(fallbackRoot, JSON.stringify({
+      mcpServers: {
+        existing: { command: 'node', args: ['server.js'] },
+        playwright: { command: 'npx', args: ['-y', '@playwright/mcp'] }
+      }
+    }, null, 2));
+
+    const fallbackResult = await uninstallSkills({ targetIds: ['claude'], scope: 'project', cwd: fallbackRoot });
+
+    assert.equal(fallbackResult.targets[0].mcp, 'removed');
+    assert.ok(warnings.some((message) => /Claude CLI was not found/.test(message)));
+
+    const fallbackConfig = JSON.parse(fs.readFileSync(path.join(fallbackRoot, '.mcp.json'), 'utf8'));
+    assert.deepEqual(fallbackConfig.mcpServers, { existing: { command: 'node', args: ['server.js'] } });
+
+    // An MCP config that cannot be parsed is reported and left untouched.
+    const brokenRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-claude-broken-'));
+    const brokenConfig = '{\n  // keep my comment\n  "mcpServers": {\n  }\n';
+
+    writeClaudeInstall(brokenRoot, brokenConfig);
+
+    const brokenResult = await uninstallSkills({ targetIds: ['claude'], scope: 'project', cwd: brokenRoot });
+
+    assert.equal(brokenResult.targets[0].mcp, 'skipped');
+    assert.deepEqual(brokenResult.removedSkills, ['deep-spec']);
+    assert.equal(fs.readFileSync(path.join(brokenRoot, '.mcp.json'), 'utf8'), brokenConfig);
+    assert.ok(warnings.some((message) => /is not valid JSON/.test(message)));
+  } finally {
+    process.env.PATH = originalPath;
+    console.warn = originalWarn;
+  }
+});
+
+test('uninstall reports the absence of an installation', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-none-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-uninstall-none-home-'));
+  const originalCwd = process.cwd();
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
+
+  createSkillDirectory(path.join(tempRoot, '.cursor', 'skills'), 'deep-spec');
+
+  const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot });
+
+  assert.equal(result.foundInstallation, false);
+  assert.ok(fs.existsSync(path.join(tempRoot, '.cursor', 'skills', 'deep-spec', 'SKILL.md')), 'a directory without a record is never touched');
+
+  try {
+    process.chdir(tempRoot);
+    process.env.USERPROFILE = fakeHome;
+    process.env.HOME = fakeHome;
+    const output = await run(['uninstall', '--target', 'cursor']);
+    assert.match(output, /No SDD installation was found/);
+  } finally {
+    process.chdir(originalCwd);
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
+  }
+});
+
 test('duplicate Claude MCP server entries are treated as a successful no-op', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-duplicate-mcp-'));
   const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-duplicate-'));
@@ -476,21 +795,29 @@ test('duplicate Claude MCP server entries are treated as a successful no-op', as
   }
 });
 
-test('help output includes install and version commands', async () => {
+test('help output includes install, uninstall, and version commands', async () => {
   const output = await run(['--help']);
   assert.match(output, /Usage:/);
   assert.match(output, /install/);
+  assert.match(output, /uninstall/);
   assert.match(output, /workflow/);
   assert.match(output, /--type <feature\|bug-fix\|enhancement>/);
   assert.match(output, /--target <claude\|cursor\|codex\|opencode>/);
   assert.match(output, /--non-interactive/);
+  assert.match(output, /--keep-mcp/);
+  assert.match(output, /--dry-run/);
   assert.doesNotMatch(output, /--scope/);
   assert.match(output, /--version/);
 });
 
-test('install rejects a --target flag without a value', async () => {
+test('install and uninstall reject a --target flag without a value', async () => {
   await assert.rejects(
     () => run(['install', '--non-interactive', '--target']),
+    /Missing value for --target/
+  );
+
+  await assert.rejects(
+    () => run(['uninstall', '--target']),
     /Missing value for --target/
   );
 });

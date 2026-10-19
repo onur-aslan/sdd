@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `enhancement` skill in `sdd`: domain-agnostic enhancement workflow with an approved plan and a bounded execution loop. Replaces `frontend-enhancement` and `backend-enhancement`.
 - `feature-e2e-verifier` and `sdd-developer` skills in `sdd`: `sdd-developer` is a one-shot domain-agnostic pipeline (baseline checks → implement → review and fix → per-story E2E verification, skippable via `--no-verify`).
 - Codex support: each plugin now ships a portable [Agent Plugins](https://agent-plugins.org) manifest (root `plugin.json` with `$schema`, plus `mcp.json`), and `.agents/plugins/marketplace.json` exposes both plugins as a local Codex marketplace.
+- `sdd uninstall`: removes the skills an installation recorded, its `sdd.json`, and the Playwright MCP server it registered — every target and scope by default, narrowed by `--target` and `--user`, previewable with `--dry-run`, and skippable for MCP with `--keep-mcp`. Skills and MCP servers SDD does not own are never touched, and a pre-4.0.0 Codex `.codex/skills` directory is removed with it.
 
 ### Changed
 - Renamed the `sdd-utility` plugin to `vibecoding`.
