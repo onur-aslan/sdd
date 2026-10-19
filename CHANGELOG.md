@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-10-19
+
+### Added
+- `sdd uninstall`: removes every SDD skill directory in the target (including a copy left behind by `skills.sh` or an older install), the installation's `sdd.json`, and the Playwright MCP server it registered — every target and scope by default, narrowed by `--target` and `--user`, previewable with `--dry-run`, and skippable for MCP with `--keep-mcp`. Skills and MCP servers SDD does not own are never touched, and a pre-4.0.0 Codex `.codex/skills` directory is removed with it.
+- The installer records the installed skill names in the target `sdd.json`, so the next upgrade knows which directories it owns.
+
+### Changed
+- Upgrading no longer leaves orphaned skills behind: reinstalling a target prunes the skills that left the package or the selection — including the 13 skills dropped in `4.0.0` — while unrelated skills in the same directory are left untouched. A stale pre-4.0.0 Codex `.codex/skills` directory is reported instead of deleted, because the installer cannot prove it owns every directory inside it.
+- Bumped the package, `plugin.json`, and marketplace metadata to `4.1.0`.
+
+### Fixed
+- The test suite no longer installs into the real home directory; the user-scope tests now resolve against a temporary home.
+
 ## [4.0.0] - 2026-10-19
 
 > ⚠️ **Breaking release.** The plugin suite is reduced from four plugins to two: `sdd` (core) and `vibecoding`. The `sdd-frontend` and `sdd-backend` plugins are removed, several core skills are deleted, and `sdd workflow` no longer uses scopes. Review the Changed and Removed sections before upgrading.
@@ -13,7 +26,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `enhancement` skill in `sdd`: domain-agnostic enhancement workflow with an approved plan and a bounded execution loop. Replaces `frontend-enhancement` and `backend-enhancement`.
 - `feature-e2e-verifier` and `sdd-developer` skills in `sdd`: `sdd-developer` is a one-shot domain-agnostic pipeline (baseline checks → implement → review and fix → per-story E2E verification, skippable via `--no-verify`).
 - Codex support: each plugin now ships a portable [Agent Plugins](https://agent-plugins.org) manifest (root `plugin.json` with `$schema`, plus `mcp.json`), and `.agents/plugins/marketplace.json` exposes both plugins as a local Codex marketplace.
-- `sdd uninstall`: removes every SDD skill directory in the target (including a copy left behind by `skills.sh` or an older install), the installation's `sdd.json`, and the Playwright MCP server it registered — every target and scope by default, narrowed by `--target` and `--user`, previewable with `--dry-run`, and skippable for MCP with `--keep-mcp`. Skills and MCP servers SDD does not own are never touched, and a pre-4.0.0 Codex `.codex/skills` directory is removed with it.
 
 ### Changed
 - Renamed the `sdd-utility` plugin to `vibecoding`.
@@ -28,7 +40,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reinstalling the Codex target no longer removes other MCP servers from `.codex/config.toml`; only the `[mcp_servers.playwright]` block is replaced.
 - The OpenCode target keeps the V1-compatible `mcp.playwright` entry. OpenCode 1 rejects the V2 `mcp.servers` key outright, while OpenCode 2 still accepts V1 MCP entries that carry a `type`, so this is the only shape that works on both.
 - The Codex install target now writes skills to `.agents/skills` — the location Codex scans — instead of `.codex/skills`.
-- Upgrading no longer leaves orphaned skills behind: the installer records the installed skill names in the target `sdd.json` and prunes the skills that left the package or the selection — including the 13 skills dropped in `4.0.0` — while unrelated skills in the same directory are left untouched. A stale pre-4.0.0 Codex `.codex/skills` directory is reported instead of deleted, because the installer cannot prove it owns every directory inside it.
 - `sdd/.mcp.json` now wraps the Playwright server in `mcpServers`, the shape Claude Code expects for a plugin's MCP config.
 - `sdd --help` now documents the install options (`--target`, `--user`, `--all`, `--non-interactive`), and `sdd list` reports the project- and user-scope installation state of every supported target with present/expected skill counts.
 - The Claude target no longer fails when the `claude` CLI is missing: it warns and writes the Playwright MCP server to the target's MCP config file directly. This also covers Windows, where a missing CLI surfaces as a shell "not recognized" error instead of an ENOENT spawn error.

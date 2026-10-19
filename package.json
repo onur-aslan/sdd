@@ -1,6 +1,6 @@
 {
   "name": "@onuraslan/sdd",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "type": "module",
   "description": "Spec-Driven Development skill package and interactive installer for AI coding agents.",
   "keywords": [
