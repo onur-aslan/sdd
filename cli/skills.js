@@ -21,6 +21,11 @@ export function getSkillGroups() {
   return { ...skillGroups };
 }
 
+// Every skill the package currently ships, across all plugins.
+export function getAllSkillNames() {
+  return Object.keys(skillGroups).flatMap((groupId) => getSkillsForGroup(groupId));
+}
+
 export function getSkillsForGroup(groupId) {
   const group = skillGroups[groupId];
 

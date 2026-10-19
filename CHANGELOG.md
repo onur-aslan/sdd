@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-10-19
+
+### Added
+- `sdd uninstall`: removes every SDD skill directory in the target (including a copy left behind by `skills.sh` or an older install), the installation's `sdd.json`, and the Playwright MCP server it registered — every target and scope by default, narrowed by `--target` and `--user`, previewable with `--dry-run`, and skippable for MCP with `--keep-mcp`. Skills and MCP servers SDD does not own are never touched, and a pre-4.0.0 Codex `.codex/skills` directory is removed with it.
+- The installer records the installed skill names in the target `sdd.json`, so the next upgrade knows which directories it owns.
+
+### Changed
+- Upgrading no longer leaves orphaned skills behind: reinstalling a target prunes the skills that left the package or the selection — including every name retired before 4.0.0, which a legacy install record cannot list — while unrelated skills in the same directory are left untouched. A pre-4.0.0 Codex `.codex/skills` directory is cleaned up through the same rule, gated on `.codex/sdd.json` proving the installation is ours.
+- Bumped the package, `plugin.json`, and marketplace metadata to `4.1.0`.
+
+### Fixed
+- The test suite no longer installs into the real home directory; the user-scope tests now resolve against a temporary home.
+
 ## [4.0.0] - 2026-10-19
 
 > ⚠️ **Breaking release.** The plugin suite is reduced from four plugins to two: `sdd` (core) and `vibecoding`. The `sdd-frontend` and `sdd-backend` plugins are removed, several core skills are deleted, and `sdd workflow` no longer uses scopes. Review the Changed and Removed sections before upgrading.

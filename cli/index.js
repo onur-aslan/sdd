@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { installSelectedSkills } from './install.js';
 import { getSkillGroups, getSkillsForGroup } from './skills.js';
+import { uninstallSkills } from './uninstall.js';
 import { askInteractiveInstall } from './prompts.js';
 import { askWorkflowSelection, writeWorkflow } from './workflows.js';
 import { resolveTargetPath, targets } from './targets.js';
@@ -15,7 +16,7 @@ function formatHelp() {
   const targetIds = Object.keys(targets).join('|');
   const pluginIds = Object.keys(getSkillGroups()).join(', ');
 
-  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nInstall options (for "sdd install"):\n  --target <${targetIds}>\n  --user              Install to the user directory instead of the current project\n  --all               Install every plugin (${pluginIds})\n  --non-interactive   Skip the interactive prompts\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n\nOptions:\n  --help\n  --version`;
+  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  uninstall   Remove SDD skills and the Playwright MCP server\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nInstall options (for "sdd install"):\n  --target <${targetIds}>\n  --user              Install to the user directory instead of the current project\n  --all               Install every plugin (${pluginIds})\n  --non-interactive   Skip the interactive prompts\n\nUninstall options (for "sdd uninstall"):\n  --target <${targetIds}>   Limit the cleanup to one target\n  --user                   Limit the cleanup to the user directory\n  --keep-mcp               Keep the Playwright MCP server registered\n  --dry-run                Report what would be removed without changing anything\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n\nOptions:\n  --help\n  --version`;
 }
 
 function readFlagValue(args, flag) {
@@ -32,6 +33,61 @@ function readFlagValue(args, flag) {
   }
 
   return value;
+}
+
+function formatInstallResult(result) {
+  const summary = `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+  const removedSkills = result.removedSkills || [];
+  const legacyCodexSkills = result.legacyCodexSkills || [];
+  const notes = [];
+
+  if (removedSkills.length > 0) {
+    notes.push(`Removed ${removedSkills.length} skill(s) that are no longer part of SDD: ${removedSkills.join(', ')}.`);
+  }
+  if (legacyCodexSkills.length > 0) {
+    notes.push(`Removed ${legacyCodexSkills.length} skill(s) from the pre-4.0.0 .codex/skills directory.`);
+  }
+
+  return [summary, ...notes].join(' ');
+}
+
+function formatUninstallResult(result) {
+  const installedTargets = result.targets.filter((entry) => entry.installed);
+
+  if (installedTargets.length === 0) {
+    return 'No SDD installation was found for the selected targets and scopes.';
+  }
+
+  const lines = result.dryRun ? ['Dry run: nothing was removed.'] : [];
+
+  for (const entry of installedTargets) {
+    const removed = [];
+
+    if (entry.removedSkills.length > 0) {
+      removed.push(`${entry.removedSkills.length} skill(s)`);
+    }
+    if (entry.removedMetadata) {
+      removed.push('sdd.json');
+    }
+    if (entry.legacyCodexSkills.length > 0) {
+      removed.push(`${entry.legacyCodexSkills.length} skill(s) from the pre-4.0.0 .codex/skills directory`);
+    }
+
+    const mcpNotes = {
+      removed: ' The Playwright MCP server was removed.',
+      'would-remove': ' The Playwright MCP server would be removed.',
+      kept: ' The Playwright MCP server was kept (--keep-mcp).',
+      skipped: ' The MCP config file could not be parsed, so the Playwright entry was left untouched.',
+      absent: ''
+    };
+    const summary = removed.length > 0
+      ? `${result.dryRun ? 'would remove' : 'removed'} ${removed.join(', ')}.`
+      : 'nothing to remove.';
+
+    lines.push(`${entry.targetName} (${entry.scope}): ${summary}${mcpNotes[entry.mcp] || ''}`);
+  }
+
+  return lines.join('\n');
 }
 
 export async function run(argv = process.argv.slice(2)) {
@@ -61,7 +117,7 @@ export async function run(argv = process.argv.slice(2)) {
         version: packageJson.version
       });
 
-      return `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+      return formatInstallResult(result);
     }
 
     const requestedPlugins = args.includes('--all') ? Object.keys(getSkillGroups()) : ['sdd'];
@@ -80,7 +136,26 @@ export async function run(argv = process.argv.slice(2)) {
       version: packageJson.version
     });
 
-    return `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+    return formatInstallResult(result);
+  }
+
+  if (command === 'uninstall') {
+    const args = rest;
+    const hasTargetFlag = args.includes('--target');
+    const targetId = hasTargetFlag ? readFlagValue(args, '--target') : null;
+
+    if (hasTargetFlag && !targetId) {
+      throw new Error('Missing value for --target.');
+    }
+
+    const result = await uninstallSkills({
+      targetIds: targetId ? [targetId] : null,
+      scope: args.includes('--user') ? 'user' : null,
+      removeMcp: !args.includes('--keep-mcp'),
+      dryRun: args.includes('--dry-run')
+    });
+
+    return formatUninstallResult(result);
   }
 
   if (command === 'workflow') {
