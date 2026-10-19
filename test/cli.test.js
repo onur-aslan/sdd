@@ -499,11 +499,13 @@ test('uninstall keeps MCP servers and skills it does not own', async () => {
   }, null, 2), 'utf8');
   createSkillDirectory(skillsRoot, 'deep-spec');
   createSkillDirectory(skillsRoot, 'sdd-review');
+  // An SDD skill the record does not mention, e.g. a copy skills.sh left behind.
+  createSkillDirectory(skillsRoot, 'ask-first');
   createSkillDirectory(skillsRoot, 'other-tool-skill');
 
   const result = await uninstallSkills({ targetIds: ['cursor'], scope: 'project', cwd: tempRoot });
 
-  assert.deepEqual(result.removedSkills, ['deep-spec', 'sdd-review']);
+  assert.deepEqual(result.removedSkills, ['ask-first', 'deep-spec', 'sdd-review']);
   const config = JSON.parse(fs.readFileSync(path.join(cursorRoot, 'mcp.json'), 'utf8'));
   assert.deepEqual(config.mcpServers, { existing: { command: 'node', args: ['server.js'] } });
   assert.ok(fs.existsSync(path.join(skillsRoot, 'other-tool-skill', 'SKILL.md')));

@@ -10,20 +10,19 @@ function currentSkillNames() {
   return Object.keys(getSkillGroups()).flatMap((pluginId) => getSkillsForGroup(pluginId));
 }
 
-// The skill directories an install record can own. A pre-4.0.0 record lists plugin ids the current
-// package no longer knows (core/frontend/backend/utility), so it can only be resolved to "every
-// skill this package has ever shipped" — which is exactly what a full uninstall wants.
+function sddSkillNames() {
+  return [...currentSkillNames(), ...retiredSkillNames];
+}
+
+// Uninstalling means "remove SDD", not "remove this record": every skill directory the package has
+// ever shipped is a candidate, so a copy left behind by skills.sh or by an older install whose
+// record was overwritten goes away too. Recorded names are added as well, for a skill a newer
+// package introduced that this version does not know. Names the package does not know are never
+// touched.
 function ownedSkillNames(metadata) {
-  const recordedSkills = Array.isArray(metadata.skills) ? metadata.skills : [];
+  const recordedSkills = Array.isArray(metadata?.skills) ? metadata.skills : [];
 
-  if (recordedSkills.length === 0) {
-    return [...currentSkillNames(), ...retiredSkillNames];
-  }
-
-  return [
-    ...recordedSkills,
-    ...(metadata.plugins || []).flatMap((pluginId) => getSkillsForGroup(pluginId))
-  ];
+  return [...sddSkillNames(), ...recordedSkills];
 }
 
 function removeDirectoryIfEmpty(directory) {
@@ -79,7 +78,7 @@ export async function uninstallSkills({
       // A pre-4.0.0 Codex installation is removed completely, but only for the directory names
       // this package has ever shipped, so unrelated skills inside `.codex/skills` stay put.
       const legacyCodexSkills = legacyCodexInstall
-        ? removeSkillDirectories(legacyCodexInstall.skillsRoot, [...currentSkillNames(), ...retiredSkillNames], { dryRun })
+        ? removeSkillDirectories(legacyCodexInstall.skillsRoot, sddSkillNames(), { dryRun })
         : [];
 
       if (!dryRun && legacyCodexInstall) {
