@@ -39,8 +39,11 @@ test('OpenCode uses the global config directory for user-scoped installs', () =>
 test('install uses the Claude CLI for MCP setup instead of editing config files directly', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-install-'));
   const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-bin-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-home-'));
   const logPath = path.join(fakeBin, 'claude-log.txt');
   const originalPath = process.env.PATH;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
 
   if (process.platform === 'win32') {
     const cmdPath = path.join(fakeBin, 'claude.cmd');
@@ -54,6 +57,9 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
   }
 
   process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`;
+  // A user-scoped install resolves against the home directory, so isolate it.
+  process.env.USERPROFILE = fakeHome;
+  process.env.HOME = fakeHome;
 
   try {
     const claudeResult = await installSelectedSkills({
@@ -87,8 +93,11 @@ test('install uses the Claude CLI for MCP setup instead of editing config files 
     const userArgs = fs.readFileSync(logPath, 'utf8').trim();
     assert.match(userArgs, /--scope/);
     assert.match(userArgs, /user/);
+    assert.ok(fs.existsSync(path.join(fakeHome, '.claude', 'skills', 'deep-spec', 'SKILL.md')), 'the user install belongs in the isolated home');
   } finally {
     process.env.PATH = originalPath;
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
     delete process.env.CLAUDE_LOG;
   }
 
@@ -771,7 +780,10 @@ test('uninstall reports the absence of an installation', async () => {
 test('duplicate Claude MCP server entries are treated as a successful no-op', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-duplicate-mcp-'));
   const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-duplicate-'));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-duplicate-home-'));
   const originalPath = process.env.PATH;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalHome = process.env.HOME;
 
   if (process.platform === 'win32') {
     const cmdPath = path.join(fakeBin, 'claude.cmd');
@@ -783,6 +795,9 @@ test('duplicate Claude MCP server entries are treated as a successful no-op', as
   }
 
   process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`;
+  // A user-scoped install resolves against the home directory, so isolate it.
+  process.env.USERPROFILE = fakeHome;
+  process.env.HOME = fakeHome;
 
   try {
     await assert.doesNotReject(() => installSelectedSkills({
@@ -792,8 +807,12 @@ test('duplicate Claude MCP server entries are treated as a successful no-op', as
       cwd: tempRoot,
       version: '1.0.2'
     }));
+
+    assert.ok(fs.existsSync(path.join(fakeHome, '.claude', 'skills', 'deep-spec', 'SKILL.md')), 'the user install belongs in the isolated home');
   } finally {
     process.env.PATH = originalPath;
+    process.env.USERPROFILE = originalUserProfile;
+    process.env.HOME = originalHome;
   }
 });
 
