@@ -1,8 +1,22 @@
 {
   "name": "@onuraslan/sdd",
-  "version": "3.1.1",
+  "version": "4.0.0",
   "type": "module",
   "description": "Spec-Driven Development skill package and interactive installer for AI coding agents.",
+  "keywords": [
+    "spec-driven",
+    "plan-driven",
+    "sdd",
+    "feature-development",
+    "vibecoding",
+    "utility"
+  ],
+  "homepage": "https://github.com/onur-aslan/sdd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/onur-aslan/sdd.git"
+  },
+  "author": "Onur ASLAN",
   "license": "MIT",
   "bin": {
     "sdd": "bin/sdd.js"
@@ -11,9 +25,7 @@
     "bin",
     "cli",
     "sdd",
-    "sdd-backend",
-    "sdd-frontend",
-    "sdd-utility",
+    "vibecoding",
     "README.md",
     "LICENSE"
   ],

@@ -68,4 +68,4 @@ B) Done — finalize spec
 
 ## Next Step
 
-**→ Small scope: `/implementer` · Large scope: `/spec-to-task`**
+**→ One-shot pipeline: `/sdd-developer` · Large scope: `/spec-to-task` → `/feature-tdd`**

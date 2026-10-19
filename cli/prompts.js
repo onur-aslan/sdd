@@ -10,7 +10,7 @@ export async function promptTarget(rl) {
     console.log(`${index + 1}. ${target.name}`);
   });
 
-  const answer = await rl.question('Choose a target [1-5]: ');
+  const answer = await rl.question(`Choose a target [1-${targetEntries.length}]: `);
   const index = Number.parseInt(answer, 10) - 1;
 
   if (!Number.isInteger(index) || index < 0 || index >= targetEntries.length) {

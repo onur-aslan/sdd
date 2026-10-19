@@ -19,16 +19,9 @@ export const targets = {
   codex: {
     id: 'codex',
     name: 'Codex',
-    skillDirectory: '.codex/skills',
+    skillDirectory: '.agents/skills',
     mcpConfigPath: '.codex/config.toml',
     mcpFormat: 'toml'
-  },
-  windsurf: {
-    id: 'windsurf',
-    name: 'Windsurf',
-    skillDirectory: '.windsurf/skills',
-    mcpConfigPath: '.windsurf/mcp.json',
-    mcpFormat: 'json'
   },
   opencode: {
     id: 'opencode',

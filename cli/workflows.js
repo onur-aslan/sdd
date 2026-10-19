@@ -11,76 +11,34 @@ const workflowTypes = [
   { id: 'enhancement', name: 'Enhancement' }
 ];
 
-const workflowScopes = [
-  { id: 'backend', name: 'Backend' },
-  { id: 'frontend', name: 'Frontend' },
-  { id: 'both', name: 'Both' },
-  { id: 'web', name: 'Web (one-shot autonomous pipeline)' },
-  { id: 'core', name: 'Core (one-shot autonomous pipeline, no E2E)' }
-];
-
 const templates = {
-  feature: {
-    backend: 'workflow-feature-development-backend.md',
-    frontend: 'workflow-feature-frontend-development.md',
-    web: 'workflow-feature-web-development.md',
-    core: 'workflow-feature-core-development.md'
-  },
-  'bug-fix': {
-    backend: 'workflow-bug-fix-backend.md',
-    frontend: 'workflow-bug-fix-frontend.md'
-  },
-  enhancement: {
-    backend: 'workflow-enhancement-backend.md',
-    frontend: 'workflow-enhancement-frontend.md'
-  }
+  feature: 'workflow-feature-development.md',
+  'bug-fix': 'workflow-bug-fix.md',
+  enhancement: 'workflow-enhancement.md'
 };
 
 export function getWorkflowTypes() {
   return workflowTypes.map((entry) => ({ ...entry }));
 }
 
-export function getWorkflowScopes(type = null) {
-  if (!type || !templates[type]) {
-    return workflowScopes.map((entry) => ({ ...entry }));
-  }
+export function buildWorkflowContent(type) {
+  const template = templates[type];
 
-  return workflowScopes
-    .filter((entry) => entry.id === 'both' || templates[type][entry.id])
-    .map((entry) => ({ ...entry }));
-}
-
-export function buildWorkflowContent(type, scope) {
-  const typeTemplates = templates[type];
-
-  if (!typeTemplates) {
+  if (!template) {
     throw new Error(`Unknown workflow type: ${type}`);
   }
 
-  if (!workflowScopes.some((entry) => entry.id === scope)) {
-    throw new Error(`Unknown workflow scope: ${scope}`);
-  }
-
-  if (scope === 'both') {
-    // Fullstack selected: use the frontend development workflow as the guide
-    return fs.readFileSync(path.join(workflowsDir, typeTemplates['frontend']), 'utf8').trimEnd();
-  }
-
-  if (!typeTemplates[scope]) {
-    throw new Error(`The "${scope}" scope is only available for the feature workflow type.`);
-  }
-
-  return fs.readFileSync(path.join(workflowsDir, typeTemplates[scope]), 'utf8').trimEnd();
+  return fs.readFileSync(path.join(workflowsDir, template), 'utf8').trimEnd();
 }
 
-export function writeWorkflow({ type, scope, cwd = process.cwd() }) {
+export function writeWorkflow({ type, cwd = process.cwd() }) {
   const docsDirectory = path.join(cwd, 'docs');
   fs.mkdirSync(docsDirectory, { recursive: true });
 
   const targetPath = path.join(docsDirectory, 'workflow.md');
-  fs.writeFileSync(targetPath, `${buildWorkflowContent(type, scope)}\n`, 'utf8');
+  fs.writeFileSync(targetPath, `${buildWorkflowContent(type)}\n`, 'utf8');
 
-  return { type, scope, path: targetPath };
+  return { type, path: targetPath };
 }
 
 async function promptChoice(rl, title, entries) {
@@ -99,7 +57,7 @@ async function promptChoice(rl, title, entries) {
   return entries[index].id;
 }
 
-export async function askWorkflowSelection({ type = null, scope = null } = {}) {
+export async function askWorkflowSelection({ type = null } = {}) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -107,10 +65,8 @@ export async function askWorkflowSelection({ type = null, scope = null } = {}) {
 
   try {
     const selectedType = type ?? (await promptChoice(rl, 'What do you want to do?', workflowTypes));
-    const scopeEntries = getWorkflowScopes(selectedType);
-    const selectedScope = scope ?? (await promptChoice(rl, 'Choose a scope:', scopeEntries));
 
-    return { type: selectedType, scope: selectedScope };
+    return { type: selectedType };
   } finally {
     rl.close();
   }

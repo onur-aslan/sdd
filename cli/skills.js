@@ -5,34 +5,20 @@ import { fileURLToPath } from 'node:url';
 const packageRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 export const skillGroups = {
-  core: {
-    id: 'core',
-    name: 'Core',
+  sdd: {
+    id: 'sdd',
+    name: 'SDD',
     pluginRoot: path.join(packageRoot, 'sdd')
   },
-  frontend: {
-    id: 'frontend',
-    name: 'Frontend',
-    pluginRoot: path.join(packageRoot, 'sdd-frontend')
-  },
-  backend: {
-    id: 'backend',
-    name: 'Backend',
-    pluginRoot: path.join(packageRoot, 'sdd-backend')
-  },
-  utility: {
-    id: 'utility',
-    name: 'Utility',
-    pluginRoot: path.join(packageRoot, 'sdd-utility')
+  vibecoding: {
+    id: 'vibecoding',
+    name: 'Vibecoding',
+    pluginRoot: path.join(packageRoot, 'vibecoding')
   }
 };
 
 export function getSkillGroups() {
   return { ...skillGroups };
-}
-
-export function getPackageSkillsRoot() {
-  return packageRoot;
 }
 
 export function getSkillsForGroup(groupId) {

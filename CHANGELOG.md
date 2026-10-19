@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-10-19
+
+> ⚠️ **Breaking release.** The plugin suite is reduced from four plugins to two: `sdd` (core) and `vibecoding`. The `sdd-frontend` and `sdd-backend` plugins are removed, several core skills are deleted, and `sdd workflow` no longer uses scopes. Review the Changed and Removed sections before upgrading.
+
+### Added
+- `bug-fix` skill in `sdd`: domain-agnostic bug fixing with a bounded reproduce → fix → verify loop. Replaces `bug-fix-frontend` and `bug-fix-backend`.
+- `enhancement` skill in `sdd`: domain-agnostic enhancement workflow with an approved plan and a bounded execution loop. Replaces `frontend-enhancement` and `backend-enhancement`.
+- `feature-e2e-verifier` and `sdd-developer` skills in `sdd`: `sdd-developer` is a one-shot domain-agnostic pipeline (baseline checks → implement → review and fix → per-story E2E verification, skippable via `--no-verify`).
+- Codex support: each plugin now ships a portable [Agent Plugins](https://agent-plugins.org) manifest (root `plugin.json` with `$schema`, plus `mcp.json`), and `.agents/plugins/marketplace.json` exposes both plugins as a local Codex marketplace.
+
+### Changed
+- Renamed the `sdd-utility` plugin to `vibecoding`.
+- Moved the `init-feature` skill from `vibecoding` into `sdd` and renamed it to `load-project-features` (`/load-project-features`).
+- Moved the `git-cleanup-playwright-artifacts` skill into the `vibecoding` plugin.
+- Moved the `feature-e2e-verifier` skill from the removed `sdd-frontend` plugin into `sdd`.
+- `sdd workflow` is now domain-agnostic: only `--type <feature|bug-fix|enhancement>` remains; the `backend`/`frontend`/`both`/`web`/`core` scopes and their templates were removed. The feature workflow is built around `sdd-developer`.
+- `sdd-developer` and `feature-tdd` accept an optional spec/feature path, in addition to `max_turns` and `--no-verify`.
+- `feature-tdd` now runs the same pipeline as `sdd-developer` — baseline checks → per-task Chicago TDD → review and fix → per-story E2E verification.
+- Playwright MCP is now configured when the `sdd` plugin is installed (previously triggered by `sdd-frontend`). For Codex it is written to `.codex/config.toml`.
+- The Playwright MCP server is registered as `npx -y @playwright/mcp` on every path — Claude, Codex, Cursor, OpenCode, and the plugin `mcp.json` files — so `npx` never blocks on an install confirmation prompt.
+- Reinstalling the Codex target no longer removes other MCP servers from `.codex/config.toml`; only the `[mcp_servers.playwright]` block is replaced.
+- The OpenCode target keeps the V1-compatible `mcp.playwright` entry. OpenCode 1 rejects the V2 `mcp.servers` key outright, while OpenCode 2 still accepts V1 MCP entries that carry a `type`, so this is the only shape that works on both.
+- The Codex install target now writes skills to `.agents/skills` — the location Codex scans — instead of `.codex/skills`.
+- `sdd/.mcp.json` now wraps the Playwright server in `mcpServers`, the shape Claude Code expects for a plugin's MCP config.
+- `sdd --help` now documents the install options (`--target`, `--user`, `--all`, `--non-interactive`), and `sdd list` reports the project- and user-scope installation state of every supported target with present/expected skill counts.
+- The Claude target no longer fails when the `claude` CLI is missing: it warns and writes the Playwright MCP server to the target's MCP config file directly. This also covers Windows, where a missing CLI surfaces as a shell "not recognized" error instead of an ENOENT spawn error.
+- The installer never overwrites an existing MCP config file it cannot parse; it warns and leaves the file untouched. The Codex `.codex/config.toml` writer also keeps the file's existing line endings.
+- Bumped the package, `plugin.json`, and marketplace metadata to `4.0.0`.
+
+### Removed
+- `sdd-frontend` and `sdd-backend` plugins and their skills: `bug-fix-frontend`, `bug-fix-backend`, `frontend-enhancement`, `backend-enhancement`, `feature-web-developer`, `verify-with-playwright-mcp`, and `verify-with-curl`.
+- `feature-developer`, `implementer`, and `feature-implementer` skills from the `sdd` plugin.
+- `spec-test-writer` and `sdd-review` skills from the `sdd` plugin; the `sdd-developer` and `feature-tdd` pipelines review and fix their changes inline.
+- The `.github/workflows/npm-release.yml` GitHub Actions workflow; npm releases are published manually.
+- The `Windsurf` install target. Windsurf now stores MCP servers in a single global `mcp_config.json`, so the target could not configure MCP reliably; installs are supported for Claude Code, Cursor, Codex, and OpenCode.
+
 ## [3.1.1] - 2026-10-13
 
 ### Added
