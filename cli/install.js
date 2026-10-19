@@ -22,10 +22,92 @@ function readJsonConfig(configPath) {
   }
 }
 
-function writeMetadata(metadataPath, targetId, plugins, version) {
+// Skills that shipped before 4.0.0 and are no longer part of this package. A pre-4.0.0 install
+// record only stored plugin ids, so it cannot name them; without this list the upgrade would
+// leave them on disk forever, and agents keep discovering orphaned skills by directory name.
+const legacyRemovedSkills = [
+  'backend-enhancement',
+  'bug-fix-backend',
+  'bug-fix-frontend',
+  'feature-developer',
+  'feature-implementer',
+  'feature-web-developer',
+  'frontend-enhancement',
+  'implementer',
+  'init-feature',
+  'sdd-review',
+  'spec-test-writer',
+  'verify-with-curl',
+  'verify-with-playwright-mcp'
+];
+
+function readMetadata(metadataPath) {
+  if (!fs.existsSync(metadataPath)) {
+    return null;
+  }
+
+  try {
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+
+    return metadata && typeof metadata === 'object' ? metadata : null;
+  } catch {
+    return null;
+  }
+}
+
+// Only directory names are ever deleted, and only ones this installer recorded itself, so a
+// hand-edited metadata file cannot point the cleanup outside the install root.
+function isSafeSkillName(skillName) {
+  return typeof skillName === 'string'
+    && skillName.length > 0
+    && skillName !== '.'
+    && skillName !== '..'
+    && skillName === path.basename(skillName);
+}
+
+function removeStaleSkills(installRoot, previousSkills, currentSkills) {
+  const removed = [];
+
+  for (const skillName of previousSkills) {
+    if (currentSkills.has(skillName) || !isSafeSkillName(skillName)) {
+      continue;
+    }
+
+    const destination = path.join(installRoot, skillName);
+
+    if (!fs.existsSync(destination)) {
+      continue;
+    }
+
+    fs.rmSync(destination, { recursive: true, force: true });
+    removed.push(skillName);
+  }
+
+  return removed.sort();
+}
+
+// Codex 3.1.1 and earlier installed skills to .codex/skills; 4.0.0 uses .agents/skills. The old
+// directory is never read again, but nothing else removes it, so point it out on upgrade.
+function warnAboutLegacyCodexSkills(target) {
+  if (target.id !== 'codex') {
+    return;
+  }
+
+  const legacySkillsRoot = path.resolve(target.baseDir, '.codex', 'skills');
+  const legacyMetadataPath = path.resolve(target.baseDir, '.codex', 'sdd.json');
+
+  if (!fs.existsSync(legacySkillsRoot) || !fs.existsSync(legacyMetadataPath)) {
+    return;
+  }
+
+  console.warn(`[sdd] ${legacySkillsRoot} holds a pre-4.0.0 SDD installation that Codex no longer reads. Delete that directory to finish the upgrade.`);
+}
+
+function writeMetadata(metadataPath, plugins, version, skills) {
   const metadata = {
     version,
     plugins,
+    skills,
     installedAt: new Date().toISOString()
   };
 
@@ -183,7 +265,9 @@ export async function installSelectedSkills({
   const target = resolveTargetPath(targetId, scope, cwd);
 
   ensureDirectory(target.installRoot);
+  warnAboutLegacyCodexSkills(target);
   let installedCount = 0;
+  const selectedSkills = new Set();
 
   for (const pluginId of consistentPlugins) {
     const pluginConfig = getSkillGroups()[pluginId];
@@ -199,6 +283,7 @@ export async function installSelectedSkills({
     const skills = getSkillsForGroup(pluginId);
 
     for (const skillName of skills) {
+      selectedSkills.add(skillName);
       const source = path.join(groupDirectory, skillName);
       const destination = path.join(target.installRoot, skillName);
 
@@ -223,11 +308,23 @@ export async function installSelectedSkills({
     }
   }
 
-  writeMetadata(target.metadataPath, targetId, consistentPlugins, version);
+  // Skills the previous install recorded, plus the pre-4.0.0 removals when that install predates
+  // the skill list in the metadata. Everything written above is exempt through selectedSkills.
+  const previousMetadata = readMetadata(target.metadataPath);
+  const previousSkills = Array.isArray(previousMetadata?.skills) ? previousMetadata.skills : [];
+  const isLegacyInstall = previousMetadata !== null && previousSkills.length === 0;
+  const removedSkills = removeStaleSkills(
+    target.installRoot,
+    [...previousSkills, ...(isLegacyInstall ? legacyRemovedSkills : [])],
+    selectedSkills
+  );
+
+  writeMetadata(target.metadataPath, consistentPlugins, version, [...selectedSkills].sort());
   await writeMcpConfig(target, consistentPlugins, scope, cwd);
 
   return {
     installedCount,
+    removedSkills,
     targetId,
     plugins: consistentPlugins,
     scope,

@@ -284,6 +284,169 @@ test('reinstalling skills overwrites existing copies by default', async () => {
   assert.ok(fs.existsSync(deepSpecPath));
 });
 
+test('an upgrade removes the skills a pre-4.0.0 install left behind', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-upgrade-'));
+  const skillsRoot = path.join(tempRoot, '.cursor', 'skills');
+  // A pre-4.0.0 install: the removed skills, one skill that survives, and one that is not ours.
+  const legacySkills = ['deep-spec', 'feature-developer', 'implementer', 'init-feature', 'my-own-skill'];
+
+  for (const skillName of legacySkills) {
+    fs.mkdirSync(path.join(skillsRoot, skillName), { recursive: true });
+    fs.writeFileSync(path.join(skillsRoot, skillName, 'SKILL.md'), `# ${skillName}\n`, 'utf8');
+  }
+
+  fs.writeFileSync(
+    path.join(tempRoot, '.cursor', 'sdd.json'),
+    JSON.stringify({ version: '3.1.1', plugins: ['sdd', 'vibecoding'], installedAt: '2026-01-01T00:00:00.000Z' }, null, 2),
+    'utf8'
+  );
+
+  const result = await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: Object.keys(getSkillGroups()),
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  assert.deepEqual(result.removedSkills, ['feature-developer', 'implementer', 'init-feature']);
+
+  for (const removedSkill of ['feature-developer', 'implementer', 'init-feature']) {
+    assert.ok(!fs.existsSync(path.join(skillsRoot, removedSkill)), `${removedSkill} must be pruned`);
+  }
+
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'load-project-features', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'my-own-skill', 'SKILL.md')), 'skills that are not SDD skills must survive');
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(tempRoot, '.cursor', 'sdd.json'), 'utf8'));
+  const expectedSkills = [...getSkillsForGroup('sdd'), ...getSkillsForGroup('vibecoding')].sort();
+  assert.equal(metadata.version, '4.0.0');
+  assert.deepEqual(metadata.skills, expectedSkills);
+});
+
+test('a shrinking plugin selection removes the skills of the deselected plugins', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-shrink-'));
+  const skillsRoot = path.join(tempRoot, '.cursor', 'skills');
+  const originalCwd = process.cwd();
+  const vibecodingSkills = getSkillsForGroup('vibecoding');
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: Object.keys(getSkillGroups()),
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'ask-first', 'SKILL.md')));
+
+  const result = await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  assert.deepEqual(result.removedSkills, vibecodingSkills);
+  assert.ok(!fs.existsSync(path.join(skillsRoot, 'ask-first')));
+  assert.ok(fs.existsSync(path.join(skillsRoot, 'deep-spec', 'SKILL.md')));
+
+  await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: Object.keys(getSkillGroups()),
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  try {
+    process.chdir(tempRoot);
+    // The default selection is sdd only, so the vibecoding skills have to go again.
+    const output = await run(['install', '--non-interactive', '--target', 'cursor']);
+    assert.match(output, new RegExp(`Removed ${vibecodingSkills.length} skill\\(s\\)`));
+    assert.match(output, /ask-first/);
+  } finally {
+    process.chdir(originalCwd);
+  }
+});
+
+test('cleanup never follows a path out of the install root', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-cleanup-safety-'));
+  const cursorRoot = path.join(tempRoot, '.cursor');
+
+  fs.mkdirSync(path.join(cursorRoot, 'outside'), { recursive: true });
+  fs.writeFileSync(path.join(cursorRoot, 'outside', 'keep.txt'), 'keep\n', 'utf8');
+  fs.writeFileSync(
+    path.join(cursorRoot, 'sdd.json'),
+    JSON.stringify({
+      version: '4.0.0',
+      plugins: ['sdd'],
+      skills: ['../outside', '.', '..', 'absent-skill'],
+      installedAt: '2026-01-01T00:00:00.000Z'
+    }, null, 2),
+    'utf8'
+  );
+
+  const result = await installSelectedSkills({
+    targetId: 'cursor',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.0.0'
+  });
+
+  assert.deepEqual(result.removedSkills, []);
+  assert.ok(fs.existsSync(path.join(cursorRoot, 'outside', 'keep.txt')));
+  assert.ok(fs.existsSync(path.join(cursorRoot, 'skills', 'deep-spec', 'SKILL.md')));
+});
+
+test('a pre-4.0.0 Codex skill directory is reported and left alone', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-codex-legacy-'));
+  const legacySkill = path.join(tempRoot, '.codex', 'skills', 'deep-spec', 'SKILL.md');
+  const originalWarn = console.warn;
+  const warnings = [];
+
+  fs.mkdirSync(path.dirname(legacySkill), { recursive: true });
+  fs.writeFileSync(legacySkill, '# deep-spec\n', 'utf8');
+  console.warn = (message) => warnings.push(message);
+
+  try {
+    // Without the old metadata file the directory is not proven to be ours, so stay quiet.
+    await installSelectedSkills({
+      targetId: 'codex',
+      plugins: ['sdd'],
+      scope: 'project',
+      cwd: tempRoot,
+      version: '4.0.0'
+    });
+
+    assert.deepEqual(warnings, []);
+
+    fs.writeFileSync(
+      path.join(tempRoot, '.codex', 'sdd.json'),
+      JSON.stringify({ version: '3.1.1', plugins: ['sdd'], installedAt: '2026-01-01T00:00:00.000Z' }, null, 2),
+      'utf8'
+    );
+
+    await installSelectedSkills({
+      targetId: 'codex',
+      plugins: ['sdd'],
+      scope: 'project',
+      cwd: tempRoot,
+      version: '4.0.0'
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /pre-4\.0\.0/);
+  assert.match(warnings[0], /\.codex/);
+  assert.ok(fs.existsSync(legacySkill), 'the stale directory is reported, never deleted');
+  assert.ok(fs.existsSync(path.join(tempRoot, '.agents', 'skills', 'deep-spec', 'SKILL.md')));
+});
+
 test('duplicate Claude MCP server entries are treated as a successful no-op', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-duplicate-mcp-'));
   const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-claude-duplicate-'));

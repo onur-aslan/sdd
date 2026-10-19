@@ -36,6 +36,10 @@ If you installed it globally instead of via npx, update it with:
 npm update -g @onuraslan/sdd
 ```
 
+Rerunning the installer also cleans up: skills that are no longer part of the package, or that belong to a plugin you did not select, are removed from the target skill directory. Nothing else in that directory is touched.
+
+> Upgrading on Codex from 3.1.1 or earlier leaves the old `.codex/skills` directory behind, since 4.0.0 installs into `.agents/skills`. The installer reports it; delete the directory to finish the upgrade.
+
 ### Option 2: Claude Code plugin marketplace
 
 ```bash

@@ -34,6 +34,17 @@ function readFlagValue(args, flag) {
   return value;
 }
 
+function formatInstallResult(result) {
+  const summary = `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+  const removedSkills = result.removedSkills || [];
+
+  if (removedSkills.length === 0) {
+    return summary;
+  }
+
+  return `${summary} Removed ${removedSkills.length} skill(s) that are no longer part of SDD: ${removedSkills.join(', ')}.`;
+}
+
 export async function run(argv = process.argv.slice(2)) {
   if (argv.includes('--help') || argv.includes('-h')) {
     return formatHelp();
@@ -61,7 +72,7 @@ export async function run(argv = process.argv.slice(2)) {
         version: packageJson.version
       });
 
-      return `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+      return formatInstallResult(result);
     }
 
     const requestedPlugins = args.includes('--all') ? Object.keys(getSkillGroups()) : ['sdd'];
@@ -80,7 +91,7 @@ export async function run(argv = process.argv.slice(2)) {
       version: packageJson.version
     });
 
-    return `Installed ${result.installedCount} skills to ${result.installRoot}.`;
+    return formatInstallResult(result);
   }
 
   if (command === 'workflow') {
