@@ -302,8 +302,9 @@ test('reinstalling skills overwrites existing copies by default', async () => {
 test('an upgrade removes the skills a pre-4.0.0 install left behind', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-upgrade-'));
   const skillsRoot = path.join(tempRoot, '.cursor', 'skills');
-  // A pre-4.0.0 install: the removed skills, one skill that survives, and one that is not ours.
-  const legacySkills = ['deep-spec', 'feature-developer', 'implementer', 'init-feature', 'my-own-skill'];
+  // A pre-4.0.0 install: skills dropped in 4.0.0, a skill retired earlier, one that survives, and
+  // one that is not ours.
+  const legacySkills = ['deep-spec', 'feature-developer', 'handoff-resume', 'implementer', 'init-feature', 'my-own-skill'];
 
   for (const skillName of legacySkills) {
     fs.mkdirSync(path.join(skillsRoot, skillName), { recursive: true });
@@ -324,9 +325,9 @@ test('an upgrade removes the skills a pre-4.0.0 install left behind', async () =
     version: '4.0.0'
   });
 
-  assert.deepEqual(result.removedSkills, ['feature-developer', 'implementer', 'init-feature']);
+  assert.deepEqual(result.removedSkills, ['feature-developer', 'handoff-resume', 'implementer', 'init-feature']);
 
-  for (const removedSkill of ['feature-developer', 'implementer', 'init-feature']) {
+  for (const removedSkill of ['feature-developer', 'handoff-resume', 'implementer', 'init-feature']) {
     assert.ok(!fs.existsSync(path.join(skillsRoot, removedSkill)), `${removedSkill} must be pruned`);
   }
 
@@ -416,49 +417,43 @@ test('cleanup never follows a path out of the install root', async () => {
   assert.ok(fs.existsSync(path.join(cursorRoot, 'skills', 'deep-spec', 'SKILL.md')));
 });
 
-test('a pre-4.0.0 Codex skill directory is reported and left alone', async () => {
+test('a pre-4.0.0 Codex skill directory is cleaned up when its record proves it is ours', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-codex-legacy-'));
-  const legacySkill = path.join(tempRoot, '.codex', 'skills', 'deep-spec', 'SKILL.md');
-  const originalWarn = console.warn;
-  const warnings = [];
+  const legacySkillsRoot = path.join(tempRoot, '.codex', 'skills');
 
-  fs.mkdirSync(path.dirname(legacySkill), { recursive: true });
-  fs.writeFileSync(legacySkill, '# deep-spec\n', 'utf8');
-  console.warn = (message) => warnings.push(message);
+  createSkillDirectory(legacySkillsRoot, 'deep-spec');
+  createSkillDirectory(legacySkillsRoot, 'handoff-resume');
+  createSkillDirectory(legacySkillsRoot, 'not-ours');
 
-  try {
-    // Without the old metadata file the directory is not proven to be ours, so stay quiet.
-    await installSelectedSkills({
-      targetId: 'codex',
-      plugins: ['sdd'],
-      scope: 'project',
-      cwd: tempRoot,
-      version: '4.0.0'
-    });
+  // Without the old metadata file the directory is not proven to be ours, so leave it alone.
+  const first = await installSelectedSkills({
+    targetId: 'codex',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.1.0'
+  });
 
-    assert.deepEqual(warnings, []);
+  assert.deepEqual(first.legacyCodexSkills, []);
+  assert.ok(fs.existsSync(path.join(legacySkillsRoot, 'deep-spec', 'SKILL.md')));
 
-    fs.writeFileSync(
-      path.join(tempRoot, '.codex', 'sdd.json'),
-      JSON.stringify({ version: '3.1.1', plugins: ['sdd'], installedAt: '2026-01-01T00:00:00.000Z' }, null, 2),
-      'utf8'
-    );
+  fs.writeFileSync(
+    path.join(tempRoot, '.codex', 'sdd.json'),
+    JSON.stringify({ version: '3.1.1', plugins: ['sdd'], installedAt: '2026-01-01T00:00:00.000Z' }, null, 2),
+    'utf8'
+  );
 
-    await installSelectedSkills({
-      targetId: 'codex',
-      plugins: ['sdd'],
-      scope: 'project',
-      cwd: tempRoot,
-      version: '4.0.0'
-    });
-  } finally {
-    console.warn = originalWarn;
-  }
+  const second = await installSelectedSkills({
+    targetId: 'codex',
+    plugins: ['sdd'],
+    scope: 'project',
+    cwd: tempRoot,
+    version: '4.1.0'
+  });
 
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /pre-4\.0\.0/);
-  assert.match(warnings[0], /\.codex/);
-  assert.ok(fs.existsSync(legacySkill), 'the stale directory is reported, never deleted');
+  assert.deepEqual(second.legacyCodexSkills, ['deep-spec', 'handoff-resume']);
+  assert.deepEqual(fs.readdirSync(legacySkillsRoot).sort(), ['not-ours'], 'skills SDD does not own must survive');
+  assert.ok(!fs.existsSync(path.join(tempRoot, '.codex', 'sdd.json')), 'the stale record is removed');
   assert.ok(fs.existsSync(path.join(tempRoot, '.agents', 'skills', 'deep-spec', 'SKILL.md')));
 });
 

@@ -2,17 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { removeMcpConfig } from './mcp.js';
-import { findLegacyCodexInstall, readMetadata, removeSkillDirectories, retiredSkillNames } from './metadata.js';
-import { getSkillGroups, getSkillsForGroup } from './skills.js';
+import { findLegacyCodexInstall, knownSkillNames, readMetadata, removeSkillDirectories } from './metadata.js';
 import { resolveTargetPath, targets } from './targets.js';
-
-function currentSkillNames() {
-  return Object.keys(getSkillGroups()).flatMap((pluginId) => getSkillsForGroup(pluginId));
-}
-
-function sddSkillNames() {
-  return [...currentSkillNames(), ...retiredSkillNames];
-}
 
 // Uninstalling means "remove SDD", not "remove this record": every skill directory the package has
 // ever shipped is a candidate, so a copy left behind by skills.sh or by an older install whose
@@ -22,7 +13,7 @@ function sddSkillNames() {
 function ownedSkillNames(metadata) {
   const recordedSkills = Array.isArray(metadata?.skills) ? metadata.skills : [];
 
-  return [...sddSkillNames(), ...recordedSkills];
+  return [...knownSkillNames(), ...recordedSkills];
 }
 
 function removeDirectoryIfEmpty(directory) {
@@ -78,7 +69,7 @@ export async function uninstallSkills({
       // A pre-4.0.0 Codex installation is removed completely, but only for the directory names
       // this package has ever shipped, so unrelated skills inside `.codex/skills` stay put.
       const legacyCodexSkills = legacyCodexInstall
-        ? removeSkillDirectories(legacyCodexInstall.skillsRoot, sddSkillNames(), { dryRun })
+        ? removeSkillDirectories(legacyCodexInstall.skillsRoot, knownSkillNames(), { dryRun })
         : [];
 
       if (!dryRun && legacyCodexInstall) {

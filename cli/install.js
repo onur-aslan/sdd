@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { writeMcpConfig } from './mcp.js';
-import { findLegacyCodexInstall, readMetadata, removeSkillDirectories, skillsRemovedInFourOh, writeMetadata } from './metadata.js';
+import { findLegacyCodexInstall, knownSkillNames, readMetadata, removeSkillDirectories, writeMetadata } from './metadata.js';
 import { getSkillGroups, getSkillsForGroup } from './skills.js';
 import { resolveTargetPath } from './targets.js';
 
@@ -10,20 +10,30 @@ function ensureDirectory(targetPath) {
   fs.mkdirSync(targetPath, { recursive: true });
 }
 
-// Codex 3.1.1 and earlier installed skills to .codex/skills; 4.0.0 uses .agents/skills. The old
-// directory is never read again, but nothing else removes it, so point it out on upgrade.
-function warnAboutLegacyCodexSkills(target) {
+// Codex 3.1.1 and earlier installed skills to .codex/skills; 4.0.0 uses .agents/skills. Codex never
+// reads the old directory again, so finish the upgrade by removing the names this package shipped
+// there. The old metadata file is what proves the installation is ours; without it the directory is
+// left untouched.
+function cleanupLegacyCodexInstall(target) {
   if (target.id !== 'codex') {
-    return;
+    return [];
   }
 
   const legacyInstall = findLegacyCodexInstall(target.baseDir);
 
   if (!legacyInstall) {
-    return;
+    return [];
   }
 
-  console.warn(`[sdd] ${legacyInstall.skillsRoot} holds a pre-4.0.0 SDD installation that Codex no longer reads. Delete that directory to finish the upgrade.`);
+  const removed = removeSkillDirectories(legacyInstall.skillsRoot, knownSkillNames());
+
+  if (fs.readdirSync(legacyInstall.skillsRoot).length === 0) {
+    fs.rmdirSync(legacyInstall.skillsRoot);
+  }
+
+  fs.rmSync(legacyInstall.metadataPath, { force: true });
+
+  return removed;
 }
 
 export async function installSelectedSkills({
@@ -39,7 +49,7 @@ export async function installSelectedSkills({
   const target = resolveTargetPath(targetId, scope, cwd);
 
   ensureDirectory(target.installRoot);
-  warnAboutLegacyCodexSkills(target);
+  const legacyCodexSkills = cleanupLegacyCodexInstall(target);
   let installedCount = 0;
   const selectedSkills = new Set();
 
@@ -82,14 +92,15 @@ export async function installSelectedSkills({
     }
   }
 
-  // Skills the previous install recorded, plus the 4.0.0 removals when that install predates the
-  // skill list in the metadata. Everything written above is exempt through selectedSkills.
+  // Skills the previous install recorded, plus every name the package has ever shipped when the
+  // record predates the skill list in the metadata. Everything written above is exempt through
+  // selectedSkills, so a legacy upgrade converges on exactly the skills selected now.
   const previousMetadata = readMetadata(target.metadataPath);
   const previousSkills = Array.isArray(previousMetadata?.skills) ? previousMetadata.skills : [];
   const isLegacyInstall = previousMetadata !== null && previousSkills.length === 0;
   const removedSkills = removeSkillDirectories(
     target.installRoot,
-    [...previousSkills, ...(isLegacyInstall ? skillsRemovedInFourOh : [])]
+    [...previousSkills, ...(isLegacyInstall ? knownSkillNames() : [])]
       .filter((skillName) => !selectedSkills.has(skillName))
   );
 
@@ -99,6 +110,7 @@ export async function installSelectedSkills({
   return {
     installedCount,
     removedSkills,
+    legacyCodexSkills,
     targetId,
     plugins: consistentPlugins,
     scope,

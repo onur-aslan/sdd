@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The installer records the installed skill names in the target `sdd.json`, so the next upgrade knows which directories it owns.
 
 ### Changed
-- Upgrading no longer leaves orphaned skills behind: reinstalling a target prunes the skills that left the package or the selection — including the 13 skills dropped in `4.0.0` — while unrelated skills in the same directory are left untouched. A stale pre-4.0.0 Codex `.codex/skills` directory is reported instead of deleted, because the installer cannot prove it owns every directory inside it.
+- Upgrading no longer leaves orphaned skills behind: reinstalling a target prunes the skills that left the package or the selection — including every name retired before 4.0.0, which a legacy install record cannot list — while unrelated skills in the same directory are left untouched. A pre-4.0.0 Codex `.codex/skills` directory is cleaned up through the same rule, gated on `.codex/sdd.json` proving the installation is ours.
 - Bumped the package, `plugin.json`, and marketplace metadata to `4.1.0`.
 
 ### Fixed

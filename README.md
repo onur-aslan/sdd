@@ -36,9 +36,11 @@ If you installed it globally instead of via npx, update it with:
 npm update -g @onuraslan/sdd
 ```
 
-Rerunning the installer also cleans up: skills that are no longer part of the package, or that belong to a plugin you did not select, are removed from the target skill directory. Nothing else in that directory is touched.
+Rerunning the installer also cleans up: skills that are no longer part of the package, or that belong to a plugin you did not select, are removed from the target skill directory. An installation recorded before 4.0.0 only lists plugin ids, so upgrading it removes every skill name this package has ever shipped unless it is selected now. Nothing else in that directory is touched.
 
-> Upgrading on Codex from 3.1.1 or earlier leaves the old `.codex/skills` directory behind, since 4.0.0 installs into `.agents/skills`. The installer reports it; delete the directory to finish the upgrade.
+> Codex 3.1.1 and earlier installed into `.codex/skills`; 4.0.0 uses `.agents/skills`. Upgrading removes the skills this package wrote to the old directory — only when `.codex/sdd.json` proves the installation is ours — so an unrelated skill left there survives.
+
+> Releases before 4.0.0 also supported Windsurf, which is no longer an install target. If you installed there, delete `.windsurf/skills` and the `playwright` entry in `.windsurf/mcp.json` by hand.
 
 ---
 

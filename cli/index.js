@@ -38,12 +38,17 @@ function readFlagValue(args, flag) {
 function formatInstallResult(result) {
   const summary = `Installed ${result.installedCount} skills to ${result.installRoot}.`;
   const removedSkills = result.removedSkills || [];
+  const legacyCodexSkills = result.legacyCodexSkills || [];
+  const notes = [];
 
-  if (removedSkills.length === 0) {
-    return summary;
+  if (removedSkills.length > 0) {
+    notes.push(`Removed ${removedSkills.length} skill(s) that are no longer part of SDD: ${removedSkills.join(', ')}.`);
+  }
+  if (legacyCodexSkills.length > 0) {
+    notes.push(`Removed ${legacyCodexSkills.length} skill(s) from the pre-4.0.0 .codex/skills directory.`);
   }
 
-  return `${summary} Removed ${removedSkills.length} skill(s) that are no longer part of SDD: ${removedSkills.join(', ')}.`;
+  return [summary, ...notes].join(' ');
 }
 
 function formatUninstallResult(result) {

@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { getAllSkillNames } from './skills.js';
+
 // Skills that were removed in 4.0.0. A pre-4.0.0 install record only stored plugin ids, so it
 // cannot name them; without this list an upgrade would leave them on disk forever.
 export const skillsRemovedInFourOh = [
@@ -36,6 +38,12 @@ export const retiredSkillNames = [
   'workflow-gateway',
   'workflow-generator'
 ];
+
+// Every skill directory this package has ever shipped. A pre-4.0.0 install record only stored
+// plugin ids, so a cleanup that starts from such a record has to work from the names themselves.
+export function knownSkillNames() {
+  return [...getAllSkillNames(), ...retiredSkillNames];
+}
 
 export function readMetadata(metadataPath) {
   if (!fs.existsSync(metadataPath)) {
