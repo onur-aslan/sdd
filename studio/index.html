@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>sdd studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' fill='%231f4e79'/%3E%3Cpath d='M4 9V4h5M19 4h5v5M24 19v5h-5M9 24H4v-5' fill='none' stroke='%23f7f8f6' stroke-width='1.4' stroke-linecap='square'/%3E%3Ccircle cx='14' cy='14' r='2.1' fill='%23f7f8f6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="sdd studio">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square">
+          <path d="M4 9V4h5M19 4h5v5M24 19v5h-5M9 24H4v-5"/>
+          <circle cx="14" cy="14" r="2.1" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-word">sdd <em>studio</em></span>
+        <span class="brand-meta" id="repo-info">Loading workspace…</span>
+      </span>
+    </a>
+    <div class="topbar-right">
+      <span class="local-chip" title="Runs and settings stay on this machine">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="1.5"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span>local</span>
+      </span>
+      <span class="chip" id="version-chip">v—</span>
+      <span class="connection" id="connection"><span class="dot"></span><span id="connection-text">connecting</span></span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="rail" aria-label="Workflows">
+      <p class="rail-label">Workflows</p>
+
+      <button class="nav-item active" data-view="sweep" aria-current="page">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+        </span>
+        <span class="nav-copy">
+          <span class="nav-title">Bug fixing</span>
+          <span class="nav-sub">Jira, one at a time</span>
+        </span>
+      </button>
+
+      <button class="nav-item" data-view="enhancement">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/><path d="M5 3v3M3.5 4.5h3M19 18v3M17.5 19.5h3"/></svg>
+        </span>
+        <span class="nav-copy">
+          <span class="nav-title">Enhancement</span>
+          <span class="nav-sub">Interview, then a plan</span>
+        </span>
+      </button>
+
+      <button class="nav-item" data-view="feature">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 8.5 4.7L12 12.4 3.5 7.7 12 3Z"/><path d="m3.5 12.2 8.5 4.7 8.5-4.7"/><path d="m3.5 16.7 8.5 4.7 8.5-4.7"/></svg>
+        </span>
+        <span class="nav-copy">
+          <span class="nav-title">Feature</span>
+          <span class="nav-sub">Interview, then a spec</span>
+        </span>
+      </button>
+
+      <div class="rail-foot">
+        <button type="button" class="rail-settings" id="advanced-toggle" aria-expanded="false" aria-controls="settings-dialog" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1.5 14h5M9.5 8h5M17.5 16h5"/></svg>
+          <span>Settings</span>
+        </button>
+        <p class="jira-status" id="jira-info">Jira: not configured</p>
+      </div>
+    </nav>
+
+    <main id="main">
+      <section class="view" data-view="sweep">
+        <header class="page-head">
+          <div class="page-title">
+            <h1>Fix Jira bugs</h1>
+            <p>Choose the bugs, start the run, review what needs a human.</p>
+          </div>
+          <p class="scope" id="scope-meta">no project · base detected</p>
+        </header>
+
+        <div class="workbench">
+          <form class="queue" id="sweep-form" novalidate>
+            <div class="sheet-head">
+              <div>
+                <h2>Queue</h2>
+                <p class="sheet-sub" id="bug-count">pick a project</p>
+              </div>
+              <div class="sheet-tools">
+                <button type="button" class="btn quiet sm" id="toggle-bugs" disabled>Select none</button>
+                <button type="button" class="icon-btn" id="reload-bugs" title="Reload open bugs" aria-label="Reload open bugs">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="bug-picker" id="bug-picker" tabindex="0" aria-label="Open bugs">
+              <p class="bug-picker-empty">Pick a project in Settings to load its bugs.</p>
+            </div>
+
+            <div class="plan-note">
+              <span class="plan-label">Plan</span>
+              <dl class="plan" id="plan-summary">
+                <div><dt>scope</dt><dd>Pick a project in Settings.</dd></div>
+              </dl>
+            </div>
+
+            <div class="queue-actions">
+              <button type="submit" class="btn primary" id="start-btn">Start fixing bugs</button>
+              <button type="button" class="btn" id="preview-btn">Preview plan</button>
+              <button type="button" class="btn quiet-danger" id="cancel-btn" disabled>Stop run</button>
+            </div>
+
+            <p class="form-error hidden" id="form-error" role="alert"></p>
+
+            <p class="safety">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4.5 6v5.4c0 4.6 3.2 8.4 7.5 9.6 4.3-1.2 7.5-5 7.5-9.6V6L12 3Z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></svg>
+              Jira is only read. Work happens in an isolated worktree; nothing is force-pushed.
+            </p>
+
+
+          </form>
+
+          <section class="run" aria-labelledby="run-title">
+            <div class="sheet-head run-head">
+              <div>
+                <h2 id="run-title">No run yet</h2>
+                <p class="sheet-sub" id="run-meta">Start fixing bugs to watch it work.</p>
+              </div>
+              <span class="badge idle" id="run-badge">idle</span>
+            </div>
+
+            <div class="ruler">
+              <div class="ruler-track" id="progress-track" role="progressbar" aria-labelledby="progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-bar"></span></div>
+              <p class="ruler-label" id="progress-label">0 fixed</p>
+            </div>
+
+            <div class="results">
+              <div class="subhead">
+                <h3>Results</h3>
+                <span class="subhead-rule"></span>
+              </div>
+              <ul class="bug-list" id="bug-list"></ul>
+            </div>
+
+            <div class="terminal">
+              <div class="terminal-bar">
+                <span class="terminal-live"><i></i> agent output</span>
+                <button type="button" class="terminal-copy" id="copy-log">Copy</button>
+              </div>
+              <pre class="log" id="log"></pre>
+            </div>
+
+            <div class="run-foot hidden" id="run-foot">
+              <p id="run-summary"></p>
+              <a class="btn link hidden" id="pr-link" target="_blank" rel="noopener">
+                Open merge request
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              </a>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view hidden" data-view="enhancement">
+        <header class="page-head">
+          <div class="page-title">
+            <h1>Enhance</h1>
+            <p>Interview the agent, then read the plan it drafts.</p>
+          </div>
+          <p class="scope" id="enhancement-scope">planning only</p>
+        </header>
+
+        <div class="session-wrap" data-session-flow="enhancement"></div>
+      </section>
+
+      <section class="view hidden" data-view="feature">
+        <header class="page-head">
+          <div class="page-title">
+            <h1>Build a feature</h1>
+            <p>A design interview, then a spec draft to review.</p>
+          </div>
+          <p class="scope" id="feature-scope">spec only</p>
+        </header>
+
+        <div class="session-wrap" data-session-flow="feature"></div>
+      </section>
+    </main>
+  </div>
+
+  <section class="interview hidden" id="interview">
+    <div class="interview-note">
+      <p class="interview-label">Input needed</p>
+      <h2 id="interview-title">A run needs your input</h2>
+      <p class="interview-prompt" id="interview-prompt"></p>
+      <div id="interview-body"></div>
+      <div class="actions">
+        <button type="button" class="btn primary" id="interview-submit">Send answer</button>
+      </div>
+    </div>
+  </section>
+
+  <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-inner">
+      <header class="settings-head">
+        <div>
+          <h2 id="settings-title">Settings</h2>
+          <p>Only the choices a human must make. The rest is detected or computed.</p>
+        </div>
+        <button type="button" class="icon-btn" id="settings-close" aria-label="Close settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+
+      <div class="settings-body" id="advanced-body">
+        <section class="settings-section">
+          <h3>Workspace</h3>
+
+          <label class="field">
+            <span>Jira project</span>
+            <div class="input-row">
+              <input form="sweep-form" name="project" list="project-list" placeholder="ABC" autocomplete="off">
+              <button type="button" class="icon-btn" id="reload-projects" title="Load projects from Jira" aria-label="Load projects from Jira">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              </button>
+            </div>
+            <datalist id="project-list"></datalist>
+          </label>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>Base branch <em>(blank = detected)</em></span>
+              <input form="sweep-form" name="base" placeholder="main" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Agent</span>
+              <select form="sweep-form" name="agentPreset" id="agent-preset"></select>
+            </label>
+          </div>
+
+          <label class="field hidden" id="agent-custom-field">
+            <span>Custom agent command <em>(blank = default)</em></span>
+            <input form="sweep-form" name="agentCmd" placeholder='["claude","-p"]' autocomplete="off">
+          </label>
+
+          <div class="check-grid">
+            <label class="toggle" title="Fix bugs in a separate checkout; your own working tree is never touched."><input form="sweep-form" type="checkbox" name="worktree" checked><span>Isolated worktree</span></label>
+            <label class="toggle" title="Fetch the base branch from the remote first."><input form="sweep-form" type="checkbox" name="fetchBase" checked><span>Fetch base</span></label>
+            <label class="toggle"><input form="sweep-form" type="checkbox" name="resume"><span>Resume last run</span></label>
+            <label class="toggle"><input form="sweep-form" type="checkbox" name="retryFailed"><span>Retry failed bugs</span></label>
+            <label class="toggle"><input form="sweep-form" type="checkbox" name="push" checked><span>Push branch</span></label>
+            <label class="toggle"><input form="sweep-form" type="checkbox" name="pr" checked><span>Open merge request</span></label>
+          </div>
+
+          <p class="hint">Dates, branch, tag, work directory, limits, and timeouts are computed at run time.</p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Publishing</h3>
+          <label class="field">
+            <span>Merge request</span>
+            <select form="sweep-form" name="prPreset" id="pr-preset"></select>
+          </label>
+          <label class="field hidden" id="pr-custom-field">
+            <span>Custom merge request command <em>(shell; SDD_PR_* available)</em></span>
+            <input form="sweep-form" name="prCommand" placeholder='glab mr create --title "$SDD_PR_TITLE" ...' autocomplete="off">
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <h3>Jira connection</h3>
+          <div class="grid-2">
+            <label class="field">
+              <span>Base URL</span>
+              <input form="sweep-form" name="jiraUrl" placeholder="https://jira.internal" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Personal access token</span>
+              <input form="sweep-form" name="jiraToken" type="password" placeholder="••••••••" autocomplete="off">
+            </label>
+          </div>
+          <p class="hint">A base URL and a personal access token are all a self-hosted Data Center or Server Jira needs. Email is only for Basic auth.</p>
+          <div class="grid-2">
+            <label class="field">
+              <span>Auth</span>
+              <select form="sweep-form" name="jiraAuth">
+                <option value="">auto (token ⇒ bearer)</option>
+                <option value="bearer">Bearer (personal access token)</option>
+                <option value="basic">Basic (email + password/token)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>REST version</span>
+              <select form="sweep-form" name="jiraApiVersion">
+                <option value="">auto</option>
+                <option value="2">2 · Data Center / Server</option>
+                <option value="3">3 · Cloud</option>
+              </select>
+            </label>
+          </div>
+          <label class="field hidden" id="jira-email-field">
+            <span>Email <em>(basic auth only)</em></span>
+            <input form="sweep-form" name="jiraEmail" placeholder="you@team.com" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Internal CA <em>(PEM path)</em></span>
+            <input form="sweep-form" name="jiraCa" placeholder="path/to/jira-ca.pem" autocomplete="off">
+          </label>
+          <label class="toggle"><input form="sweep-form" type="checkbox" name="jiraInsecure"><span>Skip TLS verification <em class="muted">(unsafe)</em></span></label>
+          <div class="settings-actions">
+            <button type="button" class="btn" id="check-jira">Check Jira</button>
+            <button type="button" class="btn quiet" id="forget-jira">Forget saved</button>
+            <span class="check-result" id="jira-check-result"></span>
+          </div>
+        </section>
+      </div>
+
+      <footer class="settings-foot">
+        <span class="saved-note">Saved locally in <code>.bug-fix/studio.settings.json</code></span>
+        <span class="save-status" id="settings-status" role="status"></span>
+        <button type="button" class="btn" id="settings-done">Done</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <div class="sr-only" aria-live="polite" id="announcer"></div>
+
+  <script src="/markdown.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -8,6 +8,9 @@ import { uninstallSkills } from './uninstall.js';
 import { askInteractiveInstall } from './prompts.js';
 import { askWorkflowSelection, writeWorkflow } from './workflows.js';
 import { resolveTargetPath, targets } from './targets.js';
+import { runBugSweep } from './bug-sweep.js';
+import { runJiraCheck } from './jira-check.js';
+import { runStudio } from './studio.js';
 
 const packageJsonPath = fileURLToPath(new URL('../package.json', import.meta.url));
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
@@ -16,7 +19,7 @@ function formatHelp() {
   const targetIds = Object.keys(targets).join('|');
   const pluginIds = Object.keys(getSkillGroups()).join(', ');
 
-  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  uninstall   Remove SDD skills and the Playwright MCP server\n  workflow    Generate docs/workflow.md for a task type\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nInstall options (for "sdd install"):\n  --target <${targetIds}>\n  --user              Install to the user directory instead of the current project\n  --all               Install every plugin (${pluginIds})\n  --non-interactive   Skip the interactive prompts\n\nUninstall options (for "sdd uninstall"):\n  --target <${targetIds}>   Limit the cleanup to one target\n  --user                   Limit the cleanup to the user directory\n  --keep-mcp               Keep the Playwright MCP server registered\n  --dry-run                Report what would be removed without changing anything\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n\nOptions:\n  --help\n  --version`;
+  return `SDD - Spec Driven Development\n\nUsage:\n  sdd <command>\n\nCommands:\n  install     Install SDD skills\n  uninstall   Remove SDD skills and the Playwright MCP server\n  workflow    Generate docs/workflow.md for a task type\n  bug-sweep   Fix Jira bugs one by one and open a pull request\n  jira-check  Verify Jira reachability, TLS, and credentials\n  studio      Open the local web dashboard for bug sweeps and future flows\n  list        Show installed SDD skills\n  update      Update SDD installation\n  doctor      Diagnose SDD installation\n\nInstall options (for "sdd install"):\n  --target <${targetIds}>\n  --user              Install to the user directory instead of the current project\n  --all               Install every plugin (${pluginIds})\n  --non-interactive   Skip the interactive prompts\n\nUninstall options (for "sdd uninstall"):\n  --target <${targetIds}>   Limit the cleanup to one target\n  --user                   Limit the cleanup to the user directory\n  --keep-mcp               Keep the Playwright MCP server registered\n  --dry-run                Report what would be removed without changing anything\n\nWorkflow options (for "sdd workflow"):\n  --type <feature|bug-fix|enhancement>\n\nBug sweep options (for "sdd bug-sweep"):\n  --project <KEY>          Jira project key\n  --jql <query>            Custom JQL (alternative to --project)\n  --date <YYYY-MM-DD>      Sweep date (default: today)\n  --agent-cmd <value>      Agent command (JSON array or command template)\n  --verify-cmd <command>   Command run before each commit\n  --max-turns <n>          bug-fix attempt limit (default: 5)\n  --limit <n>              Maximum bugs to process (default: 50)\n  --timeout <seconds>      Per-bug agent timeout (default: 1800)\n  --work-dir <path>        State and logs directory (default: .bug-fix)\n  --at <HH:MM>             Wait until this local time, then start\n  --every <duration>       Repeat after each sweep (e.g. 1d)\n  --run-now                With --every, run immediately instead of waiting\n  --resume                 Continue an existing sweep\n  --retry-failed           Retry bugs reported as not fixed\n  --no-push                Do not push the branch or tag\n  --no-pr                  Do not open a pull request\n  --jira-auth <mode>       auto | basic | bearer (default: auto)\n  --jira-ca <path>         PEM file for an internal or self-signed CA\n  --pr-cmd <command>       Replace gh with glab, tea, or a script\n  --dry-run                Print the plan without touching git\n\nJira check options (for "sdd jira-check"):\n  --jira-url <url>         Base URL; JIRA_BASE_URL also works\n  --jira-token <token>     API token or personal access token\n  --jira-auth <mode>       auto | basic | bearer (default: auto)\n  --jira-api-version <v>   auto | 2 | 3 (default: auto)\n  --jira-ca <path>         PEM file for an internal or self-signed CA\n  --jira-insecure          Skip TLS verification (last resort)\n  --project <KEY>          Also verify a search against this project\n\nStudio options (for "sdd studio"):\n  --port <n>               Port to listen on (default: 4321)\n  --host <addr>            Interface to bind (default: 127.0.0.1)\n  --open                   Open the dashboard in your browser\n\nOptions:\n  --help\n  --version`;
 }
 
 function readFlagValue(args, flag) {
@@ -91,7 +94,10 @@ function formatUninstallResult(result) {
 }
 
 export async function run(argv = process.argv.slice(2)) {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  // Commands with their own help text handle --help themselves.
+  const selfHelp = new Set(['bug-sweep', 'jira-check', 'studio']);
+
+  if ((argv.includes('--help') || argv.includes('-h')) && !selfHelp.has(argv[0])) {
     return formatHelp();
   }
 
@@ -104,6 +110,18 @@ export async function run(argv = process.argv.slice(2)) {
   }
 
   const [command, ...rest] = argv;
+
+  if (command === 'bug-sweep') {
+    return runBugSweep(rest);
+  }
+
+  if (command === 'jira-check') {
+    return runJiraCheck(rest, { exitOnFailure: true });
+  }
+
+  if (command === 'studio') {
+    return runStudio(rest, { version: packageJson.version });
+  }
 
   if (command === 'install') {
     const args = rest;

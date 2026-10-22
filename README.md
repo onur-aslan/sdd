@@ -145,6 +145,183 @@ bug-fix
 enhancement
 ```
 
+### Batch Bug Sweeps from Jira
+
+`sdd bug-sweep` runs the `bug-fix` skill over a Jira project without a human in the loop. It fetches bugs in order, fixes them **one at a time**, commits each success, records each failure as "not fixed", pushes a single dated branch and tag, and opens one pull request that lists what changed, how, and which fixes need human review.
+
+```bash
+JIRA_BASE_URL=https://your-domain.atlassian.net \
+JIRA_EMAIL=you@example.com \
+JIRA_API_TOKEN=... \
+npx @onuraslan/sdd@latest bug-sweep --project ABC
+```
+
+Every bug gets a fresh agent session, so a previous fix cannot leak into the next one. The agent only edits the working tree; the command owns git, the tag, and the pull request. When a fix fails to reproduce, fails verification, or fails the result contract, the working tree is reset and the bug is recorded as not fixed — Jira itself is never modified.
+
+| Behavior | Default |
+| --- | --- |
+| Branch | `bug-fix/<date>` |
+| Tag | `bug-fix-<date>` |
+| Base | `origin/HEAD`, then `main`, then `master` |
+| JQL | `project = "<KEY>" AND issuetype = Bug AND statusCategory != Done ORDER BY priority DESC, key ASC` |
+| Agent | `claude -p` |
+| Per-bug timeout | 1800 seconds |
+
+To fix a hand-picked set instead of every open bug, pass `--issues ABC-1,ABC-2` (the dashboard sends this automatically when you uncheck bugs in the list).
+
+Common options:
+
+```bash
+sdd bug-sweep --project ABC \
+  --agent-cmd '["claude","-p"]' \
+  --verify-cmd "npm test" \
+  --max-turns 5 \
+  --limit 20
+```
+
+`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--resume` to continue an interrupted sweep, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
+
+Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The branch is created there and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. The temporary checkout is kept while bugs are pending so `--resume` can continue, and removed once the sweep publishes. The dashboard enables both by default; without the flag the sweep runs in place and refuses a dirty tree.
+
+The agent reports its outcome through a small JSON contract (`status`, `summary`, `how`, `critical`, `criticalReason`, `evidence`). The generated per-bug task file carries that contract and overrides the skill's normal report format for the run, so the `bug-fix` skill itself stays unchanged. The command force-flags changes that touch authentication, payments, migrations, infrastructure, or CI/CD for human review even when the agent does not.
+
+#### Run it nightly
+
+There are two ways to start a sweep at midnight.
+
+**1. Keep the command running (built-in scheduler).**
+
+```bash
+sdd bug-sweep --project ABC --at 00:00 --every 1d
+```
+
+`--at 00:00` waits for the next midnight, `--every 1d` repeats after each sweep, and `--run-now` starts immediately and then repeats. The process must stay alive, so run it in a terminal, tmux, systemd, or another service manager. Each iteration computes its own date, so the branch, tag, and PR are dated to that night. A failed sweep is logged and the schedule continues; a lock file stops a new run from overlapping a running one.
+
+**2. Let the operating system start a one-shot sweep.**
+
+```bash
+# cron (Linux/macOS): every day at 00:00
+0 0 * * * cd /path/to/repo && sdd bug-sweep --project ABC >> .bug-fix/cron.log 2>&1
+```
+
+```powershell
+# Task Scheduler (Windows): every day at 00:00
+schtasks /Create /TN "sdd-bug-sweep" /SC DAILY /ST 00:00 /TR "cmd /c cd /d C:\path\to\repo && sdd bug-sweep --project ABC"
+```
+
+Keep `JIRA_BASE_URL` and `JIRA_API_TOKEN` in the scheduler's environment or a private env file rather than in the scheduled command line. Add `JIRA_AUTH`, `JIRA_API_VERSION`, and `JIRA_CA_CERT` when the Jira server needs them (see below). Because `--date` is not passed, each run picks up the current date on its own.
+
+#### Air-gapped Jira and internal Git
+
+Self-hosted Jira Data Center (and most Server installs) differ from Cloud in three ways, and each one has a flag:
+
+| Situation | What to use |
+| --- | --- |
+| Personal access token, no email | `--jira-auth bearer` (the default when `--jira-email` is absent) |
+| REST API v2 | `--jira-api-version 2` (or leave `auto`; the v3 search falls back to v2) |
+| Internal or self-signed CA | `--jira-ca /path/to/ca.pem` |
+| Last resort | `--jira-insecure` (disables TLS verification; avoid in production) |
+
+```bash
+JIRA_BASE_URL=https://jira.internal \
+JIRA_API_TOKEN=... \
+sdd bug-sweep --project ABC \
+  --jira-auth bearer \
+  --jira-api-version 2 \
+  --jira-ca /etc/ssl/jira-ca.pem
+```
+
+Run the connectivity check first. It separates DNS, TCP, TLS, and HTTP failures and prints the fix for each:
+
+```bash
+sdd jira-check --project ABC
+sdd jira-check --project ABC --json
+```
+
+In the studio, enter the same values in **Settings** and press **Check Jira**. They are saved locally in `.bug-fix/studio.settings.json`, so no environment variables are required; **Forget saved** clears them.
+
+`jira-check` exits non-zero when the connection or credentials fail, so it can gate a scheduled run. The same probe powers the dashboard's **Check Jira** button.
+
+`--jira-ca` applies to every Jira request. This avoids relying on `NODE_EXTRA_CA_CERTS`, which must be set before Node starts and is easy to miss in a scheduler.
+
+**Internal Git instead of GitHub.** `--pr` uses the GitHub CLI by default. On GitLab, Gitea, or Bitbucket, pick the forge in the studio's **Merge request** list, or pass `--pr-cmd`. A plain command runs through the shell and reads `SDD_PR_TITLE`, `SDD_PR_BODY`, `SDD_PR_BODY_FILE`, `SDD_PR_BASE`, `SDD_PR_HEAD`, and `SDD_PR_REMOTE`:
+
+```bash
+sdd bug-sweep --project ABC \
+  --pr-cmd 'glab mr create --title "$SDD_PR_TITLE" --description "$(cat $SDD_PR_BODY_FILE)" --source-branch "$SDD_PR_HEAD" --target-branch "$SDD_PR_BASE"'
+```
+
+A JSON array runs without a shell, so the same value works on Windows and POSIX. It supports `{title}`, `{body}`, `{bodyFile}`, `{base}`, `{head}`, `{remote}`, `{project}`, and `{date}`, and must print the merge request URL. The dashboard uses this form for its **GitLab (glab)** and **Gitea (tea)** presets.
+
+GitLab can also create the merge request without any extra CLI: `--gitlab-push` attaches `merge_request.create`, `target`, `title`, and `description` as git push options, and the URL is read from the `remote:` lines that GitLab prints back. The server must advertise push-options support (GitLab does by default; Gitea and Forgejo do not). The studio exposes this as **GitLab (git push, no CLI)**. Pick it when `glab` is not installed on the air-gapped machine:
+
+```bash
+sdd bug-sweep --project ABC --pr --gitlab-push --base main
+```
+
+For a fully disconnected run, use `--no-push --no-pr`: the sweep still commits each fix locally and writes the report to `.bug-fix/`.
+
+**Offline install.** The package has no runtime dependencies. On a connected machine run `npm pack`, copy the `.tgz` in, and install it globally (`npm install -g ./onuraslan-sdd-4.1.0.tgz`); or clone the repository and run `node bin/sdd.js ...`. The agent is whatever local model runner you have, for example `--agent-cmd '["ollama","run","qwen2.5-coder"]'`.
+
+### Studio (web dashboard)
+
+`sdd studio` opens a local dashboard for the same automation, so you do not have to remember flags or watch a terminal.
+
+```bash
+npx @onuraslan/sdd@latest studio --open
+```
+
+It binds to `127.0.0.1:4321` by default and serves a single-page dashboard from the package itself, with no extra dependencies and no build step.
+
+The interface is **Technical Paper**: a light, cool-paper workbench with ink typography and hairline rules, and a dark inset reserved for raw machine output. The run is the center of the page; configuration is a drawer. The rationale and tokens live in `PRODUCT.md` and `DESIGN.md`.
+
+The screen is meant to be used without thinking about settings: **pick the bugs, press Start.** The project lives in **Settings**, a drawer available from every workspace; everything else is either detected or remembered.
+
+- **Smart defaults.** The verify command is read from your `package.json` scripts (using the right package manager) and the base branch from git. The date, branch, tag, working directory, turn limit, and timeout are computed at run time and are not shown as fields at all. The **Base branch** field stays blank by default (the detected branch is used) and **Fetch base** refreshes that branch from the remote before starting.
+- **Isolated by default.** The dashboard runs each sweep in a separate git worktree under `.bug-fix/worktrees/`, based on the up-to-date remote branch, so your own checkout — even with uncommitted changes — is never touched. The **Isolated worktree** toggle turns this off.
+- **Remembered choices.** Only the choices a human actually makes are saved as they change (project, agent, push/PR, the Jira connection) to a git-ignored `.bug-fix/studio.settings.json` (mode `0600` on POSIX). The token is never sent back to the browser — the API only reports whether one is saved — and **Forget saved** clears it. Environment variables still work as a fallback.
+- **Jira from the UI.** Base URL, token, auth mode, REST version, internal CA path, and the merge request forge are all in **Settings**, with a **Check Jira** button, so you do not have to export `JIRA_*` variables before starting the studio. Only the base URL and a personal access token are required; the email field appears only for Basic auth. The **Merge request** list offers GitHub (`gh`), GitLab (`glab`), GitLab with git push options (no CLI), Gitea (`tea`), or a custom command, so no command line has to be typed.
+- **Pick the bugs, not the JQL.** After you choose a project, the dashboard loads its open bugs into a multi-select list on the main screen, with every bug checked by default. Uncheck the ones you want to leave for later; the selection is sent as `--issues`, so no JQL has to be written. The list is fetched with the same default query the sweep uses (open bugs, priority order), and **Select none** / **Select all** flips the whole list.
+- **Projects from Jira.** The project field in **Settings** autocompletes from your Jira project list; type a key if you prefer. When no project is remembered yet, Settings opens automatically on the first visit.
+- **Progressive disclosure.** Only the settings that need a decision live in the **Settings** drawer: the Jira project, an agent picker (Claude Code — the default — Cursor, OpenCode, Codex, or a custom command), the recovery/publish toggles, and the Jira connection. The plan under the queue spells out the scope, branch and tag, base, verify command, and publish behavior that will be used, as a short table instead of a paragraph.
+- **The run** then shows each bug as it moves from pending to running to fixed, not fixed, or flagged for review. A ruler-style progress bar keeps the count visible while the agent output streams below.
+- **Live progress** streams over Server-Sent Events: structured events (`bugs-found`, `bug-started`, `bug-finished`, `publishing`) plus the raw agent log, and the pull request link when the run finishes.
+- **Stop run** aborts the current sweep; the working tree is reset and the run can be resumed later.
+- **One run at a time.** A sweep and an interview session cannot run at the same time. The dashboard rejects the second job, and the on-disk lock still guards against overlap with a scheduled CLI sweep.
+- **Keyboard and motion.** Every control is reachable by keyboard with a visible focus ring; Settings is a native modal dialog (Escape closes it and focus returns to the trigger), run status is announced to screen readers, and animations respect `prefers-reduced-motion`.
+
+**Interview sessions (Enhancement and Feature).** Both tabs run the same thing: a guided interview, held as a conversation on paper. Describe what you want, and the agent asks one question at a time. Type your answer in the composer and press **Send**; the answer becomes the next turn. There are no answer buttons and nothing parses the agent's prose — the only question on screen is the one you answer by typing. When the interview is over the agent produces the final artifact: an enhancement **plan** in the conversation, or a feature **spec** written to `docs/sdd/features/<feature>/spec.md`. A feature session ends by itself when that file appears; an enhancement session ends when you press **Finish** in the toolbar. **Stop** ends a session early; the conversation stays readable, and the composer then starts a new one.
+
+The agent is held to the task for the whole session: it may read the repository to ground its questions, and a feature session may write exactly one file, its spec. Anything else is refused, and nothing is committed or pushed. The **Enhancement** tab wraps the `enhancement` skill's interview and stops at the plan; the **Feature** tab wraps `deep-spec` and stops at the spec. Both skill files are used unchanged.
+
+The session has a **Rich / Raw** switch. **Rich** is the paper conversation: the agent's Markdown renders as a document — headings, lists, task lists, tables, quotes, links, code — and Mermaid diagrams draw inline on a light plate. **Raw** switches the same panel to the dark inset and shows the literal text for copying. Mermaid 12.2.0 is vendored under `studio/vendor/mermaid/` (MIT, license included), so diagrams render on an air-gapped machine with no CDN. The opening message and the transcript are written to `.bug-fix/enhancements/<session>/` and `.bug-fix/features/<session>/`. A reload mid-interview reconnects to the running session, and a finished session is read back on load.
+
+**How a turn is driven.** With **Claude Code**, the studio keeps one process open and feeds each answer to its stdin (stream-json), so the agent keeps its own context between turns. Reads are pre-approved; any other tool becomes a `PermissionRequest`, which the studio shows as an **Approval** plate inside the conversation with **Allow once** and **Deny**. The agent waits for that answer instead of looking frozen, and a timeout denies safely. The hook is injected as a settings layer on the command line, so your own Claude Code configuration is never edited. Every other agent uses a replay-per-turn fallback: each turn re-invokes the agent with the brief and the transcript so far, which works with any one-shot CLI. If the agent process dies mid-interview the session fails with that message instead of hanging.
+
+Approval and implementation remain the next step: a session ends at the plan or spec.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/config` | Workspace, git branch/base, Jira presence, detected defaults, remembered settings |
+| `GET /api/settings` / `POST /api/settings` | Read or save the remembered choices (the token is stored locally and never returned) |
+| `POST /api/jira/projects` | List Jira projects for the project picker |
+| `POST /api/jira/bugs` | List the open bugs for a project, for the multi-select |
+| `POST /api/jira/health` | Probe Jira reachability, TLS, auth, and REST version |
+| `POST /api/sweeps` | Start a sweep from a JSON request |
+| `GET /api/sweeps/:id` | Job snapshot, including all events so far |
+| `GET /api/sweeps/:id/events` | Live SSE event stream |
+| `POST /api/sweeps/:id/cancel` | Abort a running sweep |
+| `POST /api/enhancements` | Start an interview session that ends in a plan |
+| `GET /api/enhancements` | List enhancement sessions, newest last |
+| `GET /api/enhancements/:id` | Session snapshot, including all events so far |
+| `GET /api/enhancements/:id/events` | Live SSE event stream for a session |
+| `POST /api/enhancements/:id/cancel` | Stop a running session |
+| `POST /api/features` | Start an interview session that ends in a spec |
+| `GET /api/features` / `GET /api/features/:id` | List feature sessions / read one |
+| `GET /api/features/:id/events` | Live SSE event stream for a feature session |
+| `POST /api/features/:id/cancel` | Stop a running feature session |
+| `POST /api/jobs/:id/input` | Answer the agent's current question |
+
 ### Core Skills
 
 | Skill | Command | Description |
