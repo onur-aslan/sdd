@@ -28,8 +28,8 @@ Calibrated, candid, unhurried. The voice of a good technical editor: precise, pl
 
 1. **State before controls.** The current run, what needs attention, and what happens next are visible before any setting.
 2. **Plain language over jargon.** "Start fixing bugs", not "Start sweep". Internal event names never reach the screen.
-3. **Safety is legible.** Isolated worktree, read-only Jira, no force push, local-only storage, and a read-only interview that stops at the plan or spec are stated where the decision is made, not buried in docs.
-4. **The document is the interface.** A run produces an auditable record: plan, log, per-bug outcome, review flags. An interview session keeps its opening message and transcript; the rendered plan or spec is the review surface, with the raw text one click away.
+3. **Safety is legible.** Isolated worktree, read-only Jira, no force push, local-only storage, and approval-gated writes are stated where the decision is made, not buried in docs: the feature interview only writes its spec, and the enhancement interview changes code only after the plan is approved.
+4. **The document is the interface.** A run produces an auditable record: plan, log, per-bug outcome, review flags. An interview session keeps its opening message and transcript; the rendered plan, report, or spec is the review surface, with the raw text one click away.
 5. **Quiet until it matters.** One action color, one attention color. Everything else is ink and paper. Motion explains, never decorates.
 6. **Configuration is a drawer, not the room.** Defaults are computed; only decisions a human must make are exposed.
 

@@ -54,7 +54,7 @@
         </span>
         <span class="nav-copy">
           <span class="nav-title">Enhancement</span>
-          <span class="nav-sub">Interview, then a plan</span>
+          <span class="nav-sub">Plan, implement, publish</span>
         </span>
       </button>
 
@@ -64,7 +64,17 @@
         </span>
         <span class="nav-copy">
           <span class="nav-title">Feature</span>
-          <span class="nav-sub">Interview, then a spec</span>
+          <span class="nav-sub">Spec, build, publish</span>
+        </span>
+      </button>
+
+      <button class="nav-item" data-view="merge">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+        </span>
+        <span class="nav-copy">
+          <span class="nav-title">Merge</span>
+          <span class="nav-sub">Integrate, then land</span>
         </span>
       </button>
 
@@ -174,9 +184,9 @@
         <header class="page-head">
           <div class="page-title">
             <h1>Enhance</h1>
-            <p>Interview the agent, then read the plan it drafts.</p>
+            <p>Interview the agent, approve the plan, then let it implement, verify, and publish.</p>
           </div>
-          <p class="scope" id="enhancement-scope">planning only</p>
+          <p class="scope" id="enhancement-scope">plan → implement → publish</p>
         </header>
 
         <div class="session-wrap" data-session-flow="enhancement"></div>
@@ -186,12 +196,24 @@
         <header class="page-head">
           <div class="page-title">
             <h1>Build a feature</h1>
-            <p>A design interview, then a spec draft to review.</p>
+            <p>A design interview, a spec to approve, then the build path you choose and publish.</p>
           </div>
-          <p class="scope" id="feature-scope">spec only</p>
+          <p class="scope" id="feature-scope">spec → build → publish</p>
         </header>
 
         <div class="session-wrap" data-session-flow="feature"></div>
+      </section>
+
+      <section class="view hidden" data-view="merge">
+        <header class="page-head">
+          <div class="page-title">
+            <h1>Merge branches</h1>
+            <p>Review a branch merge, decide each conflict, then land the integration branch.</p>
+          </div>
+          <p class="scope" id="merge-scope">review → integrate</p>
+        </header>
+
+        <div class="session-wrap" data-session-flow="merge"></div>
       </section>
     </main>
   </div>

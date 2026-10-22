@@ -53,7 +53,8 @@ const el = {
   interviewBody: $('#interview-body'),
   interviewSubmit: $('#interview-submit'),
   enhancementScope: $('#enhancement-scope'),
-  featureScope: $('#feature-scope')
+  featureScope: $('#feature-scope'),
+  mergeScope: $('#merge-scope')
 };
 
 const state = {
@@ -1026,21 +1027,33 @@ async function submitAnswer() {
 const SESSION_COPY = {
   enhancement: {
     endpoint: '/api/enhancements',
-    finalLabel: 'plan',
-    scope: 'planning only',
+    finalLabel: 'report',
+    scope: 'plan → implement → verify',
     placeholder: 'Describe the enhancement…',
     restartPlaceholder: 'Start another enhancement…',
+    answerPlaceholder: 'Type your answer, or approve the plan…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the enhancement below. The agent asks one question at a time, then drafts a plan. Nothing is changed in this step.'
+    emptyBody: 'Describe the enhancement below or start from a Jira issue. The agent asks one question at a time, drafts a plan, and after you approve it implements and verifies the change. When the report is ready the studio commits the change on its own branch and opens a merge request.'
   },
   feature: {
     endpoint: '/api/features',
     finalLabel: 'spec',
-    scope: 'spec only',
+    scope: 'spec → build',
     placeholder: 'Describe the feature…',
     restartPlaceholder: 'Start another feature…',
+    answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the feature below. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. Nothing else is written in this step.'
+    emptyBody: 'Describe the feature below or start from a Jira issue. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready you choose how to build it; the build commits to the session branch and opens a merge request.'
+  },
+  merge: {
+    endpoint: '/api/merges',
+    finalLabel: 'merge report',
+    scope: 'review → integrate',
+    placeholder: 'Pick a source and target above…',
+    restartPlaceholder: 'Start another merge…',
+    answerPlaceholder: 'Type your answer, or approve the resolution table…',
+    emptyTitle: 'Merge two branches.',
+    emptyBody: 'Choose a source branch and a target. The agent dry-runs the merge, asks one decision at a time, and builds an integration branch. The target is not touched until you land it.'
   }
 };
 
@@ -1056,7 +1069,13 @@ function createSession(flow) {
   }
 
   const copy = SESSION_COPY[flow];
-  const scopeEl = flow === 'feature' ? el.featureScope : el.enhancementScope;
+  const scopeEl = {
+    enhancement: el.enhancementScope,
+    feature: el.featureScope,
+    merge: el.mergeScope
+  }[flow];
+  // A merge ends when its integration branch exists, so it has no hand-finish.
+  const canFinish = flow !== 'merge';
 
   root.innerHTML = `
     <section class="session" aria-label="${copy.finalLabel} session">
@@ -1071,7 +1090,7 @@ function createSession(flow) {
             <button type="button" class="seg-btn" data-role="raw" aria-pressed="false">Raw</button>
           </div>
           <button type="button" class="btn quiet sm" data-role="copy">Copy</button>
-          <button type="button" class="btn quiet sm" data-role="finish" title="End the session when the reply is the final ${copy.finalLabel}" disabled>Finish</button>
+          ${canFinish ? `<button type="button" class="btn quiet sm" data-role="finish" title="End the session when the reply is the final ${copy.finalLabel}" disabled>Finish</button>` : ''}
           <button type="button" class="btn quiet-danger sm" data-role="stop" disabled>Stop</button>
         </div>
       </header>
@@ -1080,10 +1099,28 @@ function createSession(flow) {
         <div class="session-empty" data-role="empty">
           <p class="session-empty-title" data-role="empty-title">${copy.emptyTitle}</p>
           <p data-role="empty-body">${copy.emptyBody}</p>
+          ${flow === 'merge' ? '' : `
+            <div class="session-import">
+              <div class="session-import-row">
+                <label class="session-import-label" for="jira-${flow}">Start from Jira</label>
+                <select id="jira-${flow}" data-role="jira-select" disabled>
+                  <option value="">Load open issues…</option>
+                </select>
+                <button type="button" class="btn quiet sm" data-role="jira-load">Load issues</button>
+              </div>
+              <p class="session-import-status" data-role="jira-status" role="status"></p>
+              <label class="toggle session-publish">
+                <input type="checkbox" data-role="publish" checked>
+                <span>Create a branch, commit, and open a merge request</span>
+              </label>
+            </div>
+          `}
         </div>
         <article class="session-rich hidden" data-role="rich-view"></article>
         <pre class="session-raw hidden" data-role="raw-view"></pre>
       </div>
+
+      <div class="handoff hidden" data-role="handoff"></div>
 
       <form class="session-input" data-role="input-form">
         <textarea data-role="input" rows="1" spellcheck="false" aria-label="Your answer" placeholder="${copy.placeholder}"></textarea>
@@ -1105,14 +1142,20 @@ function createSession(flow) {
     stop: q('stop'),
     stage: q('stage'),
     empty: q('empty'),
+    jiraSelect: q('jira-select'),
+    jiraLoad: q('jira-load'),
+    jiraStatus: q('jira-status'),
+    publish: q('publish'),
     richView: q('rich-view'),
     rawView: q('raw-view'),
+    handoff: q('handoff'),
     inputForm: q('input-form'),
     input: q('input'),
     send: q('send')
   };
   const view = {
     jobId: null,
+    sessionId: null,
     source: null,
     entries: [],
     active: null,
@@ -1121,7 +1164,18 @@ function createSession(flow) {
     finished: false,
     seq: 0,
     mode: 'rich',
-    renderTimer: null
+    renderTimer: null,
+    statusTimer: null,
+    turnStartedAt: 0,
+    turnLabel: 'writing',
+    build: null,
+    buildSource: null,
+    buildTimer: null,
+    buildPainted: false,
+    // Merge only: the source/target/ref from the job request, and whether the
+    // setup plate (rather than the transcript) is the current surface.
+    mergeMeta: null,
+    setup: false
   };
 
   function setStatus(text, live) {
@@ -1145,10 +1199,171 @@ function createSession(flow) {
     }
   }
 
+  // The merge tab starts from a setup plate, not a free-text brief, so its
+  // composer is only visible while the interview is actually running.
+  function setComposerVisible(visible) {
+    dom.inputForm.classList.toggle('hidden', !visible);
+  }
+
+  function selectedAgent() {
+    const agentPreset = el.form.agentPreset.value;
+    const agentCmd = agentPreset === 'custom'
+      ? el.form.agentCmd.value.trim()
+      : presetCommand(agentPreset);
+
+    return { agentPreset, agentCmd };
+  }
+
   function updateAgent() {
     const preset = agentPresets().find((agent) => agent.id === el.form.agentPreset.value);
 
     dom.agent.textContent = preset?.label ?? 'Custom agent';
+    // The badge names the agent; the title says what will actually run, so the
+    // session is traceable to the configured command.
+    dom.agent.title = preset?.command || 'Custom command from Settings';
+  }
+
+  function syncPublish() {
+    if (!dom.publish) {
+      return;
+    }
+
+    const settings = state.config?.settings ?? {};
+    const label = dom.publish.closest('label')?.querySelector('span');
+
+    if (!label) {
+      return;
+    }
+
+    label.textContent = settings.push === false
+      ? 'Create a branch and commit (push is off in Settings)'
+      : settings.pr === false
+        ? 'Create a branch and push (merge request is off in Settings)'
+        : 'Create a branch, commit, and open a merge request';
+  }
+
+  function issueBrief(issue) {
+    return [
+      `${issue.key}: ${issue.summary}`.trim(),
+      issue.description?.trim() ?? '',
+      issue.url ?? ''
+    ].filter(Boolean).join('\n\n');
+  }
+
+  async function loadJiraIssues() {
+    if (!dom.jiraLoad || !dom.jiraSelect) {
+      return;
+    }
+
+    dom.jiraLoad.disabled = true;
+    dom.jiraSelect.disabled = true;
+    dom.jiraStatus.textContent = 'Loading open issues…';
+
+    try {
+      const result = await api('/api/jira/issues', {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+
+      if (!result.configured) {
+        dom.jiraStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
+        return;
+      }
+
+      if (result.error) {
+        dom.jiraStatus.textContent = result.error;
+        return;
+      }
+
+      const issues = result.issues ?? [];
+
+      dom.jiraSelect.replaceChildren(new Option('Choose an issue…', ''));
+
+      for (const issue of issues) {
+        dom.jiraSelect.append(new Option(`${issue.key} — ${issue.summary}`, issue.key));
+      }
+
+      dom.jiraSelect.disabled = issues.length === 0;
+      dom.jiraStatus.textContent = issues.length === 0
+        ? 'No open issues in the project.'
+        : `${issues.length} open issue${issues.length === 1 ? '' : 's'}. Pick one to import.`;
+    } catch (error) {
+      dom.jiraStatus.textContent = error.message;
+    } finally {
+      dom.jiraLoad.disabled = false;
+    }
+  }
+
+  async function importJiraIssue() {
+    const key = dom.jiraSelect?.value;
+
+    if (!key) {
+      return;
+    }
+
+    dom.jiraSelect.disabled = true;
+    dom.jiraLoad.disabled = true;
+    dom.jiraStatus.textContent = `Loading ${key}…`;
+
+    try {
+      const result = await api('/api/jira/issue', {
+        method: 'POST',
+        body: JSON.stringify({ key })
+      });
+
+      if (!result.configured) {
+        dom.jiraStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
+        return;
+      }
+
+      if (result.error || !result.issue) {
+        dom.jiraStatus.textContent = result.error || `Jira issue ${key} was not found.`;
+        return;
+      }
+
+      dom.input.value = issueBrief(result.issue);
+      autoGrow();
+      dom.input.focus();
+      dom.jiraStatus.textContent = `Imported ${result.issue.key}. Edit it below and press Send.`;
+    } catch (error) {
+      dom.jiraStatus.textContent = error.message;
+    } finally {
+      dom.jiraSelect.disabled = false;
+      dom.jiraLoad.disabled = false;
+    }
+  }
+
+  // The dots mean "the agent is working"; the seconds next to them say how long
+  // this turn has been open, so a stalled provider looks stalled, not frozen.
+  function paintClock() {
+    if (!view.turnStartedAt) {
+      return;
+    }
+
+    const seconds = Math.max(0, Math.round((Date.now() - view.turnStartedAt) / 1000));
+
+    setStatus(`${view.turnLabel} · ${seconds}s`, true);
+  }
+
+  function startTurnClock(label = 'writing') {
+    view.turnLabel = label;
+    view.turnStartedAt = Date.now();
+    paintClock();
+
+    if (!view.statusTimer) {
+      view.statusTimer = window.setInterval(paintClock, 1000);
+    }
+  }
+
+  function setTurnLabel(label) {
+    view.turnLabel = label || 'working';
+    paintClock();
+  }
+
+  function stopTurnClock() {
+    window.clearInterval(view.statusTimer);
+    view.statusTimer = null;
+    view.turnStartedAt = 0;
   }
 
   function rawText() {
@@ -1191,6 +1406,27 @@ function createSession(flow) {
           <p class="permission-note">${escapeText(entry.description || 'Reads are pre-approved. Everything else waits for you.')}</p>
           ${actions}
         </div>
+      </article>`;
+    }
+
+    if (entry.role === 'publish') {
+      const link = entry.url
+        ? ` <a href="${escapeText(entry.url)}" target="_blank" rel="noreferrer">Open merge request</a>`
+        : '';
+
+      return `<article class="turn turn-publish" role="status">
+        <p class="turn-who">Git</p>
+        <div class="turn-body"><p>${escapeText(entry.text)}${link}</p></div>
+      </article>`;
+    }
+
+    if (entry.role === 'guard') {
+      const detail = entry.detail ? `: <code>${escapeText(entry.detail)}</code>` : '';
+
+      return `<article class="turn turn-guard" role="status">
+        <p class="turn-who">Merge guard</p>
+        <div class="turn-body"><p>Denied <code>${escapeText(entry.tool || 'tool')}</code>${detail}.
+          The agent must take a different path.</p></div>
       </article>`;
     }
 
@@ -1268,6 +1504,31 @@ function createSession(flow) {
     render();
   }
 
+  function publishEventText(event) {
+    switch (event.status) {
+      case 'branch':
+        return `Working on ${event.branch} (base ${event.base}).`;
+      case 'skipped':
+        return `Git publishing skipped: ${event.reason}`;
+      case 'committed':
+        return `Committed ${String(event.commit ?? '').slice(0, 7)} on ${event.branch}.`;
+      case 'pushed':
+        return `Pushed ${event.branch}.`;
+      case 'published':
+        return event.prUrl
+          ? `Pushed ${event.branch}; merge request ready.`
+          : `Pushed ${event.branch}; the forge did not return a merge request URL.`;
+      case 'failed':
+        return `Git publishing failed: ${event.error}`;
+      case 'abandoned':
+        return event.reason || `Branch ${event.branch} was left in place.`;
+      case 'no-changes':
+        return event.reason || 'No changes to commit.';
+      default:
+        return '';
+    }
+  }
+
   function onEvent(event) {
     if (event.seq) {
       if (event.seq <= view.seq) {
@@ -1281,13 +1542,19 @@ function createSession(flow) {
         setStatus('starting', true);
         break;
       case 'session-started':
+        view.setup = false;
+        view.running = true;
+        dom.stage.classList.remove('hidden');
+        if (flow === 'merge') {
+          setComposerVisible(true);
+        }
         addEntry('you', event.brief ?? '');
         setStatus(event.engine === 'live' ? 'interviewing · live' : 'interviewing', true);
         break;
       case 'turn-started':
         view.active = { role: 'agent', text: '' };
         view.entries.push(view.active);
-        setStatus('writing', true);
+        startTurnClock('writing');
         scheduleRender();
         break;
       case 'output':
@@ -1299,24 +1566,40 @@ function createSession(flow) {
         scheduleRender();
         break;
       case 'activity':
-        setStatus(event.label || 'working…', true);
+        setTurnLabel(event.label || 'working…');
         break;
-      case 'question':
+      case 'question': {
+        // The turn's final text replaces the streamed chunks: an agent that
+        // prints structured events should read as its reply, not as JSON.
+        stopTurnClock();
+        const target = view.active
+          ?? [...view.entries].reverse().find((entry) => entry.role === 'agent');
+
+        if (target && typeof event.text === 'string' && event.text) {
+          target.text = event.text;
+        }
+
         view.awaiting = true;
         view.active = null;
         setStatus('needs your answer', false);
-        setInputEnabled(true, 'Type your answer…');
-        dom.finish.disabled = false;
+        setInputEnabled(true, copy.answerPlaceholder);
+        if (dom.finish) {
+          dom.finish.disabled = false;
+        }
         announceStatus('The agent asked a question.');
         scheduleRender();
         break;
+      }
       case 'answer':
         view.awaiting = false;
-        dom.finish.disabled = true;
+        if (dom.finish) {
+          dom.finish.disabled = true;
+        }
         addEntry('you', event.text ?? '');
         setInputEnabled(false);
         break;
       case 'permission':
+        stopTurnClock();
         addEntry('permission', '', {
           id: event.id,
           tool: event.tool,
@@ -1332,7 +1615,9 @@ function createSession(flow) {
           .reverse()
           .find((entry) => entry.role === 'permission' && entry.state === 'pending');
 
-        if (pending) {
+        // A merge-guard decision is recorded as its own line; it never owns a
+        // permission plate, so it must not close an earlier pending one.
+        if (pending && event.reason !== 'merge-guard') {
           pending.busy = false;
           pending.state = event.reason === 'expired'
             ? 'Expired'
@@ -1342,13 +1627,38 @@ function createSession(flow) {
         }
 
         if (view.running) {
-          setStatus('writing', true);
+          startTurnClock('writing');
         }
 
         scheduleRender();
         break;
       }
+      case 'guard':
+        addEntry(
+          'guard',
+          `Denied ${event.tool ?? 'tool'}${event.detail ? `: ${event.detail}` : ''}`,
+          { tool: event.tool, detail: event.detail, reason: event.reason }
+        );
+        announceStatus('The merge guard denied a command.');
+        break;
+      case 'publish': {
+        const text = publishEventText(event);
+
+        if (text) {
+          addEntry('publish', text, {
+            url: event.status === 'published' ? event.prUrl : ''
+          });
+        }
+
+        if (event.status === 'published' && event.prUrl) {
+          announceStatus('The merge request is ready.');
+        }
+        break;
+      }
       case 'job-done':
+        if (flow === 'merge' && event.summary?.ref) {
+          view.mergeMeta = { ...(view.mergeMeta ?? {}), ref: event.summary.ref };
+        }
         finishSession('done', '', event.summary?.output);
         break;
       case 'job-failed':
@@ -1363,14 +1673,19 @@ function createSession(flow) {
   }
 
   function finishSession(kind, message = '', output = '') {
+    stopTurnClock();
     view.running = false;
     view.awaiting = false;
     view.finished = kind === 'done';
     // The finished session keeps its transcript, but the input now starts a new
     // one instead of trying to talk to a process that is already gone.
     view.jobId = null;
+    view.setup = false;
     dom.stop.disabled = true;
-    dom.finish.disabled = true;
+    dom.stage.classList.remove('hidden');
+    if (dom.finish) {
+      dom.finish.disabled = true;
+    }
 
     // A feature session ends with the spec file as the preview, not the agent's
     // one-line "spec written" confirmation.
@@ -1383,9 +1698,18 @@ function createSession(flow) {
       }
     }
 
-    setInputEnabled(true, copy.restartPlaceholder);
-    setStatus(kind === 'done' ? `${copy.finalLabel} ready` : kind === 'cancelled' ? 'stopped' : 'failed', false);
-    setScope(kind === 'done' ? `${copy.finalLabel} ready` : kind === 'cancelled' ? 'stopped' : 'session failed');
+    const readyLabel = flow === 'merge' ? 'integration branch ready' : `${copy.finalLabel} ready`;
+
+    if (flow === 'merge') {
+      // The next step is a landing decision, not another composer prompt.
+      setInputEnabled(false);
+      setComposerVisible(false);
+    } else {
+      setInputEnabled(true, copy.restartPlaceholder);
+    }
+
+    setStatus(kind === 'done' ? readyLabel : kind === 'cancelled' ? 'stopped' : 'failed', false);
+    setScope(kind === 'done' ? readyLabel : kind === 'cancelled' ? 'stopped' : 'session failed');
 
     if (message) {
       addEntry('session', message);
@@ -1414,6 +1738,681 @@ function createSession(flow) {
           ? 'Session stopped.'
           : 'Session failed.'
     );
+
+    // A feature session hands over to the build decision instead of ending at
+    // the transcript: the workflow continues with an implementation skill.
+    if (view.finished && flow === 'feature') {
+      showHandoff();
+    }
+
+    // A merge hands over to the landing decision, one branch at a time.
+    if (flow === 'merge') {
+      if (kind === 'done' && view.mergeMeta?.ref) {
+        showMergeLanding();
+      } else {
+        showMergeRetry(
+          kind === 'failed'
+            ? message
+            : kind === 'cancelled'
+              ? 'The merge was stopped before the integration branch was created.'
+              : 'The session ended without an integration branch.'
+        );
+      }
+    }
+  }
+
+  const PIPELINE_COPY = {
+    direct: {
+      label: 'Direct implementation',
+      skill: 'sdd-developer',
+      body: 'One agent run: implement the spec, review and fix, verify each story.'
+    },
+    tdd: {
+      label: 'Task-by-task TDD',
+      skill: 'spec-to-task → feature-tdd',
+      body: 'Split the spec into tasks first, then implement each task with Chicago TDD.'
+    }
+  };
+
+  function showHandoff() {
+    if (flow !== 'feature' || !view.sessionId) {
+      return;
+    }
+
+    dom.handoff.innerHTML = `
+      <section class="handoff-card" aria-labelledby="handoff-title">
+        <p class="handoff-eyebrow">Spec ready</p>
+        <h2 id="handoff-title">How should the agent build it?</h2>
+        <p class="handoff-lede">The workflow continues after the spec. Pick a path and the studio runs
+          those skills in order, in this checkout, and stops before commit.</p>
+
+        <div class="pipeline-list" role="radiogroup" aria-label="Implementation path">
+          ${Object.entries(PIPELINE_COPY).map(([id, item], index) => `
+            <label class="pipeline">
+              <input type="radio" name="pipeline" value="${id}" ${index === 0 ? 'checked' : ''}>
+              <span class="pipeline-body">
+                <span class="pipeline-name">${item.label}</span>
+                <span class="pipeline-skill">${item.skill}</span>
+                <span class="pipeline-note">${item.body}</span>
+              </span>
+            </label>
+          `).join('')}
+        </div>
+
+        <label class="toggle handoff-verify">
+          <input type="checkbox" data-role="verify" checked>
+          <span>Run E2E verification</span>
+        </label>
+        <p class="hint" data-role="verify-hint">Each User Story and its acceptance criteria get verified after implementation.</p>
+
+        <div class="actions handoff-actions">
+          <button type="button" class="btn primary" data-role="build-start">Start build</button>
+          <span class="handoff-error" data-role="build-error" role="alert"></span>
+        </div>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
+
+    const verifyBox = dom.handoff.querySelector('[data-role="verify"]');
+    const hint = dom.handoff.querySelector('[data-role="verify-hint"]');
+
+    verifyBox.addEventListener('change', () => {
+      hint.textContent = verifyBox.checked
+        ? 'Each User Story and its acceptance criteria get verified after implementation.'
+        : 'The pipeline runs with --no-verify: implementation and review still run.';
+    });
+
+    dom.handoff.querySelector('[data-role="build-start"]').addEventListener('click', startBuild);
+    announceStatus('The spec is ready. Choose how to build it.');
+  }
+
+  function hideHandoff() {
+    dom.handoff.classList.add('hidden');
+    dom.handoff.innerHTML = '';
+  }
+
+  // ---------------------------------------------------------------
+  // Merge setup and landing
+  // ---------------------------------------------------------------
+
+  function wireNewMerge(button) {
+    button?.addEventListener('click', async () => {
+      resetSession();
+      await loadConfig();
+    });
+  }
+
+  function renderMergeSetup(error = '') {
+    if (flow !== 'merge' || view.running) {
+      return;
+    }
+
+    view.setup = true;
+    view.setupError = error;
+    view.finished = false;
+    dom.stage.classList.add('hidden');
+    setComposerVisible(false);
+    setInputEnabled(false);
+    dom.stop.disabled = true;
+    if (dom.finish) {
+      dom.finish.disabled = true;
+    }
+    setStatus('ready', false);
+    setScope(copy.scope);
+
+    const git = state.config?.git;
+
+    if (!state.config) {
+      dom.handoff.innerHTML = `
+        <section class="handoff-card merge-setup">
+          <p class="handoff-eyebrow">Merge</p>
+          <h2>Loading workspace…</h2>
+        </section>
+      `;
+      dom.handoff.classList.remove('hidden');
+      return;
+    }
+
+    if (!git?.repo) {
+      dom.handoff.innerHTML = `
+        <section class="handoff-card merge-setup">
+          <p class="handoff-eyebrow">Merge</p>
+          <h2>Open the studio inside a git repository.</h2>
+          <p class="handoff-lede">A merge needs local branches. The current workspace is
+            <code>${escapeText(state.config.cwd)}</code>, and it is not a git checkout.</p>
+        </section>
+      `;
+      dom.handoff.classList.remove('hidden');
+      return;
+    }
+
+    const branches = git.branches ?? [];
+
+    if (branches.length < 2) {
+      dom.handoff.innerHTML = `
+        <section class="handoff-card merge-setup">
+          <p class="handoff-eyebrow">Merge</p>
+          <h2>This repository has only one local branch.</h2>
+          <p class="handoff-lede">Create the source branch first. A merge needs a source and a
+            target that are not the same branch.</p>
+        </section>
+      `;
+      dom.handoff.classList.remove('hidden');
+      return;
+    }
+
+    const current = branches.includes(git.branch)
+      ? git.branch
+      : (branches.includes(git.base) ? git.base : branches[0]);
+    const previous = view.setupChoice ?? {};
+    const target = branches.includes(previous.target) ? previous.target : current;
+    const source = branches.includes(previous.source) && previous.source !== target
+      ? previous.source
+      : (branches.find((branch) => branch !== target) ?? '');
+    const options = (selected) => branches
+      .map((branch) => `<option value="${escapeText(branch)}"${branch === selected ? ' selected' : ''}>${escapeText(branch)}</option>`)
+      .join('');
+
+    dom.handoff.innerHTML = `
+      <section class="handoff-card merge-setup" aria-labelledby="merge-setup-title">
+        <p class="handoff-eyebrow">Merge</p>
+        <h2 id="merge-setup-title">Review a branch merge</h2>
+        <p class="handoff-lede">The agent dry-runs the merge, asks one decision at a time, and
+          builds the integration branch. It never touches the target; landing is a separate,
+          explicit step.</p>
+        <p class="hint">With Claude Code, the studio also blocks pushes and any command that
+          touches the target. Other agents use their own permission prompts.</p>
+
+        <div class="merge-fields">
+          <label class="merge-field">
+            <span>Source</span>
+            <select data-role="merge-source" aria-label="Source branch">${options(source)}</select>
+          </label>
+          <span class="merge-arrow" aria-hidden="true">→</span>
+          <label class="merge-field">
+            <span>Into</span>
+            <select data-role="merge-target" aria-label="Target branch">${options(target)}</select>
+          </label>
+        </div>
+
+        <p class="merge-ref">Integration branch <code data-role="merge-ref"></code></p>
+        ${git.dirty && !error ? '<p class="merge-warning">The working tree has changes. Commit or stash them before starting; the studio will refuse otherwise.</p>' : ''}
+
+        <div class="actions handoff-actions">
+          <button type="button" class="btn primary" data-role="merge-start">Review merge</button>
+          <span class="handoff-error" data-role="merge-error" role="alert"></span>
+        </div>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
+
+    const sourceEl = dom.handoff.querySelector('[data-role="merge-source"]');
+    const targetEl = dom.handoff.querySelector('[data-role="merge-target"]');
+    const refEl = dom.handoff.querySelector('[data-role="merge-ref"]');
+    const errorEl = dom.handoff.querySelector('[data-role="merge-error"]');
+    const startBtn = dom.handoff.querySelector('[data-role="merge-start"]');
+
+    const update = () => {
+      const from = sourceEl.value;
+      const into = targetEl.value;
+      const same = Boolean(from && into && from === into);
+
+      refEl.textContent = same || !from || !into ? '—' : `merge/${from}-into-${into}`;
+      startBtn.disabled = same || !from || !into;
+      errorEl.textContent = same ? 'Pick two different branches.' : (view.setupError ?? '');
+      view.setupChoice = { source: from, target: into };
+    };
+
+    for (const select of [sourceEl, targetEl]) {
+      select.addEventListener('change', () => {
+        view.setupError = '';
+        update();
+      });
+    }
+
+    startBtn.addEventListener('click', () => {
+      startMergeSession(sourceEl.value, targetEl.value);
+    });
+
+    update();
+  }
+
+  async function startMergeSession(source, target) {
+    const { agentPreset, agentCmd } = selectedAgent();
+    const errorEl = dom.handoff.querySelector('[data-role="merge-error"]');
+
+    if (agentPreset === 'custom' && !agentCmd) {
+      if (errorEl) {
+        errorEl.textContent = 'Add an agent command in Settings, or pick a preset.';
+      }
+      return;
+    }
+
+    resetSession({ setup: false });
+    view.running = true;
+    view.setup = false;
+    view.mergeMeta = null;
+    dom.stage.classList.remove('hidden');
+    setComposerVisible(true);
+    dom.stop.disabled = false;
+    setInputEnabled(false);
+    setStatus('starting', true);
+    setScope('merge session running');
+    render();
+
+    try {
+      const { job } = await api(copy.endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ source, target, agentPreset, agentCmd })
+      });
+
+      view.mergeMeta = job.request?.merge ?? {
+        source,
+        target,
+        ref: `merge/${source}-into-${target}`
+      };
+      attach(job.id);
+      announceStatus('Merge session started.');
+    } catch (error) {
+      resetSession();
+      renderMergeSetup(error.message);
+      announceStatus(`The merge could not start: ${error.message}`);
+    }
+  }
+
+  function showMergeRetry(message) {
+    dom.handoff.innerHTML = `
+      <section class="handoff-card merge-retry" aria-labelledby="merge-retry-title">
+        <p class="handoff-eyebrow">Merge</p>
+        <h2 id="merge-retry-title">No integration branch yet.</h2>
+        <p class="handoff-lede">${escapeText(message || 'The session ended before the integration branch was created.')}</p>
+        <div class="actions handoff-actions">
+          <button type="button" class="btn primary" data-role="merge-new">Set up another merge</button>
+        </div>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
+    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
+    setScope('merge not created');
+  }
+
+  function showMergeLanding() {
+    const meta = view.mergeMeta ?? {};
+    const target = meta.target ?? '';
+    const ref = meta.ref ?? (meta.source ? `merge/${meta.source}-into-${target}` : '');
+
+    if (!target || !ref) {
+      showMergeRetry('The session ended without an integration branch to land.');
+      return;
+    }
+
+    dom.handoff.innerHTML = `
+      <section class="handoff-card merge-landing" aria-labelledby="merge-landing-title">
+        <p class="handoff-eyebrow">Integration branch ready</p>
+        <h2 id="merge-landing-title">Land <code>${escapeText(ref)}</code> on <code>${escapeText(target)}</code>?</h2>
+        <p class="handoff-lede">Landing is a fast-forward. The studio switches to
+          <code>${escapeText(target)}</code>, fast-forwards it, and stays there. Nothing is
+          pushed, and no merge commit is created.</p>
+
+        <dl class="merge-facts">
+          <div><dt>integration</dt><dd><code>${escapeText(ref)}</code></dd></div>
+          <div><dt>target</dt><dd><code>${escapeText(target)}</code></dd></div>
+        </dl>
+
+        <div class="actions handoff-actions">
+          <button type="button" class="btn primary" data-role="merge-land">Land on ${escapeText(target)}</button>
+          <button type="button" class="btn quiet" data-role="merge-new">New merge</button>
+          <span class="handoff-error" data-role="merge-error" role="alert"></span>
+        </div>
+
+        <p class="hint">If <code>${escapeText(target)}</code> moved since the merge started,
+          landing is refused and you start a new merge against the current target.</p>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
+
+    const landBtn = dom.handoff.querySelector('[data-role="merge-land"]');
+    const errorEl = dom.handoff.querySelector('[data-role="merge-error"]');
+    const label = `Land on ${target}`;
+
+    landBtn.addEventListener('click', async () => {
+      landBtn.disabled = true;
+      landBtn.textContent = 'Landing…';
+      errorEl.textContent = '';
+
+      try {
+        const result = await api(`${copy.endpoint}/${view.sessionId}/land`, { method: 'POST' });
+
+        showMergeLanded(result);
+        announceStatus(`Landed on ${result.target}.`);
+      } catch (error) {
+        landBtn.disabled = false;
+        landBtn.textContent = label;
+        errorEl.textContent = error.message;
+        announceStatus('The branch could not be landed.');
+      }
+    });
+
+    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
+    setScope(`ready to land on ${target}`);
+  }
+
+  function showMergeLanded(result) {
+    const target = result.target ?? 'the target';
+    const shortSha = String(result.sha ?? '').slice(0, 12);
+
+    dom.handoff.innerHTML = `
+      <section class="handoff-card merge-landed" aria-labelledby="merge-landed-title">
+        <p class="handoff-eyebrow">Landed</p>
+        <h2 id="merge-landed-title"><code>${escapeText(target)}</code> is up to date.</h2>
+        <p class="handoff-lede">Fast-forwarded to <code>${escapeText(shortSha)}</code>.
+          Nothing was pushed. You are on <code>${escapeText(target)}</code>.</p>
+        <div class="actions handoff-actions">
+          <button type="button" class="btn primary" data-role="merge-new">New merge</button>
+        </div>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
+    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
+    setScope(`landed on ${target}`);
+  }
+
+  function buildRequest() {
+    const pipeline = dom.handoff.querySelector('input[name="pipeline"]:checked')?.value ?? 'direct';
+    const verify = dom.handoff.querySelector('[data-role="verify"]')?.checked !== false;
+
+    return { pipeline, verify };
+  }
+
+  async function startBuild() {
+    const request = buildRequest();
+    const errorEl = dom.handoff.querySelector('[data-role="build-error"]');
+
+    if (errorEl) {
+      errorEl.textContent = '';
+    }
+
+    hideHandoff();
+    view.build = {
+      status: 'starting',
+      pipeline: request.pipeline,
+      verify: request.verify,
+      steps: [],
+      log: '',
+      error: '',
+      publish: null
+    };
+    view.buildPainted = false;
+    paintBuild();
+    setInputEnabled(false);
+    announceStatus('Build started.');
+
+    try {
+      await api(`${copy.endpoint}/${view.sessionId}/build`, {
+        method: 'POST',
+        body: JSON.stringify(request)
+      });
+      attachBuild();
+    } catch (error) {
+      view.build.status = 'failed';
+      view.build.error = error.message;
+      paintBuild();
+      showHandoff();
+      const message = dom.handoff.querySelector('[data-role="build-error"]');
+
+      if (message) {
+        message.textContent = error.message;
+      }
+    }
+  }
+
+  function paintBuild() {
+    if (!view.build) {
+      return;
+    }
+
+    const build = view.build;
+    const meta = PIPELINE_COPY[build.pipeline] ?? PIPELINE_COPY.direct;
+
+    if (!view.buildPainted) {
+      dom.handoff.innerHTML = `
+        <section class="build-card" aria-label="Feature build">
+          <header class="build-head">
+            <div>
+              <p class="handoff-eyebrow">Build</p>
+              <h2 data-role="build-title">${meta.label}</h2>
+              <p class="handoff-lede" data-role="build-meta"></p>
+              <p class="build-publish hidden" data-role="build-publish"></p>
+            </div>
+            <span class="badge" data-role="build-badge">starting</span>
+          </header>
+          <ol class="build-steps" data-role="build-steps"></ol>
+          <pre class="build-log" data-role="build-log" aria-label="Build output"></pre>
+          <div class="actions handoff-actions">
+            <button type="button" class="btn quiet-danger sm" data-role="build-stop">Stop build</button>
+          </div>
+        </section>
+      `;
+      dom.handoff.classList.remove('hidden');
+      dom.handoff.querySelector('[data-role="build-stop"]').addEventListener('click', stopBuild);
+      view.buildPainted = true;
+    }
+
+    const badge = dom.handoff.querySelector('[data-role="build-badge"]');
+    const metaEl = dom.handoff.querySelector('[data-role="build-meta"]');
+    const stepsEl = dom.handoff.querySelector('[data-role="build-steps"]');
+    const logEl = dom.handoff.querySelector('[data-role="build-log"]');
+    const stopBtn = dom.handoff.querySelector('[data-role="build-stop"]');
+    const state = build.status;
+
+    badge.className = `badge ${state === 'done' ? 'done' : state === 'failed' ? 'failed' : state === 'stopped' ? 'cancelled' : 'running'}`;
+    badge.textContent = state === 'done' ? 'built' : state === 'failed' ? 'failed' : state === 'stopped' ? 'stopped' : 'running';
+    stopBtn.disabled = !['starting', 'running'].includes(state);
+
+    const verifyText = build.verify ? 'E2E verification on' : 'E2E verification skipped';
+    const changed = build.summary?.changedFiles?.length;
+
+    metaEl.textContent = state === 'done'
+      ? `${verifyText} · ${changed ?? 0} file${changed === 1 ? '' : 's'} changed`
+      : state === 'failed'
+        ? `${verifyText} · ${build.error || 'the build failed'}`
+        : `${verifyText}`;
+
+    const publishEl = dom.handoff.querySelector('[data-role="build-publish"]');
+
+    if (publishEl) {
+      const publish = build.publish;
+      const text = publish ? publishEventText(publish) : '';
+
+      if (!text) {
+        publishEl.classList.add('hidden');
+        publishEl.innerHTML = '';
+      } else {
+        const link = publish?.status === 'published' && publish.prUrl
+          ? ` <a href="${escapeText(publish.prUrl)}" target="_blank" rel="noreferrer">Open merge request</a>`
+          : '';
+
+        publishEl.innerHTML = `${escapeText(text)}${link}`;
+        publishEl.classList.remove('hidden');
+      }
+    }
+
+    stepsEl.innerHTML = build.steps.map((step, index) => `
+      <li data-status="${step.status}">
+        <span class="build-step-index">${index + 1}</span>
+        <span class="build-step-name">${step.skill}</span>
+        <span class="build-step-state">${step.status === 'done' ? 'done' : step.status === 'running' ? 'running' : 'waiting'}</span>
+      </li>
+    `).join('');
+
+    if (logEl) {
+      logEl.textContent = build.log;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+
+  function scheduleBuildPaint() {
+    window.clearTimeout(view.buildTimer);
+    view.buildTimer = window.setTimeout(() => {
+      view.buildTimer = null;
+      paintBuild();
+    }, 160);
+  }
+
+  function onBuildEvent(event) {
+    if (!view.build) {
+      return;
+    }
+
+    const build = view.build;
+
+    switch (event.type) {
+      case 'build-started':
+        build.pipeline = event.pipeline ?? build.pipeline;
+        build.verify = event.verify !== false;
+        build.spec = event.spec;
+        build.steps = (event.steps ?? []).map((step) => ({
+          skill: step.skill,
+          status: 'waiting'
+        }));
+        build.status = 'running';
+        paintBuild();
+        break;
+      case 'build-step': {
+        const step = build.steps[event.index];
+
+        if (step) {
+          step.status = event.status;
+        }
+
+        build.status = 'running';
+        paintBuild();
+        break;
+      }
+      case 'output':
+        build.log += event.chunk ?? '';
+        if (build.log.length > 60000) {
+          build.log = build.log.slice(-60000);
+        }
+        scheduleBuildPaint();
+        break;
+      case 'publish':
+        build.publish = { ...event };
+        paintBuild();
+        break;
+      case 'job-done':
+        build.status = 'done';
+        build.summary = event.summary;
+        build.steps = (event.summary?.steps ?? build.steps).map((step, index) => ({
+          skill: step.skill ?? build.steps[index]?.skill ?? 'step',
+          status: 'done'
+        }));
+        build.specPath = event.summary?.specPath || build.specPath;
+        endBuild();
+        paintBuild();
+        break;
+      case 'job-failed':
+        build.status = 'failed';
+        build.error = event.message ?? 'The build failed.';
+        endBuild();
+        paintBuild();
+        break;
+      case 'job-cancelled':
+        build.status = 'stopped';
+        endBuild();
+        paintBuild();
+        break;
+      default:
+        break;
+    }
+  }
+
+  function endBuild() {
+    if (view.buildSource) {
+      view.buildSource.close();
+      view.buildSource = null;
+    }
+
+    setInputEnabled(true, copy.restartPlaceholder);
+    announceStatus(
+      view.build?.status === 'done'
+        ? 'The build finished.'
+        : view.build?.status === 'failed'
+          ? 'The build failed.'
+          : 'The build stopped.'
+    );
+  }
+
+  function attachBuild() {
+    if (view.buildSource || !view.sessionId) {
+      return;
+    }
+
+    const source = new EventSource(`${copy.endpoint}/${view.sessionId}/build/events`);
+
+    view.buildSource = source;
+    source.onmessage = (message) => {
+      try {
+        onBuildEvent(JSON.parse(message.data));
+      } catch {
+        // Ignore malformed events; the stream is best-effort.
+      }
+    };
+  }
+
+  async function stopBuild() {
+    if (!view.sessionId) {
+      return;
+    }
+
+    try {
+      await api(`${copy.endpoint}/${view.sessionId}/build/cancel`, { method: 'POST' });
+    } catch (error) {
+      if (view.build) {
+        view.build.log += `\nCould not stop the build: ${error.message}\n`;
+        paintBuild();
+      }
+    }
+  }
+
+  async function restoreBuild() {
+    if (flow !== 'feature' || !view.sessionId) {
+      return;
+    }
+
+    try {
+      const { build } = await api(`${copy.endpoint}/${view.sessionId}/build`);
+
+      if (!build) {
+        showHandoff();
+        return;
+      }
+
+      view.build = {
+        status: 'starting',
+        pipeline: build.request?.pipeline ?? 'direct',
+        verify: build.request?.verify !== false,
+        steps: [],
+        log: '',
+        error: '',
+        publish: null
+      };
+      view.buildPainted = false;
+
+      for (const event of build.events ?? []) {
+        onBuildEvent(event);
+      }
+
+      if (['running', 'waiting', 'cancelling'].includes(build.status)) {
+        view.build.status = 'running';
+        attachBuild();
+        setInputEnabled(false);
+      }
+
+      paintBuild();
+    } catch {
+      showHandoff();
+    }
   }
 
   function attach(jobId) {
@@ -1422,6 +2421,7 @@ function createSession(flow) {
     }
 
     view.jobId = jobId;
+    view.sessionId = jobId;
     view.running = true;
     view.seq = 0;
     dom.stop.disabled = false;
@@ -1441,13 +2441,19 @@ function createSession(flow) {
     source.onerror = () => setStatus('reconnecting', false);
   }
 
-  function resetSession() {
+  function resetSession({ setup = true } = {}) {
     if (view.source) {
       view.source.close();
     }
+    if (view.buildSource) {
+      view.buildSource.close();
+    }
 
     window.clearTimeout(view.renderTimer);
+    window.clearTimeout(view.buildTimer);
+    stopTurnClock();
     view.jobId = null;
+    view.sessionId = null;
     view.source = null;
     view.entries = [];
     view.active = null;
@@ -1455,25 +2461,58 @@ function createSession(flow) {
     view.running = false;
     view.finished = false;
     view.seq = 0;
+    view.build = null;
+    view.buildSource = null;
+    view.buildPainted = false;
+    view.mergeMeta = null;
+    view.setup = false;
+    view.setupError = '';
+    hideHandoff();
     dom.richView.innerHTML = '';
     dom.rawView.textContent = '';
     dom.richView.classList.add('hidden');
     dom.rawView.classList.add('hidden');
     dom.empty.classList.remove('hidden');
+    dom.stage.classList.remove('hidden');
     dom.stop.disabled = true;
-    dom.finish.disabled = true;
+    if (dom.finish) {
+      dom.finish.disabled = true;
+    }
     dom.input.value = '';
-    setInputEnabled(true, copy.placeholder);
+    if (dom.jiraSelect) {
+      dom.jiraSelect.replaceChildren(new Option('Load open issues…', ''));
+      dom.jiraSelect.disabled = true;
+    }
+    if (dom.jiraLoad) {
+      dom.jiraLoad.disabled = false;
+    }
+    if (dom.jiraStatus) {
+      dom.jiraStatus.textContent = '';
+    }
+    if (dom.publish) {
+      dom.publish.checked = true;
+    }
     setStatus('ready', false);
     setScope(copy.scope);
+
+    if (flow === 'merge') {
+      setInputEnabled(false);
+      setComposerVisible(false);
+
+      if (setup) {
+        renderMergeSetup();
+      }
+    } else {
+      setInputEnabled(true, copy.placeholder);
+      setComposerVisible(true);
+    }
+
     autoGrow();
   }
 
   async function start(brief) {
-    const agentPreset = el.form.agentPreset.value;
-    const agentCmd = agentPreset === 'custom'
-      ? el.form.agentCmd.value.trim()
-      : presetCommand(agentPreset);
+    const { agentPreset, agentCmd } = selectedAgent();
+    const publishRequested = flow === 'merge' ? false : Boolean(dom.publish?.checked);
 
     if (agentPreset === 'custom' && !agentCmd) {
       addEntry('session', 'Add an agent command in Settings, or pick a preset.');
@@ -1491,7 +2530,12 @@ function createSession(flow) {
     try {
       const { job } = await api(copy.endpoint, {
         method: 'POST',
-        body: JSON.stringify({ brief, agentPreset, agentCmd })
+        body: JSON.stringify({
+          brief,
+          agentPreset,
+          agentCmd,
+          ...(flow === 'merge' ? {} : { publish: publishRequested })
+        })
       });
 
       attach(job.id);
@@ -1527,15 +2571,15 @@ function createSession(flow) {
       view.awaiting = true;
       dom.finish.disabled = false;
       addEntry('session', `Could not send the answer: ${error.message}`);
-      setInputEnabled(true, 'Type your answer…');
+      setInputEnabled(true, copy.answerPlaceholder);
       render();
     }
   }
 
-  // The human closes the interview: the agent's last reply is the plan or spec
-  // and there is nothing left to answer. No text is inspected to decide this.
+  // The human closes the session: after the final report or spec there is
+  // nothing left to answer. No text is inspected to decide this.
   async function finish() {
-    if (!view.jobId || !view.awaiting) {
+    if (!view.jobId || !view.awaiting || !dom.finish) {
       return;
     }
 
@@ -1555,7 +2599,7 @@ function createSession(flow) {
       view.running = false;
       dom.finish.disabled = false;
       addEntry('session', `Could not finish the session: ${error.message}`);
-      setInputEnabled(true, 'Type your answer…');
+      setInputEnabled(true, copy.answerPlaceholder);
       render();
     }
   }
@@ -1589,6 +2633,15 @@ function createSession(flow) {
       const job = [...jobs].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
 
       resetSession();
+      view.sessionId = job.id;
+
+      if (flow === 'merge') {
+        view.mergeMeta = job.request?.merge ?? null;
+
+        if (job.status === 'done' && job.result?.ref && view.mergeMeta) {
+          view.mergeMeta = { ...view.mergeMeta, ref: job.result.ref };
+        }
+      }
 
       if (['running', 'waiting', 'cancelling'].includes(job.status)) {
         attach(job.id);
@@ -1600,6 +2653,10 @@ function createSession(flow) {
       }
 
       view.running = false;
+
+      if (view.finished && flow === 'feature') {
+        await restoreBuild();
+      }
     } catch {
       // History is a convenience; the studio still works without it.
     }
@@ -1638,7 +2695,9 @@ function createSession(flow) {
   dom.richBtn.addEventListener('click', () => setMode('rich'));
   dom.rawBtn.addEventListener('click', () => setMode('raw'));
   dom.stop.addEventListener('click', stop);
-  dom.finish.addEventListener('click', finish);
+  dom.finish?.addEventListener('click', finish);
+  dom.jiraLoad?.addEventListener('click', loadJiraIssues);
+  dom.jiraSelect?.addEventListener('change', importJiraIssue);
   // Approval is a security decision, not an interview answer: it keeps its own
   // explicit control instead of flowing through the composer.
   dom.richView.addEventListener('click', (event) => {
@@ -1696,12 +2755,24 @@ function createSession(flow) {
 
   resetSession();
 
-  return { reset: resetSession, restore, updateAgent, view };
+  return {
+    reset: resetSession,
+    restore,
+    updateAgent,
+    syncPublish,
+    refreshSetup: () => {
+      if (flow === 'merge' && view.setup && !view.running) {
+        renderMergeSetup(view.setupError ?? '');
+      }
+    },
+    view
+  };
 }
 
 const sessionViews = {
   enhancement: createSession('enhancement'),
-  feature: createSession('feature')
+  feature: createSession('feature'),
+  merge: createSession('merge')
 };
 
 function updateSessionAgents() {
@@ -1960,6 +3031,11 @@ async function loadConfig() {
     el.form.fetchBase.checked = settings.fetchBase !== false;
 
     updatePlan();
+    sessionViews.enhancement?.syncPublish?.();
+    sessionViews.feature?.syncPublish?.();
+    // The merge setup reads local branches from this config, so it refreshes
+    // after a landing or a retry without leaving the tab.
+    sessionViews.merge?.refreshSetup?.();
     setConnection('live', 'connected');
     // With no remembered project there is nothing to start; open Settings on the
     // first visit so the project is the first thing in reach, then stay out of

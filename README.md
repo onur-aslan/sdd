@@ -20,6 +20,31 @@ npx @onuraslan/sdd@latest install
 
 This installer reads the skill content from the installed npm package and copies it directly to the target agent directory. It does not clone the GitHub repository at runtime.
 
+#### Open the studio after installing
+
+The installer finishes by printing the next step. In VS Code, open a terminal in the project the dashboard should manage and run:
+
+```bash
+sdd studio
+```
+
+The dashboard opens in your browser automatically; there is no flag to remember. If the package is not on your `PATH` (the usual result of `npx ... install`), run it through npx instead:
+
+```bash
+npx @onuraslan/sdd@latest studio
+```
+
+To get the short `sdd` command permanently, install the package once:
+
+```bash
+npm install -g @onuraslan/sdd
+sdd studio
+```
+
+Use `--no-open` when the browser should stay closed (CI, remote shells) — the URL is still printed. `--port` and `--host` change where it listens.
+
+> **Windows PowerShell.** If the terminal refuses to run `npm`, `npx`, or `sdd` because "running scripts is disabled on this system", either use the `.cmd` shims (`npm.cmd`, `npx.cmd`, `sdd.cmd`) or allow signed scripts once with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. The `start-studio.cmd` launcher is not affected; it runs through `cmd.exe`.
+
 When the `sdd` plugin is part of the selection, the installer also registers the Playwright MCP server for the chosen target, writing it to that target's own MCP config file (Claude Code is configured through the `claude mcp add` CLI). Installing `vibecoding` alone registers no MCP server.
 
 #### Update an existing installation
@@ -268,8 +293,12 @@ For a fully disconnected run, use `--no-push --no-pr`: the sweep still commits e
 `sdd studio` opens a local dashboard for the same automation, so you do not have to remember flags or watch a terminal.
 
 ```bash
-npx @onuraslan/sdd@latest studio --open
+sdd studio
 ```
+
+The browser opens by default; `--no-open` only prints the URL. Without a global install, use `npx @onuraslan/sdd@latest studio`.
+
+On Windows, double-click **`start-studio.cmd`** in the repository instead: it starts the server, opens the dashboard, and keeps the window open if something goes wrong. No terminal command to remember. From a checkout you can also run `npm run studio`.
 
 It binds to `127.0.0.1:4321` by default and serves a single-page dashboard from the package itself, with no extra dependencies and no build step.
 
@@ -290,15 +319,26 @@ The screen is meant to be used without thinking about settings: **pick the bugs,
 - **One run at a time.** A sweep and an interview session cannot run at the same time. The dashboard rejects the second job, and the on-disk lock still guards against overlap with a scheduled CLI sweep.
 - **Keyboard and motion.** Every control is reachable by keyboard with a visible focus ring; Settings is a native modal dialog (Escape closes it and focus returns to the trigger), run status is announced to screen readers, and animations respect `prefers-reduced-motion`.
 
-**Interview sessions (Enhancement and Feature).** Both tabs run the same thing: a guided interview, held as a conversation on paper. Describe what you want, and the agent asks one question at a time. Type your answer in the composer and press **Send**; the answer becomes the next turn. There are no answer buttons and nothing parses the agent's prose — the only question on screen is the one you answer by typing. When the interview is over the agent produces the final artifact: an enhancement **plan** in the conversation, or a feature **spec** written to `docs/sdd/features/<feature>/spec.md`. A feature session ends by itself when that file appears; an enhancement session ends when you press **Finish** in the toolbar. **Stop** ends a session early; the conversation stays readable, and the composer then starts a new one.
+**Interview sessions (Enhancement and Feature).** Both tabs run the same thing: a guided interview, held as a conversation on paper. Describe what you want, and the agent asks one question at a time. Type your answer in the composer and press **Send**; the answer becomes the next turn. There are no answer buttons and nothing parses the agent's prose — the only question on screen is the one you answer by typing. When the interview is over the agent produces a checkpoint: an enhancement **plan** in the conversation, or a feature **spec** written to `docs/sdd/features/<feature>/spec.md`. The Enhancement tab goes further: approve the plan in the composer and the agent implements the approved change in this checkout, verifies it, and reports back in the same conversation. The implementation-and-verification loop is bounded to five attempts; press **Finish** after the report to close the session. A feature session ends by itself when the spec file appears. **Stop** ends a session early; the conversation stays readable, and the composer then starts a new one.
 
-The agent is held to the task for the whole session: it may read the repository to ground its questions, and a feature session may write exactly one file, its spec. Anything else is refused, and nothing is committed or pushed. The **Enhancement** tab wraps the `enhancement` skill's interview and stops at the plan; the **Feature** tab wraps `deep-spec` and stops at the spec. Both skill files are used unchanged.
+The agent is held to the task for the whole session: it may read the repository to ground its questions, and a feature session may write exactly one file, its spec. An enhancement session may not create, modify, or delete anything before the plan is approved; after approval it changes only what the plan names, runs the checks it needs, and never commits, pushes, or opens a pull request. The **Enhancement** tab runs the `enhancement` skill's interview, plan, and bounded implementation loop; the **Feature** tab runs `deep-spec` and stops at the spec. Both skill files are used unchanged.
 
-The session has a **Rich / Raw** switch. **Rich** is the paper conversation: the agent's Markdown renders as a document — headings, lists, task lists, tables, quotes, links, code — and Mermaid diagrams draw inline on a light plate. **Raw** switches the same panel to the dark inset and shows the literal text for copying. Mermaid 12.2.0 is vendored under `studio/vendor/mermaid/` (MIT, license included), so diagrams render on an air-gapped machine with no CDN. The opening message and the transcript are written to `.bug-fix/enhancements/<session>/` and `.bug-fix/features/<session>/`. A reload mid-interview reconnects to the running session, and a finished session is read back on load.
+The session has a **Rich / Raw** switch. **Rich** is the paper conversation: the agent's Markdown renders as a document — headings, lists, task lists, tables, quotes, links, code — and Mermaid diagrams draw inline on a light plate. **Raw** switches the same panel to the dark inset and shows the literal text for copying. Mermaid 12.2.0 is vendored under `studio/vendor/mermaid/` (MIT, license included), so diagrams render on an air-gapped machine with no CDN. The opening message and the transcript are written to `.bug-fix/enhancements/<session>/`, `.bug-fix/features/<session>/`, and `.bug-fix/merges/<session>/`. A reload mid-interview reconnects to the running session, and a finished session is read back on load.
 
 **How a turn is driven.** With **Claude Code**, the studio keeps one process open and feeds each answer to its stdin (stream-json), so the agent keeps its own context between turns. Reads are pre-approved; any other tool becomes a `PermissionRequest`, which the studio shows as an **Approval** plate inside the conversation with **Allow once** and **Deny**. The agent waits for that answer instead of looking frozen, and a timeout denies safely. The hook is injected as a settings layer on the command line, so your own Claude Code configuration is never edited. Every other agent uses a replay-per-turn fallback: each turn re-invokes the agent with the brief and the transcript so far, which works with any one-shot CLI. If the agent process dies mid-interview the session fails with that message instead of hanging.
 
-Approval and implementation remain the next step: a session ends at the plan or spec.
+**After the plan or the spec.** An enhancement session implements its approved plan in the same conversation and stops at the report, so it needs no separate build step. A feature session does not end the workflow: when `spec.md` appears, the transcript stays on screen and a **Spec ready** plate takes the composer's place. It asks the two decisions the [feature workflow](cli/workflows/workflow-feature-development.md) leaves to a human:
+
+- **Which path?** *Direct implementation* runs `sdd-developer`. *Task-by-task TDD* runs `spec-to-task` first, then `feature-tdd` over the `feature.md` it writes.
+- **Run E2E verification?** Checked by default. Unchecking adds `--no-verify` to the implementation skill, exactly as the workflow documents.
+
+**Start build** runs the chosen skills one process at a time in the current checkout. Each step is listed with its state and a dark log inset shows the agent's output; **Stop build** aborts the running step and the chain. A failed step names itself and stops the rest. The build never commits, pushes, or opens a merge request — it stops so you can review the diff and run your own review. The skill files themselves are used unchanged. The handoff and build state are reloadable: a page refresh re-attaches to a running build or shows the last one's result.
+
+**Merge.** The **Merge** tab is separate because its safety rules are different. Pick a **Source** and an **Into** branch; the target defaults to the current branch. A dirty working tree blocks the start and the server lists the changed files, and an integration branch that already exists is refused instead of reused. The agent dry-runs the merge, asks only about risky conflicts — one at a time, answered in the same composer — and commits the result to `merge/<source>-into-<target>`. The target is never checked out, modified, or deleted.
+
+With **Claude Code**, a studio-side guard makes the merge safe without a prompt for every conflict file: edits to conflicted files and read/commit git commands are allowed, while `push`, remotes, `--force`, `reset --hard`, and any command that switches to or rewrites the target are denied and shown in the conversation. Other agents keep their own permission prompts. The guard is defense in depth; the skill's own rules still apply.
+
+A merge session ends structurally when the integration branch exists, not when the agent's reply says so. A **Land** plate then appears: landing is a separate click that checks the target has not moved, switches to it when the tree is clean, runs `git merge --ff-only`, and stays there. It never pushes and never creates a merge commit. If the target advanced since the merge started, landing is refused with the reason and you start a new merge; if the switch fails, the previous branch is restored.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -311,7 +351,7 @@ Approval and implementation remain the next step: a session ends at the plan or 
 | `GET /api/sweeps/:id` | Job snapshot, including all events so far |
 | `GET /api/sweeps/:id/events` | Live SSE event stream |
 | `POST /api/sweeps/:id/cancel` | Abort a running sweep |
-| `POST /api/enhancements` | Start an interview session that ends in a plan |
+| `POST /api/enhancements` | Start an enhancement session: interview, approve the plan, implement and verify |
 | `GET /api/enhancements` | List enhancement sessions, newest last |
 | `GET /api/enhancements/:id` | Session snapshot, including all events so far |
 | `GET /api/enhancements/:id/events` | Live SSE event stream for a session |
@@ -320,6 +360,15 @@ Approval and implementation remain the next step: a session ends at the plan or 
 | `GET /api/features` / `GET /api/features/:id` | List feature sessions / read one |
 | `GET /api/features/:id/events` | Live SSE event stream for a feature session |
 | `POST /api/features/:id/cancel` | Stop a running feature session |
+| `POST /api/features/:id/build` | Start the chosen build pipeline after the spec |
+| `GET /api/features/:id/build` | The last build for that session, including its events |
+| `GET /api/features/:id/build/events` | Live SSE event stream for the build |
+| `POST /api/features/:id/build/cancel` | Stop the running build step |
+| `POST /api/merges` | Start a merge: validate both branches and a clean tree, then build the integration branch |
+| `GET /api/merges` / `GET /api/merges/:id` | List merge sessions / read one |
+| `GET /api/merges/:id/events` | Live SSE event stream for a merge session |
+| `POST /api/merges/:id/cancel` | Stop a running merge session |
+| `POST /api/merges/:id/land` | Fast-forward the target onto the finished integration branch |
 | `POST /api/jobs/:id/input` | Answer the agent's current question |
 
 ### Core Skills
@@ -350,8 +399,8 @@ Utilities for glossary management, working conventions, safe Git branch merging,
 | `ask-first` | `/ask-first` | Plan before implement — pause for approval on non-trivial tasks |
 | `buy-before-build` | `/buy-before-build` | Prefer industry best practices and proven solutions before custom builds |
 | `grounded-mode` | `/grounded-mode` | Persistent grounded response mode, toggleable by the user |
-| `merge` | `/merge <source-branch> [target-branch]` | Merge branches into a reviewable integration branch and resolve conflicts safely |
 | `git-cleanup-playwright-artifacts` | `/git-cleanup-playwright-artifacts` | Clean up Playwright screenshots and test artifacts |
+| `merge` | `/merge <source-branch> [target-branch] [--lang <language>]` | Merge a branch into a reviewable integration branch, resolving conflicts without touching the target |
 
 ---
 

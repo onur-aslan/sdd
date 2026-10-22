@@ -1422,6 +1422,53 @@ input[type="checkbox"]:disabled {
   margin-top: 4px;
 }
 
+.session-import {
+  display: grid;
+  gap: 7px;
+  width: min(540px, 100%);
+  margin: 22px auto 0;
+  text-align: left;
+}
+
+.session-import-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-import-label {
+  flex: none;
+  color: var(--muted);
+  font: 600 9.5px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.session-import select {
+  min-width: 0;
+  height: 32px;
+  font-size: 12px;
+}
+
+.session-import .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.session-import-status {
+  min-height: 16px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.session-publish {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 /* ------------------------------------------------------------
    Conversation turns
    ------------------------------------------------------------ */
@@ -1479,6 +1526,29 @@ input[type="checkbox"]:disabled {
 .turn-session p {
   color: var(--signal);
   font: 12px/1.6 var(--sans);
+}
+
+.turn-publish {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper-2);
+}
+
+.turn-publish .turn-who {
+  color: var(--accent);
+}
+
+.turn-publish .turn-body p {
+  margin: 0;
+  color: var(--ink-2);
+  font: 12.5px/1.6 var(--sans);
+}
+
+.turn-publish a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* Approval is the one place a button belongs inside the transcript: it is a
@@ -1700,6 +1770,351 @@ input[type="checkbox"]:disabled {
 .session-send svg {
   width: 17px;
   height: 17px;
+}
+
+/* ------------------------------------------------------------
+   Handoff — the feature workflow continues after the spec
+   ------------------------------------------------------------ */
+
+.handoff {
+  flex: none;
+  width: 100%;
+  max-width: 780px;
+  margin: 16px auto 0;
+}
+
+.handoff-card,
+.build-card {
+  padding: 20px 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--paper);
+  box-shadow: 0 1px 2px oklch(0.2 0.02 245 / 0.04);
+}
+
+.handoff-eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font: 600 9.5px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.handoff-card h2,
+.build-head h2 {
+  margin: 7px 0 0;
+  color: var(--ink);
+  font: 400 21px/1.22 var(--serif);
+}
+
+.build-head h2 {
+  font-size: 18px;
+}
+
+.handoff-lede {
+  max-width: 60ch;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.build-publish {
+  margin: 8px 0 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.build-publish a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pipeline-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+}
+
+.pipeline {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+
+.pipeline:hover {
+  border-color: var(--line-strong);
+  background: var(--paper-2, var(--accent-soft));
+}
+
+.pipeline:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pipeline input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.pipeline-body {
+  display: grid;
+  gap: 2px;
+}
+
+.pipeline-name {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pipeline-skill {
+  color: var(--accent);
+  font: 11px/1.4 var(--mono);
+}
+
+.pipeline-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.handoff-verify {
+  margin-top: 14px;
+}
+
+.handoff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.handoff-error {
+  color: var(--signal);
+  font-size: 12px;
+}
+
+.build-head {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.build-head .badge {
+  flex: none;
+  margin-top: 2px;
+}
+
+.build-steps {
+  display: grid;
+  margin: 16px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+
+.build-steps li {
+  display: grid;
+  grid-template-columns: 26px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.build-step-index {
+  color: var(--muted);
+  font: 10.5px/1 var(--mono);
+}
+
+.build-step-name {
+  color: var(--ink);
+  font: 12px/1.4 var(--mono);
+}
+
+.build-step-state {
+  color: var(--muted);
+  font: 9.5px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.build-steps li[data-status="running"] .build-step-state {
+  color: var(--accent);
+}
+
+.build-steps li[data-status="done"] .build-step-state {
+  color: var(--success);
+}
+
+.build-log {
+  max-height: 200px;
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: var(--r);
+  background: var(--term);
+  color: var(--term-ink);
+  font: 11px/1.55 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------
+   Merge — setup, guard, and the explicit landing step
+   ------------------------------------------------------------ */
+
+/* With the transcript hidden during setup, the card is the whole page: give it
+   a little air instead of gluing it to the session bar. */
+.session-stage.hidden + .handoff {
+  margin-top: clamp(24px, 9vh, 88px);
+}
+
+.merge-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+  margin-top: 18px;
+}
+
+.merge-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.merge-field > span {
+  color: var(--muted);
+  font: 600 9.5px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.merge-field select {
+  height: 38px;
+  padding-right: 30px;
+  font: 400 12.5px/1.4 var(--mono);
+  text-overflow: ellipsis;
+}
+
+.merge-arrow {
+  padding-bottom: 9px;
+  color: var(--accent);
+  font: 400 18px/1 var(--serif);
+}
+
+.merge-setup .hint {
+  margin: 8px 0 0;
+}
+
+.merge-ref {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.merge-ref code {
+  margin-left: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.merge-warning {
+  margin: 10px 0 0;
+  color: var(--signal);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.merge-facts {
+  display: grid;
+  margin: 14px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.merge-facts > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.merge-facts dt {
+  color: var(--muted);
+  font: 9.5px/1.9 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.merge-facts dd {
+  margin: 0;
+  color: var(--ink);
+  font: 12px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.merge-landing h2 code,
+.merge-landed h2 code {
+  font-size: 0.82em;
+  overflow-wrap: anywhere;
+}
+
+.merge-landed h2 {
+  color: var(--success);
+}
+
+/* A denied command is a decision, not a red alert: a margin rule and the
+   attention ink are enough. */
+.turn-guard {
+  padding: 10px 14px;
+  border-left: 3px solid var(--signal);
+  background: var(--signal-soft);
+}
+
+.turn-guard .turn-who {
+  color: var(--signal);
+}
+
+.turn-guard .turn-body p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.turn-guard code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in oklch, var(--signal) 8%, var(--paper));
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 680px) {
+  .merge-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .merge-arrow {
+    display: none;
+  }
 }
 
 /* ------------------------------------------------------------

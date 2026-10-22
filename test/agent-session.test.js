@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,11 +15,15 @@ import {
   buildTurnPrompt,
   detectAgentEngine,
   findSessionArtifact,
+  mergePermissionDecision,
+  parseAgentReply,
   permissionHookSettings,
   readSessionSkill,
+  refExists,
   resolveSessionFlow,
   runInterviewSession,
   snapshotArtifacts,
+  stripAnsi,
   validateBrief
 } from '../cli/agent-session.js';
 import { DEFAULT_AGENT_COMMAND, normalizeAgentCommand } from '../cli/bug-sweep.js';
@@ -67,21 +72,37 @@ test('validateBrief trims and rejects empty or oversized briefs', () => {
 });
 
 test('each flow resolves to its own skill and final artifact', () => {
-  assert.equal(resolveSessionFlow('enhancement').finalLabel, 'plan');
+  assert.equal(resolveSessionFlow('enhancement').planLabel, 'plan');
+  assert.equal(resolveSessionFlow('enhancement').finalLabel, 'report');
+  assert.equal(resolveSessionFlow('enhancement').maxTurns, 5);
   assert.equal(resolveSessionFlow('feature').finalLabel, 'spec');
+  assert.equal(resolveSessionFlow('merge').mode, 'merge');
+  assert.equal(resolveSessionFlow('merge').finalLabel, 'merge report');
   assert.equal(resolveSessionFlow('enhancement').skillPath.endsWith(path.join('enhancement', 'SKILL.md')), true);
   assert.equal(resolveSessionFlow('feature').skillPath.endsWith(path.join('deep-spec', 'SKILL.md')), true);
+  assert.equal(
+    resolveSessionFlow('merge').skillPath.endsWith(path.join('vibecoding', 'skills', 'merge', 'SKILL.md')),
+    true
+  );
   assert.throws(() => resolveSessionFlow('deploy'), /Unknown session flow/);
   assert.ok(readSessionSkill('enhancement').length > 100);
   assert.ok(readSessionSkill('feature').length > 100);
+  assert.ok(readSessionSkill('merge').length > 100);
 });
 
-test('the session contract asks one question at a time and includes the skill', () => {
+test('the enhancement contract gates implementation on plan approval and includes the skill', () => {
   const instructions = buildSessionInstructions('enhancement', { skillText: '# Enhancement\n\nStep 1: interview.' });
 
   assert.match(instructions, /one question at a time/i);
-  assert.match(instructions, /Do not modify, create, or delete any file/);
-  assert.match(instructions, /Stop at the plan/);
+  // The plan is a checkpoint: nothing changes before the human approves it.
+  assert.match(instructions, /Do not modify, create, or delete any file before the human approves the plan/);
+  assert.match(instructions, /Phase 2: implement and verify/);
+  assert.match(instructions, /explicitly approves/);
+  assert.match(instructions, /Bound the implementation-and-verification loop to 5 attempts/);
+  assert.match(instructions, /Do not commit\. Do not push/);
+  assert.doesNotMatch(instructions, /Stop at the plan/);
+  assert.match(instructions, /## What the plan must contain/);
+  assert.match(instructions, /## What the final report must contain/);
   assert.match(instructions, /Step 1: interview\./);
   // The studio no longer turns prose into buttons, so the contract must not
   // prescribe an option shape or a question fence.
@@ -120,6 +141,18 @@ test('the opening message carries the request, and turn prompts replay the trans
   assert.match(prompt, /Which storage\?/);
   assert.match(prompt, /Local disk\./);
   assert.match(prompt, /Continue:/);
+
+  // After a plan is approved, the next replay prompt names the phase that starts.
+  const enhancement = buildTurnPrompt('enhancement', {
+    brief: 'Add a command palette.',
+    turns: [
+      { role: 'assistant', text: '# Plan\n\nUse local disk.' },
+      { role: 'user', text: 'Approved. Implement it.' }
+    ]
+  });
+
+  assert.match(enhancement, /If it approves the plan, implement and verify it now/);
+  assert.match(enhancement, /final report/);
 });
 
 test('the engine follows the executable, and the live command asks before writing', () => {
@@ -167,8 +200,106 @@ test('the permission hook settings point at the shipped hook script', () => {
   assert.equal(hook.timeout, 60);
 });
 
-test('the flows stay separate and cover both skills', () => {
-  assert.deepEqual(Object.keys(SESSION_FLOWS).sort(), ['enhancement', 'feature']);
+test('the flows stay separate and cover every skill', () => {
+  assert.deepEqual(Object.keys(SESSION_FLOWS).sort(), ['enhancement', 'feature', 'merge']);
+});
+
+test('the merge contract protects the target and ends at the integration branch', () => {
+  const instructions = buildSessionInstructions('merge', { skillText: '# Merge\n\nAsk first.' });
+
+  assert.match(instructions, /Never\s+check out, modify, or delete the target branch/);
+  assert.match(instructions, /Never push, force-push/);
+  assert.match(instructions, /session ends when that/);
+  assert.match(instructions, /## What the final merge report must contain/);
+  assert.match(instructions, /# Merge/);
+  assert.doesNotMatch(instructions, /## What the plan must contain/);
+
+  const opening = buildSessionOpening('merge', 'Merge "feat/x" into "main".');
+
+  assert.match(opening, /preflight checks/);
+  assert.doesNotMatch(opening, /first single question/);
+
+  const turn = buildTurnPrompt('merge', {
+    brief: 'Merge "feat/x" into "main".',
+    turns: [
+      { role: 'assistant', text: 'Resolve auth.ts by keeping both guards?' },
+      { role: 'user', text: 'Yes, keep both.' }
+    ]
+  });
+
+  assert.match(turn, /build the merge on the/);
+  assert.match(turn, /session ends when the integration branch exists/);
+});
+
+test('the merge guard allows edits and safe git but refuses the target and a push', () => {
+  const target = 'main';
+  const decide = (tool, detail) => mergePermissionDecision({ tool, detail }, { target });
+
+  assert.equal(decide('Edit', 'src/app.js').behavior, 'allow');
+  assert.equal(decide('Write', 'src/app.js').behavior, 'allow');
+  assert.equal(decide('Bash', 'git status --porcelain').behavior, 'allow');
+  assert.equal(decide('Bash', 'git add src/app.js').behavior, 'allow');
+  assert.equal(decide('Bash', 'git commit -m "resolve"').behavior, 'allow');
+  assert.equal(decide('Bash', 'git checkout -b merge/feat-into-main main').behavior, 'allow');
+  assert.equal(decide('Bash', 'git switch -c merge/feat-into-main main').behavior, 'allow');
+  assert.equal(decide('Bash', 'git push origin main').behavior, 'deny');
+  assert.equal(decide('Bash', 'git checkout main').behavior, 'deny');
+  assert.equal(decide('Bash', 'git switch main').behavior, 'deny');
+  assert.equal(decide('Bash', 'git branch -D main').behavior, 'deny');
+  assert.equal(decide('Bash', 'git branch -f main HEAD').behavior, 'deny');
+  assert.equal(decide('Bash', 'git reset --hard HEAD').behavior, 'deny');
+  assert.equal(decide('Bash', 'git commit --amend -m "x"').behavior, 'deny');
+  // Unknown commands, other tools, and compound commands go to the human.
+  assert.equal(decide('Bash', 'npm install left-pad'), null);
+  assert.equal(decide('Bash', 'git status && git push'), null);
+  assert.equal(decide('Read', 'src/app.js'), null);
+});
+
+test('a live merge session ends when the integration branch exists', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-merge-'));
+  const ref = 'merge/feat-into-main';
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  spawnSync('git', ['init', '-q'], { cwd: root });
+  spawnSync('git', ['config', 'user.email', 'merge@example.com'], { cwd: root });
+  spawnSync('git', ['config', 'user.name', 'Merge Bot'], { cwd: root });
+  fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+  spawnSync('git', ['add', '-A'], { cwd: root });
+  spawnSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+  let questions = 0;
+
+  const summary = await runInterviewSession(
+    {
+      flow: 'merge',
+      brief: 'Merge "feat" into "main".',
+      agentPreset: 'claude',
+      agentCmd: DEFAULT_AGENT_COMMAND,
+      merge: { source: 'feat', target: 'main', ref, baseSha: '' }
+    },
+    {
+      cwd: root,
+      id: 'merge-live-1',
+      spawnProcess: fakeLiveSpawn(() => {
+        // The branch is the structural end of the session, not a phrase.
+        spawnSync('git', ['branch', ref], { cwd: root });
+
+        return '# Merge report\n\nClean merge; the integration branch is ready.';
+      }),
+      terminate: (child) => child.kill?.(),
+      emit: () => {},
+      waitForAnswer: async () => {
+        questions += 1;
+        return { cancelled: true };
+      }
+    }
+  );
+
+  assert.equal(questions, 0);
+  assert.equal(summary.ref, ref);
+  assert.equal(refExists(root, ref), true);
+  assert.match(summary.output, /Clean merge/);
 });
 
 // A stand-in for Claude Code in stream-json mode: it answers each user message
@@ -256,7 +387,7 @@ test('a live session asks, waits, then finishes at the plan', async (t) => {
         asked.push(question.text);
         replies += 1;
 
-        // The plan has no artifact: the human closes the interview.
+        // The human may stop at the plan even though the flow can continue.
         return replies === 1 ? { answer: 'Local disk.' } : { done: true };
       }
     }
@@ -269,6 +400,52 @@ test('a live session asks, waits, then finishes at the plan', async (t) => {
   assert.match(summary.output, /# Plan/);
   assert.match(outputs.join(''), /# Plan/);
   assert.ok(fs.existsSync(path.join(root, '.bug-fix', '.gitignore')));
+});
+
+test('a live session implements after the plan is approved and ends at the report', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-implement-'));
+  const asked = [];
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const summary = await runInterviewSession(
+    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
+    {
+      cwd: root,
+      id: 'implement-1',
+      spawnProcess: fakeLiveSpawn((turn) => {
+        if (turn === 1) {
+          return 'Local disk or a database?';
+        }
+
+        if (turn === 2) {
+          return '# Plan\n\nUse local disk.';
+        }
+
+        return '# Report\n\nAdded palette.js and verified it.';
+      }),
+      terminate: (child) => child.kill?.(),
+      emit: () => {},
+      waitForAnswer: async (question) => {
+        asked.push(question.text);
+
+        if (asked.length === 1) {
+          return { answer: 'Local disk.' };
+        }
+
+        if (asked.length === 2) {
+          return { answer: 'Approved. Implement it.' };
+        }
+
+        return { done: true };
+      }
+    }
+  );
+
+  assert.equal(asked.length, 3);
+  assert.match(asked[1], /# Plan/);
+  assert.match(asked[2], /# Report/);
+  assert.equal(summary.output, '# Report\n\nAdded palette.js and verified it.');
 });
 
 test('a live session answers a permission request through the studio', async (t) => {
@@ -398,6 +575,75 @@ test('a cancelled session reports a cancellation instead of a failure', async (t
     ),
     (error) => error.cancelled === true
   );
+});
+
+test('structured agent output is read as text, not echoed as JSON', () => {
+  const stdout = [
+    JSON.stringify({ type: 'step_start', part: { type: 'step-start' } }),
+    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Where are saved searches stored?' } }),
+    JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'read' } }),
+    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Pick one.' } }),
+    JSON.stringify({ type: 'step_finish', part: { type: 'step-finish' } })
+  ].join('\n');
+
+  const parsed = parseAgentReply(stdout);
+
+  assert.equal(parsed.structured, true);
+  assert.equal(parsed.error, '');
+  assert.equal(parsed.text, 'Where are saved searches stored?\n\nPick one.');
+});
+
+test('a structured error event fails the turn instead of becoming the reply', () => {
+  const parsed = parseAgentReply(JSON.stringify({
+    type: 'error',
+    error: {
+      name: 'APIError',
+      data: { message: "model 'llama3.2:3b' not found" }
+    }
+  }));
+
+  assert.equal(parsed.text, '');
+  assert.match(parsed.error, /llama3\.2:3b' not found/);
+
+  // OpenCode's abort shape has no top-level `type` at all.
+  const aborted = parseAgentReply(JSON.stringify({
+    error: { type: 'aborted', message: 'Tool execution interrupted' },
+    content: []
+  }));
+
+  assert.equal(aborted.structured, true);
+  assert.match(aborted.error, /Tool execution interrupted/);
+
+  assert.equal(stripAnsi('\u001b[0m> build \u00b7 qwen\u001b[0m\r\nPONG'), '> build \u00b7 qwen\nPONG');
+});
+
+test('a turn-based session shows the text from structured events, not the raw stream', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-json-'));
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const stdout = [
+    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Which layout?' } }),
+    JSON.stringify({ type: 'step_finish', part: { type: 'step-finish' } })
+  ].join('\n');
+  let asked = '';
+
+  await runInterviewSession(
+    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'opencode', agentCmd: '["opencode","run"]' },
+    {
+      cwd: root,
+      id: 'json-1',
+      spawnImpl: async () => ({ code: 0, stdout, stderr: '\u001b[0m> build \u00b7 llama\u001b[0m\n' }),
+      emit: () => {},
+      waitForAnswer: async (question) => {
+        asked = question.text;
+
+        return { done: true };
+      }
+    }
+  );
+
+  assert.equal(asked, 'Which layout?');
 });
 
 test('a turn-based session reports a non-zero agent exit', async (t) => {

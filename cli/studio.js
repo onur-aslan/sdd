@@ -23,6 +23,15 @@ import {
   runProcess
 } from './bug-sweep.js';
 import { runInterviewSession, resolveSessionFlow, validateBrief } from './agent-session.js';
+import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
+import {
+  abandonSessionPublish,
+  beginSessionPublish,
+  commitSessionWork,
+  createSessionPublishPlan,
+  publishSessionWork,
+  sessionSlug
+} from './session-publish.js';
 
 export const STUDIO_DEFAULT_PORT = 4321;
 export const STUDIO_DEFAULT_HOST = '127.0.0.1';
@@ -74,7 +83,8 @@ const assetsDir = fileURLToPath(new URL('../studio/', import.meta.url));
 // Both session workflows expose the same shape of API under their own prefix.
 const SESSION_ROUTE_PREFIXES = [
   { prefix: '/api/enhancements', flow: 'enhancement' },
-  { prefix: '/api/features', flow: 'feature' }
+  { prefix: '/api/features', flow: 'feature' },
+  { prefix: '/api/merges', flow: 'merge' }
 ];
 
 const CONTENT_TYPES = {
@@ -105,10 +115,12 @@ export function formatStudioHelp() {
 Usage:
   sdd studio [options]
 
+The browser opens automatically when the terminal is interactive.
+
 Options:
   --port <n>     Port to listen on (default: ${STUDIO_DEFAULT_PORT})
   --host <addr>  Interface to bind (default: ${STUDIO_DEFAULT_HOST}, local only)
-  --open         Open the dashboard in your browser
+  --no-open      Do not open the dashboard in your browser
 
 The dashboard drives "sdd bug-sweep" from the browser: pick a Jira project,
 watch each bug get fixed one at a time, and open the pull request. Later
@@ -117,14 +129,16 @@ steps that need your input.
 
 Examples:
   sdd studio
-  sdd studio --port 8080 --open
+  sdd studio --port 8080 --no-open
 `;
 }
 
 export function parseStudioArgs(argv = []) {
   let port = STUDIO_DEFAULT_PORT;
   let host = STUDIO_DEFAULT_HOST;
-  let open = false;
+  // null means "decide by terminal": open in an interactive shell, stay closed
+  // in tests, pipes, and CI.
+  let open = null;
 
   for (let index = 0; index < argv.length; index += 1) {
     const [name, inline] = splitFlag(argv[index]);
@@ -151,6 +165,11 @@ export function parseStudioArgs(argv = []) {
 
     if (name === '--open') {
       open = true;
+      continue;
+    }
+
+    if (name === '--no-open') {
+      open = false;
       continue;
     }
 
@@ -243,6 +262,132 @@ function isAlive(job) {
   );
 }
 
+function mergeError(statusCode, message) {
+  const error = new Error(message);
+
+  error.statusCode = statusCode;
+
+  return error;
+}
+
+async function localBranches(cwd) {
+  // Most recently committed first: the merge setup uses this order for its
+  // dropdowns, so the branch just worked on is at the top.
+  const result = await runProcess(
+    'git',
+    ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads'],
+    { cwd }
+  );
+
+  if (result.code !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// A merge starts only from a clean tree with two real local branches. The
+// integration branch is created by the agent, never by this validation.
+async function validateMergeRequest(cwd, request = {}) {
+  const source = String(request.source ?? '').trim();
+  const target = String(request.target ?? '').trim();
+
+  if (!source || !target) {
+    throw mergeError(400, 'Pick a source branch and a target branch.');
+  }
+
+  if (source === target) {
+    throw mergeError(400, 'Pick two different branches.');
+  }
+
+  const inside = await runProcess('git', ['rev-parse', '--is-inside-work-tree'], { cwd });
+
+  if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
+    throw mergeError(400, 'The studio is not running inside a git repository.');
+  }
+
+  const branches = await localBranches(cwd);
+
+  if (!branches.includes(source)) {
+    throw mergeError(400, `The source branch "${source}" does not exist.`);
+  }
+
+  if (!branches.includes(target)) {
+    throw mergeError(400, `The target branch "${target}" does not exist.`);
+  }
+
+  const dirty = (await runProcess('git', ['status', '--porcelain'], { cwd })).stdout.trim();
+
+  if (dirty) {
+    const changed = dirty
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(0, 6)
+      .map((line) => line.trim());
+
+    throw mergeError(
+      409,
+      `The working tree has changes. Commit or stash them before a merge: ${changed.join(', ')}.`
+    );
+  }
+
+  const ref = `merge/${source}-into-${target}`;
+  const exists = await runProcess('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`], { cwd });
+
+  if (exists.code === 0) {
+    throw mergeError(
+      409,
+      `The integration branch "${ref}" already exists. Delete it, or merge into a different target.`
+    );
+  }
+
+  const base = await runProcess('git', ['rev-parse', target], { cwd });
+
+  if (base.code !== 0) {
+    throw mergeError(400, `Could not read the target branch "${target}".`);
+  }
+
+  return { source, target, ref, baseSha: base.stdout.trim() };
+}
+
+function mergeBrief(merge) {
+  return [
+    `Merge "${merge.source}" into "${merge.target}" through the integration branch "${merge.ref}".`,
+    `The target "${merge.target}" stays untouched until you land the branch.`,
+    'Start with the preflight checks and the dry run; ask only when a decision is needed.'
+  ].join('\n');
+}
+
+function sessionWorkDir(cwd, id) {
+  return path.join(path.resolve(cwd, DEFAULT_WORK_DIR), 'sessions', id);
+}
+
+function sessionChangeTitle(flow, brief) {
+  const first = String(brief ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? 'studio session';
+  const line = first.replace(/^[A-Z][A-Z0-9_]*-\d+:\s*/, '').slice(0, 72).trim() || 'studio session';
+
+  return `feat: ${line}`;
+}
+
+function sessionChangeBody({ flow, id, brief, extra = '' }) {
+  return [
+    `SDD studio ${flow} session ${id}`,
+    '',
+    String(brief ?? '').slice(0, 4000),
+    extra
+  ].filter((part) => part !== '').join('\n');
+}
+
+function featureNameFromSpec(specPath) {
+  return path.basename(path.dirname(String(specPath ?? ''))) || 'feature';
+}
+
 export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, terminate, now } = {}) {
   const jobs = new Map();
   const pendingInputs = new Map();
@@ -267,6 +412,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
       request,
+      publish: job.publish ?? null,
       result: job.result,
       error: job.error,
       events: job.events
@@ -294,7 +440,11 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     const active = activeJobId ? jobs.get(activeJobId) : null;
 
     if (active && isAlive(active)) {
-      const label = active.type === 'bug-sweep' ? 'sweep' : 'session';
+      const label = active.type === 'bug-sweep'
+        ? 'sweep'
+        : active.type === 'feature-build'
+          ? 'build'
+          : 'session';
       const error = new Error(`A ${label} is already running (${active.id}). Wait for it or cancel it first.`);
       error.statusCode = 409;
       throw error;
@@ -369,13 +519,15 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
   }
 
   // An interview session with the agent: one question at a time, then a plan
-  // (enhancement) or a spec (feature). The skill files stay untouched on disk.
+  // that the enhancement flow implements after approval, or a spec (feature).
+  // The skill files stay untouched on disk.
   function startSession(flow, request = {}) {
     const config = resolveSessionFlow(flow);
 
     assertIdle();
 
     const brief = validateBrief(request.brief);
+    const merge = request.merge && typeof request.merge === 'object' ? request.merge : null;
     const saved = readStore(cwd);
     const agentPreset = request.agentPreset ?? saved.agentPreset;
     const agentCmd = request.agentCmd ?? saved.agentCmd;
@@ -398,6 +550,15 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     }
 
     const id = randomUUID();
+    const publish = config.id === 'merge'
+      ? null
+      : createSessionPublishPlan({
+        flow: config.id,
+        brief,
+        id,
+        request: { publish: request.publish, base: request.base, push: request.push, pr: request.pr },
+        saved
+      });
     const job = {
       id,
       type: config.id,
@@ -405,7 +566,14 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       status: 'running',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      request: { brief, agentPreset, agentCmd },
+      request: {
+        brief,
+        agentPreset,
+        agentCmd,
+        ...(publish ? { publish: publish.enabled } : {}),
+        ...(merge ? { merge } : {})
+      },
+      publish,
       events: [],
       listeners: new Set(),
       result: null,
@@ -419,37 +587,127 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
     emit(job, { type: 'job-started', jobId: id, kind: config.id });
 
-    runInterviewSession(
-      { flow: config.id, brief, agentPreset, agentCmd },
-      {
-        cwd,
-        id,
-        spawnImpl,
-        spawnProcess,
-        terminate,
-        signal: job.controller.signal,
-        emit: (event) => emit(job, event),
-        waitForAnswer: (question) => askInput(job, question),
-        waitForPermission: (request) => askPermission(job, request),
-        logger: (line) => emit(job, { type: 'log', line })
+    (async () => {
+      if (publish) {
+        try {
+          ensureWorkDir(path.resolve(cwd, DEFAULT_WORK_DIR));
+        } catch {
+          // The session still runs; publish will report a clear git error if it must.
+        }
+
+        await beginSessionPublish({
+          cwd,
+          publish,
+          emit: (event) => emit(job, event)
+        });
       }
-    )
-      .then((summary) => {
+
+      return runInterviewSession(
+        { flow: config.id, brief, agentPreset, agentCmd, ...(merge ? { merge } : {}) },
+        {
+          cwd,
+          id,
+          spawnImpl,
+          spawnProcess,
+          terminate,
+          signal: job.controller.signal,
+          emit: (event) => emit(job, event),
+          waitForAnswer: (question) => askInput(job, question),
+          waitForPermission: (request) => askPermission(job, request),
+          logger: (line) => emit(job, { type: 'log', line })
+        }
+      );
+    })()
+      .then(async (summary) => {
         job.result = summary;
 
         if (job.cancelled) {
+          if (publish) {
+            await abandonSessionPublish({
+              cwd,
+              publish,
+              emit: (event) => emit(job, event),
+              reason: 'The session was stopped before it finished, so its changes were not published.'
+            });
+          }
+
           job.status = 'cancelled';
           emit(job, { type: 'job-cancelled', summary });
-        } else {
-          job.status = 'done';
-          emit(job, {
-            type: 'job-done',
-            summary: { output: summary.output, engine: summary.engine, flow: summary.flow }
+          return;
+        }
+
+        if (publish?.status === 'branch' && config.id === 'enhancement') {
+          const title = sessionChangeTitle('enhancement', brief);
+          const body = sessionChangeBody({ flow: 'enhancement', id, brief });
+
+          await commitSessionWork({
+            cwd,
+            publish,
+            title,
+            body,
+            emit: (event) => emit(job, event)
+          });
+
+          if (publish.commits.length > 0) {
+            await publishSessionWork({
+              cwd,
+              publish,
+              title,
+              body,
+              dir: sessionWorkDir(cwd, id),
+              emit: (event) => emit(job, event)
+            });
+          }
+        }
+
+        if (publish?.status === 'branch' && config.id === 'feature') {
+          const slug = sessionSlug(brief, 'feature');
+          const spec = summary.artifact
+            ? path.relative(cwd, summary.artifact).split(path.sep).join('/')
+            : '';
+          const title = `docs: add ${slug} spec`;
+          const body = sessionChangeBody({
+            flow: 'feature',
+            id,
+            brief,
+            extra: spec ? `Spec: ${spec}` : ''
+          });
+
+          // The spec is committed on the session branch now; the build adds its
+          // own commit and only then pushes the branch and opens the MR.
+          await commitSessionWork({
+            cwd,
+            publish,
+            title,
+            body,
+            emit: (event) => emit(job, event),
+            cleanupWhenEmpty: false
           });
         }
+
+        job.status = 'done';
+        emit(job, {
+          type: 'job-done',
+          summary: {
+            output: summary.output,
+            engine: summary.engine,
+            flow: summary.flow,
+            ...(summary.ref ? { ref: summary.ref } : {}),
+            ...(publish ? { publish } : {})
+          }
+        });
       })
-      .catch((error) => {
+      .catch(async (error) => {
         job.error = error.message;
+
+        if (publish) {
+          await abandonSessionPublish({
+            cwd,
+            publish,
+            emit: (event) => emit(job, event),
+            reason: 'The session failed, so its changes were not published.'
+          });
+        }
 
         if (job.cancelled) {
           job.status = 'cancelled';
@@ -474,6 +732,262 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
   function startFeature(request = {}) {
     return startSession('feature', request);
+  }
+
+  // A merge session is the same interview engine with a branch-based end. The
+  // source and target are validated before the job exists, so a dirty tree or a
+  // taken integration branch is a clear 409 instead of a session that fails.
+  async function startMerge(request = {}) {
+    assertIdle();
+
+    const merge = await validateMergeRequest(cwd, request);
+
+    return startSession('merge', { ...request, brief: mergeBrief(merge), merge });
+  }
+
+  // Landing is explicit and local: fast-forward the target, never push, never
+  // create a merge commit. If anything is not safe, refuse with the reason.
+  async function landMerge(sessionId) {
+    const job = jobs.get(sessionId);
+
+    if (!job || (job.flow ?? job.type) !== 'merge') {
+      throw mergeError(404, 'Unknown merge session.');
+    }
+
+    const merge = job.request?.merge;
+
+    if (!merge?.ref || !merge?.target) {
+      throw mergeError(400, 'This session has no integration branch to land.');
+    }
+
+    if (job.status !== 'done') {
+      throw mergeError(409, 'Finish the merge session before landing the branch.');
+    }
+
+    const refCheck = await runProcess(
+      'git',
+      ['rev-parse', '--verify', '--quiet', `refs/heads/${merge.ref}`],
+      { cwd }
+    );
+
+    if (refCheck.code !== 0) {
+      throw mergeError(409, `The integration branch "${merge.ref}" no longer exists.`);
+    }
+
+    const targetCheck = await runProcess(
+      'git',
+      ['rev-parse', '--verify', '--quiet', `refs/heads/${merge.target}`],
+      { cwd }
+    );
+
+    if (targetCheck.code !== 0) {
+      throw mergeError(409, `The target branch "${merge.target}" no longer exists.`);
+    }
+
+    // The target must be an ancestor of the integration branch, or the landing
+    // is not a fast-forward and the human must merge the new target first.
+    const ancestor = await runProcess(
+      'git',
+      ['merge-base', '--is-ancestor', merge.target, merge.ref],
+      { cwd }
+    );
+
+    if (ancestor.code !== 0) {
+      throw mergeError(
+        409,
+        `The target branch "${merge.target}" has moved since the merge started. Start a new merge against the current target.`
+      );
+    }
+
+    const dirty = (await runProcess('git', ['status', '--porcelain'], { cwd })).stdout.trim();
+
+    if (dirty) {
+      throw mergeError(409, 'The working tree has changes. Commit or stash them before landing the branch.');
+    }
+
+    const current = (await runProcess('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd })).stdout.trim();
+    const restoreBranch = async () => {
+      if (current && current !== merge.target) {
+        await runProcess('git', ['switch', current], { cwd });
+      }
+    };
+
+    if (current !== merge.target) {
+      const switched = await runProcess('git', ['switch', merge.target], { cwd });
+
+      if (switched.code !== 0) {
+        const detail = (switched.stderr || switched.stdout || '').trim();
+
+        throw mergeError(
+          409,
+          `Could not switch to "${merge.target}".${detail ? ` ${detail}` : ''} Nothing was pushed.`
+        );
+      }
+    }
+
+    let landed;
+
+    try {
+      landed = await runProcess('git', ['merge', '--ff-only', merge.ref], { cwd });
+    } catch (error) {
+      await restoreBranch();
+      throw mergeError(409, `The fast-forward failed: ${error.message} Nothing was pushed.`);
+    }
+
+    if (landed.code !== 0) {
+      const detail = (landed.stderr || landed.stdout || '').trim();
+
+      await restoreBranch();
+
+      throw mergeError(
+        409,
+        `The fast-forward failed${detail ? `: ${detail}` : ''}. Nothing was pushed, and no merge commit was created.`
+      );
+    }
+
+    const sha = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+
+    return {
+      target: merge.target,
+      ref: merge.ref,
+      sha,
+      previousBranch: current,
+      fastForward: true
+    };
+  }
+
+  function findBuild(sessionId) {
+    return [...jobs.values()]
+      .filter((job) => job.type === 'feature-build' && job.sessionId === sessionId)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+      .at(-1);
+  }
+
+  // After the spec exists the human decides how it gets built. The build is a
+  // job like a sweep: it streams each skill step and can be stopped.
+  function startFeatureBuild(sessionId, request = {}) {
+    const session = jobs.get(sessionId);
+
+    if (!session || session.type !== 'feature') {
+      const error = new Error('Unknown feature session.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (!session.result?.artifact) {
+      const error = new Error('This session has no spec yet. Finish the interview first.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const pipeline = resolveFeaturePipeline(request.pipeline);
+    const verify = request.verify !== false;
+
+    assertIdle();
+
+    const id = randomUUID();
+    const job = {
+      id,
+      type: 'feature-build',
+      flow: 'feature-build',
+      sessionId,
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      request: { pipeline: pipeline.id, verify, specPath: session.result.artifact },
+      publish: session.publish ?? null,
+      events: [],
+      listeners: new Set(),
+      result: null,
+      error: null,
+      cancelled: false,
+      controller: new AbortController()
+    };
+
+    jobs.set(id, job);
+    activeJobId = id;
+
+    emit(job, { type: 'job-started', jobId: id, kind: 'feature-build' });
+
+    runFeatureBuild(
+      {
+        pipeline: pipeline.id,
+        verify,
+        specPath: session.result.artifact,
+        agentCmd: session.request.agentCmd ?? readStore(cwd).agentCmd
+      },
+      {
+        cwd,
+        spawnImpl,
+        signal: job.controller.signal,
+        emit: (event) => emit(job, event)
+      }
+    )
+      .then(async (summary) => {
+        job.result = summary;
+
+        if (job.cancelled) {
+          job.status = 'cancelled';
+          emit(job, { type: 'job-cancelled', summary });
+          return;
+        }
+
+        const publish = job.publish;
+
+        if (publish?.enabled && ['branch', 'committed', 'no-changes'].includes(publish.status)) {
+          const slug = featureNameFromSpec(summary.specPath);
+          const spec = path.relative(cwd, summary.specPath).split(path.sep).join('/');
+          const title = `feat: implement ${slug}`;
+          const body = sessionChangeBody({
+            flow: 'feature',
+            id: session.id,
+            brief: session.request.brief,
+            extra: `Spec: ${spec}`
+          });
+
+          if (['branch', 'committed'].includes(publish.status)) {
+            await commitSessionWork({
+              cwd,
+              publish,
+              title,
+              body,
+              emit: (event) => emit(job, event)
+            });
+          }
+
+          if (publish.commits.length > 0 && publish.status !== 'failed') {
+            await publishSessionWork({
+              cwd,
+              publish,
+              title,
+              body,
+              dir: sessionWorkDir(cwd, session.id),
+              emit: (event) => emit(job, event)
+            });
+          }
+        }
+
+        job.status = 'done';
+        emit(job, { type: 'job-done', summary: { ...summary, ...(publish ? { publish } : {}) } });
+      })
+      .catch((error) => {
+        job.error = error.message;
+
+        if (job.cancelled || error.cancelled) {
+          job.status = 'cancelled';
+          emit(job, { type: 'job-cancelled', summary: job.result });
+        } else {
+          job.status = 'failed';
+          emit(job, { type: 'job-failed', message: error.message });
+        }
+      })
+      .finally(() => {
+        if (activeJobId === id) {
+          activeJobId = null;
+        }
+      });
+
+    return job;
   }
 
   function cancelJob(id) {
@@ -585,6 +1099,10 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     startSession,
     startEnhancement,
     startFeature,
+    startMerge,
+    landMerge,
+    startFeatureBuild,
+    findBuild,
     cancelJob,
     askInput,
     submitInput,
@@ -710,8 +1228,17 @@ async function describeGit(cwd) {
     }
 
     const dirty = (await runProcess('git', ['status', '--porcelain'], { cwd })).stdout.trim() !== '';
+    const branches = await localBranches(cwd);
 
-    return { repo: true, root, branch, base, dirty };
+    return {
+      repo: true,
+      root,
+      branch,
+      base,
+      dirty,
+      branches,
+      detached: branch === 'HEAD'
+    };
   } catch {
     return { repo: false };
   }
@@ -968,6 +1495,103 @@ export async function listJiraBugs(input = {}, saved = {}) {
   }
 }
 
+const JIRA_ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d+$/i;
+
+function mapStudioIssue(issue) {
+  return {
+    key: issue.key,
+    summary: issue.summary,
+    description: issue.description,
+    type: issue.jiraType,
+    priority: issue.priority,
+    status: issue.jiraStatus,
+    url: issue.url
+  };
+}
+
+// Enhancement and feature briefs start as ordinary Jira issues, not only bugs.
+// The picker lists the open issues in the project the studio already remembers.
+export async function listJiraIssues(input = {}, saved = {}) {
+  const jira = resolveStudioJira(input, saved);
+
+  if (!jira.url || !jira.token) {
+    return { configured: false, issues: [], error: 'Jira credentials are not configured.' };
+  }
+
+  const project = String(input.project ?? saved.project ?? '').trim();
+
+  if (!project) {
+    return { configured: true, issues: [], jql: '', error: 'Pick a Jira project first.' };
+  }
+
+  try {
+    const transport = input.fetchImpl ?? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure });
+    const jql = `project = "${project.replace(/"/g, '\\"')}" AND statusCategory != Done ORDER BY updated DESC`;
+    const issues = await fetchJiraBugs({
+      baseUrl: jira.url,
+      auth: jira.auth,
+      email: jira.email,
+      token: jira.token,
+      apiVersion: jira.apiVersion,
+      jql,
+      limit: input.limit ?? 50,
+      fetchImpl: transport
+    });
+
+    return {
+      configured: true,
+      jql,
+      total: issues.length,
+      issues: issues.map((issue) => ({
+        key: issue.key,
+        summary: issue.summary,
+        type: issue.jiraType,
+        priority: issue.priority,
+        status: issue.jiraStatus,
+        url: issue.url
+      }))
+    };
+  } catch (error) {
+    return { configured: true, issues: [], error: error.message };
+  }
+}
+
+export async function fetchJiraIssue(input = {}, saved = {}) {
+  const jira = resolveStudioJira(input, saved);
+
+  if (!jira.url || !jira.token) {
+    return { configured: false, issue: null, error: 'Jira credentials are not configured.' };
+  }
+
+  const key = String(input.key ?? '').trim().toUpperCase();
+
+  if (!JIRA_ISSUE_KEY.test(key)) {
+    return { configured: true, issue: null, error: 'Enter a Jira issue key like ABC-123.' };
+  }
+
+  try {
+    const transport = input.fetchImpl ?? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure });
+    const issues = await fetchJiraBugs({
+      baseUrl: jira.url,
+      auth: jira.auth,
+      email: jira.email,
+      token: jira.token,
+      apiVersion: jira.apiVersion,
+      jql: `key = ${key}`,
+      limit: 1,
+      fetchImpl: transport
+    });
+
+    if (issues.length === 0) {
+      return { configured: true, issue: null, error: `Jira issue ${key} was not found.` };
+    }
+
+    return { configured: true, issue: mapStudioIssue(issues[0]) };
+  } catch (error) {
+    return { configured: true, issue: null, error: error.message };
+  }
+}
+
 export async function checkJiraHealth(input = {}, saved = {}) {
   const jira = resolveStudioJira(input, saved);
 
@@ -1019,6 +1643,7 @@ async function buildConfig({ cwd, version }) {
     settings: readSettings(cwd),
     agents: STUDIO_AGENT_PRESETS,
     prPresets: STUDIO_PR_PRESETS,
+    featurePipelines: FEATURE_PIPELINES,
     defaults: {
       agentCmd: DEFAULT_AGENT_COMMAND,
       agentPreset: 'claude',
@@ -1110,6 +1735,22 @@ async function handleRequest(req, res, context) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/jira/issues') {
+    const body = await readJsonBody(req);
+    const result = await listJiraIssues({ ...body, fetchImpl: context.fetchImpl }, readStore(context.cwd));
+
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/jira/issue') {
+    const body = await readJsonBody(req);
+    const result = await fetchJiraIssue({ ...body, fetchImpl: context.fetchImpl }, readStore(context.cwd));
+
+    sendJson(res, 200, result);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/jira/health') {
     const body = await readJsonBody(req);
     const result = await checkJiraHealth({ ...body, fetchImpl: context.fetchImpl }, readStore(context.cwd));
@@ -1132,7 +1773,7 @@ async function handleRequest(req, res, context) {
   for (const route of SESSION_ROUTE_PREFIXES) {
     if (req.method === 'GET' && pathname === route.prefix) {
       const jobs = [...context.jobManager.jobs.values()]
-        .filter((job) => (job.flow ?? job.type) === route.flow)
+        .filter((job) => job.type !== 'feature-build' && (job.flow ?? job.type) === route.flow)
         .map(context.jobManager.snapshot);
 
       sendJson(res, 200, { jobs });
@@ -1141,7 +1782,9 @@ async function handleRequest(req, res, context) {
 
     if (req.method === 'POST' && pathname === route.prefix) {
       const body = await readJsonBody(req);
-      const job = context.jobManager.startSession(route.flow, body);
+      const job = route.flow === 'merge'
+        ? await context.jobManager.startMerge(body)
+        : context.jobManager.startSession(route.flow, body);
 
       sendJson(res, 202, { job: context.jobManager.snapshot(job) });
       return;
@@ -1152,7 +1795,7 @@ async function handleRequest(req, res, context) {
     if (req.method === 'GET' && eventsMatch) {
       const job = context.jobManager.jobs.get(eventsMatch[1]);
 
-      if (!job || (job.flow ?? job.type) !== route.flow) {
+      if (!job || job.type === 'feature-build' || (job.flow ?? job.type) !== route.flow) {
         sendJson(res, 404, { error: 'Unknown session.' });
         return;
       }
@@ -1173,12 +1816,67 @@ async function handleRequest(req, res, context) {
     if (req.method === 'GET' && sessionMatch) {
       const job = context.jobManager.jobs.get(sessionMatch[1]);
 
-      if (!job || (job.flow ?? job.type) !== route.flow) {
+      if (!job || job.type === 'feature-build' || (job.flow ?? job.type) !== route.flow) {
         sendJson(res, 404, { error: 'Unknown session.' });
         return;
       }
 
       sendJson(res, 200, { job: context.jobManager.snapshot(job) });
+      return;
+    }
+  }
+
+  // Landing is an explicit second step after the integration branch exists. It
+  // is local-only and fast-forward-only; the route never pushes.
+  const landMatch = /^\/api\/merges\/([^/]+)\/land$/.exec(pathname);
+
+  if (req.method === 'POST' && landMatch) {
+    const result = await context.jobManager.landMerge(landMatch[1]);
+
+    sendJson(res, 200, result);
+    return;
+  }
+
+  // The feature build: the human picks a pipeline after the spec is approved and
+  // the studio runs the workflow's skills one at a time.
+  const buildEventsMatch = /^\/api\/features\/([^/]+)\/build\/events$/.exec(pathname);
+
+  if (req.method === 'GET' && buildEventsMatch) {
+    const build = context.jobManager.findBuild(buildEventsMatch[1]);
+
+    if (!build) {
+      sendJson(res, 404, { error: 'No build for this feature.' });
+      return;
+    }
+
+    streamEvents(req, res, build);
+    return;
+  }
+
+  const buildCancelMatch = /^\/api\/features\/([^/]+)\/build\/cancel$/.exec(pathname);
+
+  if (req.method === 'POST' && buildCancelMatch) {
+    const build = context.jobManager.findBuild(buildCancelMatch[1]);
+
+    sendJson(res, 200, { cancelled: build ? context.jobManager.cancelJob(build.id) : false });
+    return;
+  }
+
+  const buildMatch = /^\/api\/features\/([^/]+)\/build$/.exec(pathname);
+
+  if (buildMatch) {
+    if (req.method === 'GET') {
+      const build = context.jobManager.findBuild(buildMatch[1]);
+
+      sendJson(res, 200, { build: build ? context.jobManager.snapshot(build) : null });
+      return;
+    }
+
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const build = context.jobManager.startFeatureBuild(buildMatch[1], body);
+
+      sendJson(res, 202, { build: context.jobManager.snapshot(build) });
       return;
     }
   }
@@ -1310,6 +2008,23 @@ function openBrowser(url) {
   }
 }
 
+// A person opening the studio from a terminal wants the dashboard, not a URL
+// to copy. Pipes, tests, and CI stay quiet, and --no-open always wins.
+export function shouldOpenBrowser(options = {}, context = {}) {
+  if (options.open === true) {
+    return true;
+  }
+
+  if (options.open === false) {
+    return false;
+  }
+
+  const isTTY = context.isTTY ?? process.stdout.isTTY;
+  const env = context.env ?? process.env;
+
+  return Boolean(isTTY) && !env.CI;
+}
+
 export async function runStudio(argv = [], dependencies = {}) {
   const options = parseStudioArgs(argv);
 
@@ -1330,7 +2045,7 @@ export async function runStudio(argv = [], dependencies = {}) {
   const url = `http://${options.host}:${port}/`;
   const local = ['127.0.0.1', 'localhost', '::1'].includes(options.host);
 
-  if (options.open && dependencies.openBrowser !== false) {
+  if (shouldOpenBrowser(options) && dependencies.openBrowser !== false) {
     openBrowser(url);
   }
 

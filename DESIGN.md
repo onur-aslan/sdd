@@ -79,7 +79,7 @@ rail │ workbench
 - ≤ 1040px: rail becomes a horizontal workflow bar; workbench becomes one column, queue first.
 - ≤ 640px: topbar metadata collapses, actions become full-width, dialog becomes full-screen.
 - Settings is a right-side modal drawer, 480px wide, sticky footer.
-- Interview sessions (Enhancement, Feature) drop the two-sheet axis: the page head stays and the session fills the rest of the viewport as one column, `calc(100vh - topbar - head)` with a floor that yields on short viewports, so the page keeps a single scrollbar. A centred 780px reading column holds the conversation on paper; the composer is docked beneath it, so the question, the answer field, and the final plan stay in one frame. At ≤900px the session takes `min(78vh, 720px)`; at ≤640px `74vh`, the turn label moves above its body, and the agent name drops out of the bar.
+- Interview sessions (Enhancement, Feature) drop the two-sheet axis: the page head stays and the session fills the rest of the viewport as one column, `calc(100vh - topbar - head)` with a floor that yields on short viewports, so the page keeps a single scrollbar. A centred 780px reading column holds the conversation on paper; the composer is docked beneath it, so the question, the answer field, the plan, and the final report stay in one frame. At ≤900px the session takes `min(78vh, 720px)`; at ≤640px `74vh`, the turn label moves above its body, and the agent name drops out of the bar.
 - Rules over boxes: a sheet has no shadow and no radius; only the raw inset, inputs, the approval plate, and the dialog have surfaces.
 
 ## Components

@@ -653,6 +653,7 @@ function mapJiraIssue(issue, { baseUrl, extraFields }) {
     description: normalizeAdfText(fields.description),
     priority: fields.priority?.name ?? '',
     jiraStatus: fields.status?.name ?? '',
+    jiraType: fields.issuetype?.name ?? '',
     labels: Array.isArray(fields.labels) ? fields.labels : [],
     url: `${baseUrl}/browse/${issue.key}`,
     extraFields: extra

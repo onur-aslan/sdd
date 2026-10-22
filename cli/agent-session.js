@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -26,8 +26,14 @@ export const SESSION_FLOWS = {
     skillName: 'enhancement',
     skillPath: path.resolve(here, '..', 'sdd', 'skills', 'enhancement', 'SKILL.md'),
     workDir: 'enhancements',
-    finalLabel: 'plan',
-    // The enhancement skill has no artifact: the human closes the session.
+    // The plan is an approved checkpoint; the report is the final reply.
+    planLabel: 'plan',
+    finalLabel: 'report',
+    // The skill's default: each implement-and-verify attempt counts, including
+    // the initial one.
+    maxTurns: 5,
+    // The enhancement skill changes the repository after the plan is approved
+    // and has no artifact, so the human closes the session after the report.
     artifact: null
   },
   feature: {
@@ -40,6 +46,18 @@ export const SESSION_FLOWS = {
     // deep-spec writes the spec only when the interview is over, so a new or
     // touched spec file is the structural end-of-interview signal.
     artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' }
+  },
+  merge: {
+    id: 'merge',
+    label: 'Merge',
+    skillName: 'merge',
+    skillPath: path.resolve(here, '..', 'vibecoding', 'skills', 'merge', 'SKILL.md'),
+    workDir: 'merges',
+    finalLabel: 'merge report',
+    // A merge ends structurally when the integration branch exists. No file is
+    // the signal, and the human never "finishes" the interview by hand.
+    mode: 'merge',
+    artifact: null
   }
 };
 
@@ -47,7 +65,7 @@ export function resolveSessionFlow(flow) {
   const config = SESSION_FLOWS[String(flow ?? '').trim()];
 
   if (!config) {
-    const error = new Error(`Unknown session flow "${flow}". Use "enhancement" or "feature".`);
+    const error = new Error(`Unknown session flow "${flow}". Use "enhancement", "feature", or "merge".`);
     error.statusCode = 400;
     throw error;
   }
@@ -84,8 +102,9 @@ export function readSessionSkill(flow) {
 }
 
 // The contract that turns a plan-and-build skill into an interview the studio
-// can render: one question per turn, then the final artifact. The skill file is
-// never modified; this wrapper only changes how the turns are paced.
+// can render: one question per turn, then the artifact, then (for enhancement)
+// an approval-gated implementation loop. The skill file is never modified; this
+// wrapper only changes how the turns are paced.
 export function buildSessionInstructions(flow, { skillText = readSessionSkill(flow) } = {}) {
   const config = resolveSessionFlow(flow);
   const artifactRoot = config.artifact
@@ -96,44 +115,131 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
     '',
     `You are running the \`${config.skillName}\` workflow as a guided interview with one`,
     'human. You and the human take turns in a chat.',
-    '',
-    '## How this session works',
-    '',
-    `- Every reply from you is either the next single question, or the final ${config.finalLabel}.`,
-    '- Ask exactly one question at a time and keep the reply focused on it.',
-    '- When you have enough to decide, do NOT ask another question. Produce the',
-    `  final ${config.finalLabel} in that reply instead.`,
-    "- The human's next message is their answer to your last question.",
-    '- Never stop to wait on your own; always end a reply with a question or the',
-    `  final ${config.finalLabel}.`,
-    '',
-    '## Rules for this session',
-    '',
-    `- You may read the repository to ground your questions and the ${config.finalLabel}.`
+    ''
   ];
 
-  if (config.artifact) {
+  if (config.mode === 'merge') {
     lines.push(
-      '- You may create exactly one file: the final spec at',
-      `  \`${artifactRoot}/<feature-name>/${config.artifact.name}\`. Do not create or`,
-      '  modify anything else. Do not commit. Do not push.'
+      '## How this session works',
+      '',
+      '- This session integrates one branch into another. It is not a plan-only',
+      '  interview, and it is not a feature design session.',
+      '- Start with the preflight checks: the working tree is clean, both branches',
+      '  exist, and the integration branch does not. Then dry-run the merge without',
+      '  changing the working tree.',
+      '- Ask exactly one question at a time, and only when a decision is needed: a',
+      '  risky conflict, or a conflict the skill says a human must decide.',
+      "- The human's next message is their answer to your last question.",
+      '- When a resolution table needs approval, present it and stop. After the',
+      '  human approves it, build the merge.',
+      '- If the merge is clean and no decision is needed, continue without asking.',
+      '',
+      '## Rules for this session',
+      '',
+      '- All work happens on the integration branch named in the request. Never',
+      '  check out, modify, or delete the target branch.',
+      '- Never push, force-push, or touch a remote. Never rewrite the target branch.',
+      '- Resolve conflicts by editing the conflicted files. Do not invent unrelated',
+      '  changes or drop either side silently.',
+      '- Commit the merge on the integration branch. The session ends when that',
+      '  branch exists; stop there and report.',
+      '- Do not touch Jira or any external tracker.',
+      '- The studio guards these rules. A denied command is final: report it and',
+      '  continue a different way.',
+      ''
+    );
+  } else if (config.planLabel) {
+    lines.push(
+      '## How this session works',
+      '',
+      'This session has two phases.',
+      '',
+      '### Phase 1: interview and plan',
+      '',
+      '- Ask exactly one question at a time and keep the reply focused on it.',
+      "- The human's next message is their answer to your last question.",
+      '- Avoid asking what you can infer by reading the repository.',
+      '- When you have enough to decide, do NOT ask another question. Present the',
+      `  ${config.planLabel} in that reply instead.`,
+      `- The ${config.planLabel} is a checkpoint, not the end of the session. Stop after`,
+      '  presenting it and wait for the human.',
+      '- Do not change anything before the human explicitly approves the plan. If the',
+      '  human asks for changes, revise the plan and wait for approval again.',
+      '',
+      '### Phase 2: implement and verify',
+      '',
+      "- This phase starts only when the human's latest message explicitly approves",
+      '  the plan. An approval is not a new interview answer.',
+      '- Inspect the existing code, conventions, and current behavior first.',
+      '- Apply the smallest change that satisfies the approved plan, then verify the',
+      '  relevant behavior and check for regressions.',
+      `- Bound the implementation-and-verification loop to ${config.maxTurns} attempts.`,
+      '  Each change followed by a verification counts as one attempt, and the',
+      '  initial attempt counts toward the limit.',
+      '- If verification fails, analyze the evidence and reassess the approach before',
+      '  retrying. If the limit is reached, stop and report the outcome, evidence,',
+      '  and unresolved issues.',
+      '- A reply in this phase is either a question about a decision you cannot',
+      `  infer, or the final ${config.finalLabel}.`,
+      '- Do not expand the approved scope. If the plan must change materially, stop,',
+      '  present the updated plan, and wait for approval again.',
+      '',
+      '## Rules for this session',
+      '',
+      '- You may read the repository at any time to ground your questions, the plan,',
+      '  and the implementation.',
+      '- Do not modify, create, or delete any file before the human approves the plan.',
+      '  After approval, change only what the approved plan requires.',
+      '- You may run the tests, builds, and other checks the verification needs. Do',
+      '  not install or upgrade dependencies or change the environment.',
+      '- Do not commit. Do not push. Do not open a pull request.',
+      '- Do not touch Jira or any external tracker.',
+      '- Ask only about decisions you cannot infer; state your assumptions for the rest.',
+      ''
     );
   } else {
-    lines.push('- Do not modify, create, or delete any file. Do not commit. Do not push.');
+    lines.push(
+      '## How this session works',
+      '',
+      `- Every reply from you is either the next single question, or the final ${config.finalLabel}.`,
+      '- Ask exactly one question at a time and keep the reply focused on it.',
+      '- When you have enough to decide, do NOT ask another question. Produce the',
+      `  final ${config.finalLabel} in that reply instead.`,
+      "- The human's next message is their answer to your last question.",
+      '- Never stop to wait on your own; always end a reply with a question or the',
+      `  final ${config.finalLabel}.`,
+      '',
+      '## Rules for this session',
+      '',
+      `- You may read the repository to ground your questions and the ${config.finalLabel}.`,
+      '- You may create exactly one file: the final spec at',
+      `  \`${artifactRoot}/<feature-name>/${config.artifact.name}\`. Do not create or`,
+      '  modify anything else. Do not commit. Do not push.',
+      '- Do not run commands that change the repository or its dependencies.',
+      '- Do not touch Jira or any external tracker.',
+      `- Stop at the ${config.finalLabel}. Do not implement anything yet.`,
+      '- Ask only about decisions you cannot infer; state your assumptions for the rest.',
+      ''
+    );
   }
 
-  lines.push(
-    '- Do not run commands that change the repository or its dependencies.',
-    '- Do not touch Jira or any external tracker.',
-    `- Stop at the ${config.finalLabel}. Do not implement anything yet.`,
-    '- Ask only about decisions you cannot infer; state your assumptions for the rest.',
-    ''
-  );
-
-  lines.push(`## What the final ${config.finalLabel} must contain`, '');
-
-  if (config.finalLabel === 'plan') {
+  if (config.mode === 'merge') {
     lines.push(
+      `## What the final ${config.finalLabel} must contain`,
+      '',
+      '1. The source branch and the target branch.',
+      '2. The integration branch name.',
+      '3. The files that conflicted, and how each side was resolved.',
+      '4. The checks that were run, and their result.',
+      '5. Anything a human must still confirm before landing the branch.',
+      '',
+      'State only what was actually verified. Never claim a conflict is resolved',
+      'without evidence.'
+    );
+  } else if (config.planLabel) {
+    lines.push(
+      '## What the plan must contain',
+      '',
       'A Markdown enhancement plan. Include:',
       '',
       '1. A short summary of the change in plain language.',
@@ -145,10 +251,24 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
       '   and the known risks.',
       '6. Open Questions: at most three, each one decision the human must still make.',
       '',
-      'Keep it specific to this repository. Prefer existing patterns over new ones.'
+      'Keep it specific to this repository. Prefer existing patterns over new ones.',
+      '',
+      `## What the final ${config.finalLabel} must contain`,
+      '',
+      'The report the skill asks for after the work is done. Include:',
+      '',
+      '1. The changes made, in plain language.',
+      '2. The files affected.',
+      '3. The attempts used, against the limit.',
+      '4. The verification that was run and its result.',
+      '5. Unresolved issues or limitations.',
+      '',
+      'State only what was actually verified. Never claim success without evidence.'
     );
   } else {
     lines.push(
+      `## What the final ${config.finalLabel} must contain`,
+      '',
       'A Markdown feature spec following the deep-spec workflow. Include:',
       '',
       '1. The problem and the outcome in plain language.',
@@ -204,13 +324,18 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
 
 // The first message of a live session: the whole contract plus the request.
 export function buildSessionOpening(flow, brief) {
+  const config = resolveSessionFlow(flow);
+  const closing = config.mode === 'merge'
+    ? 'Start the preflight checks and the dry run now. Ask a question only when a decision is needed.'
+    : 'Start the interview now. Ask your first single question.';
+
   return [
     buildSessionInstructions(flow),
     '## The request',
     '',
     validateBrief(brief),
     '',
-    'Start the interview now. Ask your first single question.'
+    closing
   ].join('\n');
 }
 
@@ -229,16 +354,41 @@ export function buildTurnPrompt(flow, { brief, turns = [] } = {}) {
     lines.push('', turn.role === 'assistant' ? '**You:**' : '**Human:**', '', String(turn.text ?? ''));
   }
 
-  lines.push(
-    '',
-    '## Now',
-    '',
-    turns.length === 0
-      ? 'Ask your first single question.'
-      : `Continue: ask the next single question, or, if you have enough, produce the`
-        + ` final ${config.finalLabel}.`,
-    ''
-  );
+  lines.push('', '## Now', '');
+
+  if (turns.length === 0) {
+    lines.push(
+      config.mode === 'merge'
+        ? 'Start the preflight checks and the dry run now. Ask a question only when a decision is needed.'
+        : 'Ask your first single question.'
+    );
+  } else if (config.mode === 'merge') {
+    lines.push(
+      'Continue the merge session:',
+      '',
+      '- If the human approved the resolution table, build the merge on the',
+      '  integration branch now.',
+      '- Otherwise ask the next single question, or present the decision table.',
+      '- The session ends when the integration branch exists. If it already exists,',
+      '  stop and report instead of touching the target.'
+    );
+  } else if (config.planLabel) {
+    lines.push(
+      `Continue the session. The human's latest message decides the phase:`,
+      '',
+      `- If it approves the plan, implement and verify it now, then produce the final ${config.finalLabel}.`,
+      '- If it asks for a change to the plan, present the revised plan and wait for',
+      '  approval.',
+      '- Otherwise, ask the next single question, or present the plan when you have',
+      '  enough to decide.'
+    );
+  } else {
+    lines.push(
+      `Continue: ask the next single question, or, if you have enough, produce the final ${config.finalLabel}.`
+    );
+  }
+
+  lines.push('', '');
 
   return lines.join('\n');
 }
@@ -335,6 +485,167 @@ function readArtifact(file, fallback) {
   } catch {
     return fallback;
   }
+}
+
+// A merge ends when its integration branch exists. That is a structural signal,
+// not a phrase in the agent's reply, so the studio never has to interpret prose.
+export function refExists(cwd, ref) {
+  if (!ref) {
+    return false;
+  }
+
+  try {
+    return spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`], {
+      cwd,
+      encoding: 'utf8',
+      windowsHide: true
+    }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+// The merge skill may run git and edit conflict files, but never the target
+// branch and never a remote. This is the studio-side half of that contract: the
+// Claude Code hook asks, and this decides before a human is interrupted. Other
+// agents keep their own permission model.
+const MERGE_FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const MERGE_GIT_SAFE = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'rev-parse',
+  'merge-base',
+  'merge-tree',
+  'ls-files',
+  'ls-tree',
+  'cat-file',
+  'for-each-ref',
+  'show-ref',
+  'rev-list',
+  'diff-tree',
+  'name-rev',
+  'describe',
+  'add',
+  'commit',
+  'merge',
+  'restore',
+  'branch',
+  'checkout',
+  'switch',
+  'stash'
+]);
+
+function gitCommandParts(command) {
+  const tokens = String(command).trim().split(/\s+/);
+
+  if (tokens[0] !== 'git') {
+    return null;
+  }
+
+  let index = 1;
+
+  // Only harmless global flags are parsed. -C, -c, --git-dir and --work-tree
+  // point at another repository or config, so those go to the human instead.
+  while (index < tokens.length && tokens[index].startsWith('-')) {
+    if (tokens[index] === '--no-pager' || tokens[index] === '--no-optional-locks') {
+      index += 1;
+      continue;
+    }
+
+    return null;
+  }
+
+  if (index >= tokens.length) {
+    return null;
+  }
+
+  return { sub: tokens[index], args: tokens.slice(index + 1) };
+}
+
+export function mergePermissionDecision(request = {}, { target = '' } = {}) {
+  const tool = String(request.tool ?? '');
+
+  if (MERGE_FILE_TOOLS.has(tool)) {
+    return { behavior: 'allow', reason: 'merge-edit' };
+  }
+
+  if (tool !== 'Bash') {
+    return null;
+  }
+
+  const command = String(request.detail ?? '').trim().replace(/\s+/g, ' ');
+
+  // A compound command is not parsed; it goes to the human instead of being
+  // guessed at. This keeps `git status && git push` from looking safe.
+  if (!command || /[;&|><\n]/.test(command)) {
+    return null;
+  }
+
+  const parts = gitCommandParts(command);
+
+  if (!parts) {
+    return null;
+  }
+
+  const { sub, args } = parts;
+  const deny = (rule) => ({ behavior: 'deny', reason: 'merge-guard', rule });
+
+  if (['push', 'remote', 'update-ref', 'symbolic-ref'].includes(sub)) {
+    return deny('remote');
+  }
+
+  if (args.some((arg) => arg === '--force' || arg === '--force-with-lease')) {
+    return deny('force');
+  }
+
+  if (sub === 'reset' && args.includes('--hard')) {
+    return deny('reset');
+  }
+
+  if (sub === 'clean' && args.some((arg) => /^-[a-z]*f/.test(arg))) {
+    return deny('clean');
+  }
+
+  if (sub === 'commit' && args.includes('--amend')) {
+    return deny('amend');
+  }
+
+  // The target branch is the one thing the agent must never move to. Creating a
+  // new branch from the target is the normal way to start the integration, so
+  // `checkout -b merge/... <target>` stays allowed; `checkout <target>` does not.
+  if (sub === 'checkout' || sub === 'switch') {
+    const createFlags = ['-b', '-B', '-c', '-C'];
+    const createAt = args.findIndex((arg) => createFlags.includes(arg));
+
+    if (createAt !== -1) {
+      if (args[createAt + 1] === target) {
+        return deny('target');
+      }
+    } else {
+      const positionals = args.filter((arg) => !arg.startsWith('-'));
+      const first = positionals[0] ?? '';
+
+      if (first === target || first === '-' || first.startsWith('@{-')) {
+        return deny('target');
+      }
+    }
+  }
+
+  if (sub === 'branch') {
+    const risky = args.some((arg) => ['-D', '-d', '-m', '-M', '-f', '--delete', '--force', '--move'].includes(arg));
+
+    if (risky && args.includes(target)) {
+      return deny('target');
+    }
+  }
+
+  if (MERGE_GIT_SAFE.has(sub)) {
+    return { behavior: 'allow', reason: 'merge-git' };
+  }
+
+  return null;
 }
 
 // The executable decides whether the agent can hold one live conversation. Only
@@ -663,6 +974,42 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
 
     seenPermissions.add(request.id);
 
+    // The merge guard decides file edits and safe git commands without waking
+    // the human. Anything it does not understand falls through to the normal
+    // approval plate.
+    const guard = config.mode === 'merge'
+      ? mergePermissionDecision(
+        { tool: request.tool ?? 'tool', detail: request.detail ?? '' },
+        { target: deps.merge?.target ?? '' }
+      )
+      : null;
+
+    if (guard) {
+      try {
+        fs.writeFileSync(permissionAnswer, JSON.stringify({ behavior: guard.behavior }), 'utf8');
+      } catch {
+        // The hook falls back to denying when it cannot read an answer.
+      }
+
+      if (guard.behavior === 'deny') {
+        emit({
+          type: 'guard',
+          behavior: 'deny',
+          tool: request.tool ?? 'tool',
+          detail: request.detail ?? '',
+          reason: guard.rule ?? guard.reason ?? 'merge-guard'
+        });
+      }
+
+      emit({
+        type: 'permission-answer',
+        id: request.id,
+        behavior: guard.behavior,
+        reason: 'merge-guard'
+      });
+      return;
+    }
+
     const decision = await permissionDecision(deps.waitForPermission?.({
       id: request.id,
       tool: request.tool ?? 'tool',
@@ -749,10 +1096,9 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   });
   child.stderr?.setEncoding?.('utf8');
   child.stderr?.on('data', (chunk) => {
-    const text = chunk.toString();
-
-    stderr += text;
-    emit({ type: 'output', stream: 'stderr', chunk: text });
+    // stderr is diagnostics, not the agent's reply: keep it for a failure
+    // message instead of streaming it into the conversation as a turn.
+    stderr += chunk.toString();
   });
   child.stdin?.on?.('error', (error) => controller.fail(error));
   child.on?.('error', (error) => controller.fail(error));
@@ -782,7 +1128,26 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   }
 
   try {
-    let turnText = await advanceTurn(buildSessionOpening(config.id, brief));
+    // A turn that ends without any assistant text is a broken agent call, not
+    // a question. Fail with the agent's own diagnostic instead of showing an
+    // empty "needs your answer" plate.
+    const nextTurn = async (text) => {
+      const reply = await advanceTurn(text);
+
+      if (!String(reply ?? '').trim()) {
+        const diagnostic = stderr.trim().split('\n').slice(-3).join(' ');
+
+        throw new Error(
+          diagnostic
+            ? `The agent returned no reply: ${diagnostic}`
+            : 'The agent returned no reply.'
+        );
+      }
+
+      return reply;
+    };
+
+    let turnText = await nextTurn(buildSessionOpening(config.id, brief));
 
     while (true) {
       clearWatchdog();
@@ -800,6 +1165,10 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
         };
       }
 
+      if (deps.merge?.ref && refExists(cwd, deps.merge.ref)) {
+        return { output: turnText, turns, engine: 'live', stderr, ref: deps.merge.ref };
+      }
+
       const reply = await deps.waitForAnswer({ text: turnText, flow: config.id });
 
       if (reply?.cancelled || deps.signal?.aborted) {
@@ -811,7 +1180,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       }
 
       turns.push({ role: 'user', text: reply?.answer ?? '' });
-      turnText = await advanceTurn(reply?.answer ?? '');
+      turnText = await nextTurn(reply?.answer ?? '');
     }
   } finally {
     clearWatchdog();
@@ -841,6 +1210,79 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
 
 // Replay-per-turn engine: every question is a fresh, self-contained agent call
 // with the transcript so far. Works with any agent command.
+export function stripAnsi(value) {
+  return String(value ?? '')
+    // OSC sequences (window titles, progress) end with BEL or ST.
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+    // CSI sequences, including the colours and cursor moves progress UIs emit.
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\r/g, '');
+}
+
+// Agents that print structured events (`--format json`) mix the assistant text
+// with tool and step events. Reading the events turns that into the reply the
+// conversation should show; an error event becomes a real error, not a turn.
+export function parseAgentReply(stdout) {
+  const texts = [];
+
+  let structured = false;
+  let error = '';
+
+  for (const line of String(stdout ?? '').split('\n')) {
+    const trimmed = line.trim();
+
+    if (!trimmed.startsWith('{')) {
+      continue;
+    }
+
+    let event;
+
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+
+    if (!event || typeof event !== 'object') {
+      continue;
+    }
+
+    // Some agents report a fatal error as one object with no `type`, e.g.
+    // { "error": { "type": "aborted", ... }, "content": [] }.
+    if (typeof event.type !== 'string' && !event.error) {
+      continue;
+    }
+
+    structured = true;
+
+    if (event.error) {
+      error = event.error?.data?.message
+        || event.error?.message
+        || event.error?.type
+        || event.error?.name
+        || 'The agent reported an error.';
+
+      continue;
+    }
+
+    if (event.type === 'text') {
+      // OpenCode: { type: "text", part: { text } }.
+      const text = event.part?.text ?? event.text;
+
+      if (typeof text === 'string' && text.trim()) {
+        texts.push(text);
+      }
+    } else if (event.type === 'error') {
+      error = event.error?.data?.message
+        || event.error?.message
+        || event.error?.name
+        || 'The agent reported an error.';
+    }
+  }
+
+  return { text: texts.join('\n\n').trim(), error, structured };
+}
+
 async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps, artifactsBefore }) {
   const spawnImpl = deps.spawnImpl ?? runProcess;
   const timeoutSeconds = Number(deps.turnTimeoutSeconds) > 0
@@ -866,14 +1308,29 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
     const spec = buildSpawnSpec(invocation);
 
     let result;
+    // A structured agent (OpenCode `--format json`) writes event lines, not
+    // prose. Streaming those into the conversation would show raw JSON while
+    // the turn runs, so the parsed reply is shown instead when it is ready.
+    let stdoutIsJson = null;
 
     try {
       result = await spawnImpl(spec.command, spec.args, {
         cwd,
         signal: deps.signal,
         timeoutMs: timeoutSeconds * 1000,
-        onStdout: (chunk) => emit({ type: 'output', stream: 'stdout', chunk }),
-        onStderr: (chunk) => emit({ type: 'output', stream: 'stderr', chunk }),
+        onStdout: (chunk) => {
+          if (stdoutIsJson === null) {
+            const head = String(chunk).trimStart();
+
+            if (head) {
+              stdoutIsJson = head.startsWith('{');
+            }
+          }
+
+          if (!stdoutIsJson) {
+            emit({ type: 'output', stream: 'stdout', chunk });
+          }
+        },
         env: {
           ...process.env,
           SDD_SESSION_ID: id,
@@ -902,7 +1359,15 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
       throw new Error(`The agent exited with code ${result.code}.${detail ? ` ${detail}` : ''}`);
     }
 
-    const text = `${result.stdout ?? ''}${result.stderr ? `\n${result.stderr}` : ''}`.trim();
+    // Structured events (OpenCode `--format json`) are read, not echoed: the
+    // agent's stderr header and tool events are not part of the conversation.
+    const parsed = parseAgentReply(result.stdout ?? '');
+
+    if (parsed.error) {
+      throw new Error(`The agent reported: ${parsed.error}`);
+    }
+
+    const text = (parsed.text || stripAnsi(`${result.stdout ?? ''}${result.stderr ? `\n${result.stderr}` : ''}`)).trim();
 
     if (!text) {
       throw new Error('The agent finished without a reply.');
@@ -919,6 +1384,12 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
       writeFile(dir, 'session.md', transcript());
 
       return { output: readArtifact(artifact, text), turns, engine: 'turn', artifact };
+    }
+
+    if (deps.merge?.ref && refExists(cwd, deps.merge.ref)) {
+      writeFile(dir, 'session.md', transcript());
+
+      return { output: text, turns, engine: 'turn', ref: deps.merge.ref };
     }
 
     const reply = await deps.waitForAnswer({ text, flow: config.id });
@@ -949,6 +1420,8 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
   const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);
   const engine = detectAgentEngine(command, request.agentPreset);
   const dir = sessionDir(cwd, id, config);
+  const merge = request.merge ?? dependencies.merge ?? null;
+  const sessionDeps = merge ? { ...dependencies, merge } : dependencies;
   // A spec that exists before the first turn belongs to an earlier session.
   const artifactsBefore = snapshotArtifacts(cwd, config);
 
@@ -959,10 +1432,17 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
   }
 
   const result = engine === 'live'
-    ? await runLiveSession({ config, brief, command, cwd, id, dir, emit, deps: dependencies, artifactsBefore })
-    : await runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps: dependencies, artifactsBefore });
+    ? await runLiveSession({ config, brief, command, cwd, id, dir, emit, deps: sessionDeps, artifactsBefore })
+    : await runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps: sessionDeps, artifactsBefore });
 
-  return { ...result, brief, flow: config.id, dir, promptFile: path.join(dir, 'prompt.md') };
+  return {
+    ...result,
+    brief,
+    flow: config.id,
+    dir,
+    promptFile: path.join(dir, 'prompt.md'),
+    ...(merge ? { merge } : {})
+  };
 }
 
 export { DEFAULT_TURN_TIMEOUT_SECONDS };

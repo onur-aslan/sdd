@@ -14,14 +14,17 @@ import {
   createJobManager,
   createStudioServer,
   detectVerifyCommand,
+  fetchJiraIssue,
   formatStudioHelp,
   hasSavedToken,
   listJiraBugs,
+  listJiraIssues,
   listJiraProjects,
   parseStudioArgs,
   readSettings,
   readStore,
   resolveStudioJira,
+  shouldOpenBrowser,
   STUDIO_AGENT_PRESETS,
   STUDIO_PR_PRESETS,
   writeSettings
@@ -208,17 +211,35 @@ async function collectSession(base, prefix, id) {
   return response.json();
 }
 
-test('parseStudioArgs reads the port, host, and open flag', () => {
-  assert.deepEqual(parseStudioArgs([]), { help: false, port: 4321, host: '127.0.0.1', open: false });
+test('parseStudioArgs reads the port, host, and browser choice', () => {
+  // null means "open when the terminal is interactive"; tests and pipes stay quiet.
+  assert.deepEqual(parseStudioArgs([]), { help: false, port: 4321, host: '127.0.0.1', open: null });
   assert.deepEqual(parseStudioArgs(['--port=8080', '--host', '0.0.0.0', '--open']), {
     help: false,
     port: 8080,
     host: '0.0.0.0',
     open: true
   });
+  assert.deepEqual(parseStudioArgs(['--no-open']), {
+    help: false,
+    port: 4321,
+    host: '127.0.0.1',
+    open: false
+  });
   assert.equal(parseStudioArgs(['--help']).help, true);
   assert.throws(() => parseStudioArgs(['--port', 'abc']), /positive integer/);
   assert.throws(() => parseStudioArgs(['--nope']), /Unknown option/);
+});
+
+test('the studio opens the browser for people, not for pipes or CI', () => {
+  // Default: an interactive terminal gets the dashboard, everything else does not.
+  assert.equal(shouldOpenBrowser({ open: null }, { isTTY: true, env: {} }), true);
+  assert.equal(shouldOpenBrowser({ open: null }, { isTTY: false, env: {} }), false);
+  assert.equal(shouldOpenBrowser({ open: null }, { isTTY: true, env: { CI: '1' } }), false);
+
+  // Explicit flags always win.
+  assert.equal(shouldOpenBrowser({ open: true }, { isTTY: false, env: {} }), true);
+  assert.equal(shouldOpenBrowser({ open: false }, { isTTY: true, env: {} }), false);
 });
 
 test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
@@ -472,6 +493,73 @@ test('listJiraBugs returns the project bug list and reports missing credentials'
   assert.deepEqual(missing.bugs, []);
 });
 
+test('listJiraIssues and fetchJiraIssue read the project picker and one brief', async () => {
+  const calls = [];
+  const fake = async (url, options = {}) => {
+    calls.push({ url, body: options.body ? JSON.parse(options.body) : null });
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        issues: [
+          {
+            key: 'ABC-7',
+            fields: {
+              summary: 'Saved searches',
+              description: 'Put saved searches in the sidebar.',
+              priority: { name: 'Medium' },
+              status: { name: 'In Progress' },
+              issuetype: { name: 'Story' },
+              labels: []
+            }
+          }
+        ]
+      })
+    };
+  };
+
+  const listed = await listJiraIssues({
+    project: 'ABC',
+    jiraUrl: 'https://jira.example.com',
+    jiraToken: 'secret',
+    fetchImpl: fake
+  });
+
+  assert.match(calls[0].body.jql, /project = "ABC"/);
+  assert.match(calls[0].body.jql, /statusCategory != Done/);
+  assert.deepEqual(listed.issues, [{
+    key: 'ABC-7',
+    summary: 'Saved searches',
+    type: 'Story',
+    priority: 'Medium',
+    status: 'In Progress',
+    url: 'https://jira.example.com/browse/ABC-7'
+  }]);
+
+  const detail = await fetchJiraIssue({
+    key: 'abc-7',
+    jiraUrl: 'https://jira.example.com',
+    jiraToken: 'secret',
+    fetchImpl: fake
+  });
+
+  assert.equal(detail.issue.key, 'ABC-7');
+  assert.match(detail.issue.description, /sidebar/);
+  assert.equal(calls[1].body.jql, 'key = ABC-7');
+
+  const invalid = await fetchJiraIssue({
+    key: 'not a key',
+    jiraUrl: 'https://jira.example.com',
+    jiraToken: 'secret',
+    fetchImpl: fake
+  });
+
+  assert.equal(invalid.issue, null);
+  assert.match(invalid.error, /ABC-123/);
+  assert.equal(calls.length, 2);
+});
+
 test('studio exposes health, config, and the dashboard assets', async (t) => {
   const root = createRepo();
 
@@ -498,6 +586,7 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   assert.equal(config.defaults.agentPreset, 'claude');
   assert.ok(config.prPresets.some((preset) => preset.id === 'gitlab'));
   assert.equal(config.defaults.prPreset, 'github');
+  assert.deepEqual(config.featurePipelines.map((pipeline) => pipeline.id), ['direct', 'tdd']);
   assert.deepEqual(config.settings, {});
 
   const saved = await fetch(`${base}/api/settings`, {
@@ -647,7 +736,7 @@ test('the job manager refuses a second sweep while one is running', async (t) =>
   await waitFor(() => first.status === 'done' || first.status === 'failed');
 });
 
-test('an enhancement session interviews one question at a time, then records the plan', async (t) => {
+test('an enhancement session interviews, implements after plan approval, then records the report', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-session-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -659,11 +748,20 @@ test('an enhancement session interviews one question at a time, then records the
   const manager = createJobManager({
     cwd: root,
     // A non-Claude command uses the replay-per-turn engine: one prompt per turn.
-    spawnImpl: async (command, args, options) => {      calls += 1;
+    spawnImpl: async (command, args, options) => {
+      calls += 1;
 
-      const text = calls === 1
-        ? 'Let me start with storage.\n\n```interview\nLocal disk or a database?\n```\n'
-        : '# Plan\n\nUse local disk.\n\n```mermaid\nflowchart LR\nA-->B\n```\n';
+      let text;
+
+      if (calls === 1) {
+        text = 'Let me start with storage.\n\n```interview\nLocal disk or a database?\n```\n';
+      } else if (calls === 2) {
+        text = '# Plan\n\nUse local disk.\n\n```mermaid\nflowchart LR\nA-->B\n```\n';
+      } else {
+        // The approved plan is implemented in the same conversation.
+        fs.writeFileSync(path.join(root, 'palette.js'), 'export const open = () => {};\n', 'utf8');
+        text = '# Report\n\nAdded palette.js and verified it.\n';
+      }
 
       options.onStdout(text);
 
@@ -684,13 +782,22 @@ test('an enhancement session interviews one question at a time, then records the
   );
   assert.throws(() => manager.startSweep({ project: 'ABC' }), /already running/);
 
-  await waitFor(() => manager.snapshot(job).events.some((event) => event.type === 'question'));
+  const questions = () => manager.snapshot(job).events.filter((event) => event.type === 'question');
+
+  await waitFor(() => questions().length === 1);
   assert.equal(manager.snapshot(job).status, 'waiting');
 
   assert.equal(manager.submitInput(job.id, { answer: 'Local disk.' }), true);
 
-  // The plan turn has no artifact, so the human ends the interview.
-  await waitFor(() => manager.snapshot(job).events.filter((event) => event.type === 'question').length === 2);
+  // The plan is a checkpoint, not the end: approve it to start implementation.
+  await waitFor(() => questions().length === 2);
+  assert.equal(manager.submitInput(job.id, { answer: 'Approved. Implement it.' }), true);
+
+  await waitFor(() => questions().length === 3);
+  assert.match(questions()[2].text, /# Report/);
+  assert.ok(fs.existsSync(path.join(root, 'palette.js')));
+
+  // The report has no artifact, so the human closes the session.
   assert.equal(manager.submitInput(job.id, { done: true }), true);
 
   await waitFor(() => job.status === 'done');
@@ -709,6 +816,8 @@ test('an enhancement session interviews one question at a time, then records the
   assert.match(output, /Local disk or a database\?/);
   assert.match(output, /# Plan/);
   assert.match(output, /```mermaid/);
+  assert.match(output, /# Report/);
+  assert.match(job.result.output, /Added palette\.js and verified it/);
   assert.deepEqual(events.map((event) => event.seq), events.map((_, index) => index + 1));
 
   const saved = readSettings(root);
@@ -719,6 +828,322 @@ test('an enhancement session interviews one question at a time, then records the
   assert.equal(saved.project, 'ABC');
   assert.equal(saved.settingsSeen, true);
   assert.equal(readStore(root).jiraToken, 'secret');
+});
+
+test('an enhancement session branches up front and commits when the human finishes', async (t) => {
+  const root = createRepo();
+  const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  let calls = 0;
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const manager = createJobManager({
+    cwd: root,
+    spawnImpl: async (command, args, options) => {
+      calls += 1;
+
+      let text;
+
+      if (calls === 1) {
+        text = '```interview\nLocal disk or a database?\n```\n';
+      } else if (calls === 2) {
+        text = '# Plan\n\nUse local disk.\n';
+      } else {
+        fs.writeFileSync(path.join(root, 'palette.js'), 'export const open = () => {};\n', 'utf8');
+        text = '# Report\n\nAdded palette.js and verified it.\n';
+      }
+
+      options.onStdout(text);
+
+      return { code: 0, stdout: text, stderr: '' };
+    }
+  });
+  const job = manager.startEnhancement({
+    brief: 'Add a command palette.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]',
+    publish: true,
+    push: false,
+    pr: false
+  });
+
+  const questions = () => manager.snapshot(job).events.filter((event) => event.type === 'question');
+
+  await waitFor(() => questions().length === 1);
+  assert.equal(job.publish.status, 'branch');
+  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), job.publish.branch);
+  assert.equal(job.publish.base, base);
+
+  manager.submitInput(job.id, { answer: 'Local disk.' });
+  await waitFor(() => questions().length === 2);
+  manager.submitInput(job.id, { answer: 'Approved. Implement it.' });
+  await waitFor(() => questions().length === 3);
+  manager.submitInput(job.id, { done: true });
+
+  await waitFor(() => job.status === 'done');
+
+  assert.equal(job.publish.status, 'committed');
+  assert.equal(job.publish.commits.length, 1);
+  assert.match(git(root, ['log', '-1', '--format=%s']), /command palette/);
+  assert.equal(git(root, ['status', '--porcelain']), '');
+
+  const types = manager.snapshot(job).events.map((event) => event.type);
+
+  assert.ok(types.includes('publish'));
+});
+
+test('a feature build runs the chosen pipeline after the spec exists', async (t) => {
+  const root = createRepo();
+  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+  const featurePath = path.join(path.dirname(specPath), 'feature.md');
+  const prompts = [];
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const manager = createJobManager({
+    cwd: root,
+    spawnImpl: async (command, args) => {
+      const prompt = args.at(-1) ?? '';
+
+      prompts.push(prompt);
+
+      // The interview turn writes the spec; the build steps then run the skills.
+      if (/interview brief/.test(prompt)) {
+        fs.mkdirSync(path.dirname(specPath), { recursive: true });
+        fs.writeFileSync(specPath, '# Spec\n\nSaved searches live in the sidebar.\n', 'utf8');
+
+        return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+      }
+
+      if (/spec-to-task/.test(prompt)) {
+        fs.writeFileSync(featurePath, '# Tasks\n', 'utf8');
+      }
+
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    }
+  });
+
+  const session = manager.startFeature({
+    brief: 'Add saved searches.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]'
+  });
+
+  await waitFor(() => session.status === 'done');
+  assert.match(session.result.artifact, /spec\.md$/);
+
+  const build = manager.startFeatureBuild(session.id, { pipeline: 'tdd', verify: false });
+
+  assert.equal(build.type, 'feature-build');
+  assert.equal(build.sessionId, session.id);
+
+  await waitFor(() => build.status === 'done');
+
+  const events = manager.snapshot(build).events;
+  const done = events.filter((event) => event.type === 'build-step' && event.status === 'done');
+
+  assert.equal(events.find((event) => event.type === 'build-started').verify, false);
+  assert.deepEqual(done.map((event) => event.skill), ['spec-to-task', 'feature-tdd']);
+  assert.equal(build.result.verify, false);
+  assert.equal(build.result.featureWritten, true);
+  assert.match(prompts.at(-1), /feature-tdd/);
+  // The session stays finished; the build is its own job.
+  assert.equal(manager.snapshot(session).status, 'done');
+});
+
+function createMergeFixture() {
+  const root = createRepo();
+  const target = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const source = 'feature';
+  const ref = `merge/${source}-into-${target}`;
+
+  git(root, ['checkout', '-q', '-b', source]);
+  fs.writeFileSync(path.join(root, 'feature.txt'), 'feature\n', 'utf8');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'feature work']);
+  git(root, ['checkout', '-q', target]);
+
+  return { root, target, source, ref };
+}
+
+function createMergeAgent({ root, target, ref }) {
+  return async () => {
+    // What the merge skill does: branch from the target, then merge the source.
+    git(root, ['checkout', '-q', '-b', ref, target]);
+    git(root, ['merge', '--no-ff', '-q', '-m', 'Merge feature', 'feature']);
+
+    return { code: 0, stdout: '# Merge report\n\nMerged feature; no conflicts.\n', stderr: '' };
+  };
+}
+
+test('a merge session refuses a dirty tree and an existing integration branch', async (t) => {
+  const fixture = createMergeFixture();
+  const manager = createJobManager({ cwd: fixture.root });
+
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const dirtyFile = path.join(fixture.root, 'scratch.txt');
+
+  fs.writeFileSync(dirtyFile, 'dirty\n', 'utf8');
+
+  await assert.rejects(
+    manager.startMerge({
+      source: fixture.source,
+      target: fixture.target,
+      agentPreset: 'cursor',
+      agentCmd: '["cursor-agent","-p"]'
+    }),
+    /working tree has changes/
+  );
+
+  fs.rmSync(dirtyFile, { force: true });
+  git(fixture.root, ['branch', fixture.ref, fixture.target]);
+
+  await assert.rejects(
+    manager.startMerge({
+      source: fixture.source,
+      target: fixture.target,
+      agentPreset: 'cursor',
+      agentCmd: '["cursor-agent","-p"]'
+    }),
+    /already exists/
+  );
+});
+
+test('a merge session ends at the integration branch and lands it by fast-forward', async (t) => {
+  const fixture = createMergeFixture();
+  const manager = createJobManager({
+    cwd: fixture.root,
+    spawnImpl: createMergeAgent(fixture)
+  });
+
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const job = await manager.startMerge({
+    source: fixture.source,
+    target: fixture.target,
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]'
+  });
+
+  assert.equal(job.flow, 'merge');
+  assert.equal(job.request.merge.ref, fixture.ref);
+
+  await waitFor(() => job.status === 'done');
+
+  const done = manager.snapshot(job).events.find((event) => event.type === 'job-done');
+
+  assert.equal(job.result.ref, fixture.ref);
+  assert.equal(done.summary.ref, fixture.ref);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+
+  // A dirty tree blocks landing, and the branch stays put.
+  const scratch = path.join(fixture.root, 'scratch.txt');
+
+  fs.writeFileSync(scratch, 'not committed\n', 'utf8');
+
+  await assert.rejects(manager.landMerge(job.id), /working tree has changes/);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+
+  fs.rmSync(scratch, { force: true });
+
+  const landed = await manager.landMerge(job.id);
+
+  assert.equal(landed.target, fixture.target);
+  assert.equal(landed.fastForward, true);
+  assert.equal(landed.previousBranch, fixture.ref);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
+  assert.equal(
+    git(fixture.root, ['rev-parse', 'HEAD']),
+    git(fixture.root, ['rev-parse', fixture.ref])
+  );
+  assert.equal(fs.existsSync(path.join(fixture.root, 'feature.txt')), true);
+});
+
+test('a merge session refuses to land when the target moved', async (t) => {
+  const fixture = createMergeFixture();
+  const manager = createJobManager({
+    cwd: fixture.root,
+    spawnImpl: createMergeAgent(fixture)
+  });
+
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const job = await manager.startMerge({
+    source: fixture.source,
+    target: fixture.target,
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]'
+  });
+
+  await waitFor(() => job.status === 'done');
+
+  // Someone lands another change on the target after the integration branch
+  // was cut. A fast-forward is no longer possible, and the studio refuses.
+  git(fixture.root, ['checkout', '-q', fixture.target]);
+  fs.writeFileSync(path.join(fixture.root, 'later.txt'), 'later\n', 'utf8');
+  git(fixture.root, ['add', '-A']);
+  git(fixture.root, ['commit', '-q', '-m', 'later target work']);
+  git(fixture.root, ['checkout', '-q', fixture.ref]);
+
+  await assert.rejects(manager.landMerge(job.id), /has moved/);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+});
+
+test('the studio exposes the merge route and the explicit land endpoint', async (t) => {
+  const fixture = createMergeFixture();
+  const studio = createStudioServer({
+    cwd: fixture.root,
+    version: '9.9.9',
+    spawnImpl: createMergeAgent(fixture)
+  });
+
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve));
+
+  const base = `http://127.0.0.1:${studio.server.address().port}`;
+
+  t.after(() => studio.close());
+
+  const started = await fetch(`${base}/api/merges`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: fixture.source,
+      target: fixture.target,
+      agentPreset: 'cursor',
+      agentCmd: '["cursor-agent","-p"]'
+    })
+  });
+
+  assert.equal(started.status, 202);
+
+  const { job } = await started.json();
+
+  await waitFor(async () => (
+    await collectSession(base, '/api/merges', job.id)
+  ).job.status === 'done');
+
+  const finished = await collectSession(base, '/api/merges', job.id);
+
+  assert.equal(finished.job.flow, 'merge');
+  assert.equal(finished.job.result.ref, fixture.ref);
+  assert.equal(finished.job.events.find((event) => event.type === 'job-done').summary.ref, fixture.ref);
+  assert.equal((await fetch(`${base}/api/features/${job.id}`)).status, 404);
+
+  const land = await fetch(`${base}/api/merges/${job.id}/land`, { method: 'POST' });
+
+  assert.equal(land.status, 200);
+
+  const result = await land.json();
+
+  assert.equal(result.target, fixture.target);
+  assert.equal(result.fastForward, true);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
+
+  // An unknown session is a clear 404, not a crash.
+  assert.equal((await fetch(`${base}/api/merges/nope/land`, { method: 'POST' })).status, 404);
 });
 
 test('a live Claude session streams questions and answers over one process', async (t) => {
@@ -748,7 +1173,7 @@ test('a live Claude session streams questions and answers over one process', asy
 
   assert.equal(manager.submitInput(job.id, { answer: 'Local disk.' }), true);
 
-  // The plan turn has no artifact, so the human ends the interview.
+  // The human may still finish at the plan instead of implementing it.
   await waitFor(() => manager.snapshot(job).events.filter((event) => event.type === 'question').length === 2);
   assert.equal(manager.submitInput(job.id, { done: true }), true);
 
@@ -764,6 +1189,60 @@ test('a live Claude session streams questions and answers over one process', asy
   assert.match(output, /# Plan/);
   assert.equal(job.result.engine, 'live');
   assert.equal(manager.snapshot(job).flow, 'enhancement');
+});
+
+test('a live turn with no assistant text fails with the agent diagnostic', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-live-empty-'));
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const manager = createJobManager({
+    cwd: root,
+    spawnProcess: () => {
+      const child = new EventEmitter();
+
+      child.pid = 4343;
+      child.killed = false;
+      child.exitCode = null;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => {
+        child.killed = true;
+        child.emit('close', 0);
+        return true;
+      };
+
+      child.stdin.on('data', () => {
+        child.stderr.write('[claude-code:unrecognized_model] {"model":"gemma3-270m:free"}\n');
+        child.stdout.write(`${JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: ''
+        })}\n`);
+      });
+
+      return child;
+    },
+    terminate: (child) => child.kill?.()
+  });
+  const job = manager.startEnhancement({
+    brief: 'Add a command palette.',
+    agentPreset: 'claude',
+    agentCmd: DEFAULT_AGENT_COMMAND
+  });
+
+  await waitFor(() => job.status === 'failed');
+
+  assert.match(job.error, /returned no reply: .*unrecognized_model/);
+
+  const events = manager.snapshot(job).events;
+
+  // The diagnostic stays in the failure message; it must not become a turn or
+  // leave an empty, answerable question behind.
+  assert.equal(events.some((event) => event.type === 'question'), false);
+  assert.equal(events.some((event) => event.type === 'output' && event.stream === 'stderr'), false);
 });
 
 test('the job manager routes a permission request to the browser', async (t) => {
@@ -1121,7 +1600,7 @@ test('studio runs interview sessions and keeps them separate from sweeps', async
     await collectSession(base, '/api/enhancements', job.id)
   ).job.status === 'waiting');
 
-  // A plan has no artifact: the human finishes the session.
+  // Enhancement has no artifact: the human finishes the session.
   await fetch(`${base}/api/jobs/${job.id}/input`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
