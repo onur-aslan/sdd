@@ -22,7 +22,7 @@ import {
   runBugSweep,
   runProcess
 } from './bug-sweep.js';
-import { runInterviewSession, resolveSessionFlow, validateBrief } from './agent-session.js';
+import { runInterviewSession, resolveSessionFlow, validateBrief, validateSessionSkillArguments } from './agent-session.js';
 import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
 import {
   abandonSessionPublish,
@@ -45,6 +45,57 @@ export const STUDIO_AGENT_PRESETS = [
   { id: 'codex', label: 'Codex', command: '["codex","exec"]' },
   { id: 'custom', label: 'Custom command', command: '' }
 ];
+
+function findCodexExecutable(env = process.env) {
+  const candidates = [];
+  const add = (candidate) => {
+    if (!candidate || !fs.existsSync(candidate)) return;
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs });
+    } catch {
+      // A stale PATH entry or an install being updated should not block startup.
+    }
+  };
+
+  for (const directory of String(env.PATH ?? '').split(path.delimiter)) {
+    if (directory) {
+      for (const name of ['codex.exe', 'codex.cmd', 'codex.bat']) {
+        add(path.join(directory.replace(/^"|"$/g, ''), name));
+      }
+    }
+  }
+
+  // The desktop installer stores Codex in a versioned directory under this
+  // location. Studio may have been launched before that directory was added
+  // to PATH, so check the install location directly as well.
+  const localAppData = env.LOCALAPPDATA
+    || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Local') : '');
+  const codexBin = localAppData ? path.join(localAppData, 'OpenAI', 'Codex', 'bin') : '';
+  if (codexBin && fs.existsSync(codexBin)) {
+    add(path.join(codexBin, 'codex.exe'));
+    try {
+      for (const entry of fs.readdirSync(codexBin, { withFileTypes: true })) {
+        if (entry.isDirectory()) add(path.join(codexBin, entry.name, 'codex.exe'));
+      }
+    } catch {
+      // PATH candidates above remain usable if the install directory is unreadable.
+    }
+  }
+
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return candidates[0]?.path ?? '';
+}
+
+function studioAgentPresets() {
+  const executable = process.platform === 'win32' ? findCodexExecutable() : '';
+
+  return STUDIO_AGENT_PRESETS.map((preset) => (
+    preset.id === 'codex' && executable
+      ? { ...preset, command: JSON.stringify([executable, 'exec']) }
+      : preset
+  ));
+}
 
 // One-click forge choices. GitHub uses the built-in gh path (an empty command).
 // The other presets are JSON argv, so `--pr-cmd` runs them without a shell and
@@ -528,6 +579,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
     const brief = validateBrief(request.brief);
     const merge = request.merge && typeof request.merge === 'object' ? request.merge : null;
+    const skillArguments = validateSessionSkillArguments(config.id, request.skillArguments);
     const saved = readStore(cwd);
     const agentPreset = request.agentPreset ?? saved.agentPreset;
     const agentCmd = request.agentCmd ?? saved.agentCmd;
@@ -570,6 +622,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         brief,
         agentPreset,
         agentCmd,
+        skillArguments,
         ...(publish ? { publish: publish.enabled } : {}),
         ...(merge ? { merge } : {})
       },
@@ -603,7 +656,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       }
 
       return runInterviewSession(
-        { flow: config.id, brief, agentPreset, agentCmd, ...(merge ? { merge } : {}) },
+        { flow: config.id, brief, agentPreset, agentCmd, skillArguments, ...(merge ? { merge } : {}) },
         {
           cwd,
           id,
@@ -1641,7 +1694,7 @@ async function buildConfig({ cwd, version }) {
       hasSavedToken: hasSavedToken(cwd)
     },
     settings: readSettings(cwd),
-    agents: STUDIO_AGENT_PRESETS,
+    agents: studioAgentPresets(),
     prPresets: STUDIO_PR_PRESETS,
     featurePipelines: FEATURE_PIPELINES,
     defaults: {

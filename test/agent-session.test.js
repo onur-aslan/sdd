@@ -24,9 +24,22 @@ import {
   runInterviewSession,
   snapshotArtifacts,
   stripAnsi,
-  validateBrief
+  validateBrief,
+  validateSessionSkillArguments
 } from '../cli/agent-session.js';
 import { DEFAULT_AGENT_COMMAND, normalizeAgentCommand } from '../cli/bug-sweep.js';
+
+function installFixtureSkill(root, agent, flow) {
+  const directories = {
+    claude: '.claude/skills',
+    cursor: '.cursor/skills',
+    codex: '.agents/skills',
+    opencode: '.opencode/skills'
+  };
+  const target = path.join(root, directories[agent], resolveSessionFlow(flow).skillName, 'SKILL.md');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(resolveSessionFlow(flow).skillPath, target);
+}
 
 test('findSessionArtifact ignores flows without an artifact and specs that predate the session', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-artifact-'));
@@ -71,6 +84,15 @@ test('validateBrief trims and rejects empty or oversized briefs', () => {
   assert.throws(() => validateBrief('x'.repeat(4001)), /4000 characters or fewer/);
 });
 
+test('Studio skill arguments apply defaults and reject unsupported values', () => {
+  assert.deepEqual(validateSessionSkillArguments('enhancement'), { max_turns: 5 });
+  assert.deepEqual(validateSessionSkillArguments('enhancement', { max_turns: '7' }), { max_turns: 7 });
+  assert.throws(() => validateSessionSkillArguments('enhancement', { max_turns: 0 }), /from 1 to 20/);
+  assert.throws(() => validateSessionSkillArguments('enhancement', { max_turns: 21 }), /from 1 to 20/);
+  assert.throws(() => validateSessionSkillArguments('enhancement', { unknown: true }), /Unsupported enhancement argument/);
+  assert.throws(() => validateSessionSkillArguments('enhancement', '5'), /must be an object/);
+});
+
 test('each flow resolves to its own skill and final artifact', () => {
   assert.equal(resolveSessionFlow('enhancement').planLabel, 'plan');
   assert.equal(resolveSessionFlow('enhancement').finalLabel, 'report');
@@ -90,8 +112,8 @@ test('each flow resolves to its own skill and final artifact', () => {
   assert.ok(readSessionSkill('merge').length > 100);
 });
 
-test('the enhancement contract gates implementation on plan approval and includes the skill', () => {
-  const instructions = buildSessionInstructions('enhancement', { skillText: '# Enhancement\n\nStep 1: interview.' });
+test('the enhancement contract gates implementation on plan approval and invokes the native skill', () => {
+  const instructions = buildSessionInstructions('enhancement', { agentPreset: 'claude', skillText: '# Enhancement\n\nStep 1: interview.' });
 
   assert.match(instructions, /one question at a time/i);
   // The plan is a checkpoint: nothing changes before the human approves it.
@@ -103,7 +125,8 @@ test('the enhancement contract gates implementation on plan approval and include
   assert.doesNotMatch(instructions, /Stop at the plan/);
   assert.match(instructions, /## What the plan must contain/);
   assert.match(instructions, /## What the final report must contain/);
-  assert.match(instructions, /Step 1: interview\./);
+  assert.match(instructions, /\/enhancement/);
+  assert.doesNotMatch(instructions, /Step 1: interview\./);
   // The studio no longer turns prose into buttons, so the contract must not
   // prescribe an option shape or a question fence.
   assert.doesNotMatch(instructions, /one-click|interview` block|Recommended:/);
@@ -114,7 +137,7 @@ test('the enhancement contract gates implementation on plan approval and include
   assert.match(instructions, /Mermaid cannot draw a screen/);
   assert.match(instructions, /Do not draw the same thing twice/);
 
-  const feature = buildSessionInstructions('feature', { skillText: 'x' });
+  const feature = buildSessionInstructions('feature', { agentPreset: 'cursor', skillText: 'x' });
 
   assert.match(feature, /Stop at the spec/);
   // The spec file is the structural end of a feature interview.
@@ -123,14 +146,37 @@ test('the enhancement contract gates implementation on plan approval and include
   assert.doesNotMatch(feature, /Do not modify, create, or delete any file/);
 });
 
-test('the opening message carries the request, and turn prompts replay the transcript', () => {
-  const opening = buildSessionOpening('enhancement', '  Add a command palette.  ');
+test('Codex session instructions explicitly invoke the native skill and Studio arguments', () => {
+  const instructions = buildSessionInstructions('enhancement', {
+    agentPreset: 'codex',
+    skillArguments: { max_turns: 3 },
+    skillText: '# Should not be embedded'
+  });
 
+  assert.match(instructions, /Use the \$enhancement skill\. Studio arguments: max_turns=3/);
+  assert.match(instructions, /Bound the implementation-and-verification loop to 3 attempts/);
+  assert.doesNotMatch(instructions, /Should not be embedded/);
+});
+
+test('every supported preset uses its own native skill call, with no embedded-skill fallback', () => {
+  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'claude' }), /^\/enhancement/);
+  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'cursor' }), /^\/enhancement/);
+  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'codex' }), /^Use the \$enhancement skill/);
+  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'opencode' }), /native skill tool/);
+  assert.throws(() => buildSessionInstructions('enhancement'), /native skill-capable agent/);
+  assert.throws(() => buildSessionInstructions('enhancement', { agentPreset: 'custom', skillText: '# silently embedded' }), /native skill-capable agent/);
+});
+
+test('the opening message carries the request, and turn prompts replay the transcript', () => {
+  const opening = buildSessionOpening('enhancement', '  Add a command palette.  ', { agentPreset: 'claude' });
+
+  assert.match(opening, /^\/enhancement/);
   assert.match(opening, /Add a command palette\./);
   assert.match(opening, /first single question/);
 
   const prompt = buildTurnPrompt('feature', {
     brief: 'Add saved searches.',
+    agentPreset: 'cursor',
     turns: [
       { role: 'assistant', text: 'Which storage?' },
       { role: 'user', text: 'Local disk.' }
@@ -145,6 +191,7 @@ test('the opening message carries the request, and turn prompts replay the trans
   // After a plan is approved, the next replay prompt names the phase that starts.
   const enhancement = buildTurnPrompt('enhancement', {
     brief: 'Add a command palette.',
+    agentPreset: 'cursor',
     turns: [
       { role: 'assistant', text: '# Plan\n\nUse local disk.' },
       { role: 'user', text: 'Approved. Implement it.' }
@@ -205,22 +252,24 @@ test('the flows stay separate and cover every skill', () => {
 });
 
 test('the merge contract protects the target and ends at the integration branch', () => {
-  const instructions = buildSessionInstructions('merge', { skillText: '# Merge\n\nAsk first.' });
+  const instructions = buildSessionInstructions('merge', { agentPreset: 'claude' });
 
   assert.match(instructions, /Never\s+check out, modify, or delete the target branch/);
   assert.match(instructions, /Never push, force-push/);
   assert.match(instructions, /session ends when that/);
   assert.match(instructions, /## What the final merge report must contain/);
-  assert.match(instructions, /# Merge/);
+  assert.match(instructions, /\/merge/);
   assert.doesNotMatch(instructions, /## What the plan must contain/);
 
-  const opening = buildSessionOpening('merge', 'Merge "feat/x" into "main".');
+  const opening = buildSessionOpening('merge', 'Merge "feat/x" into "main".', { agentPreset: 'claude' });
 
+  assert.match(opening, /^\/merge/);
   assert.match(opening, /preflight checks/);
   assert.doesNotMatch(opening, /first single question/);
 
   const turn = buildTurnPrompt('merge', {
     brief: 'Merge "feat/x" into "main".',
+    agentPreset: 'codex',
     turns: [
       { role: 'assistant', text: 'Resolve auth.ts by keeping both guards?' },
       { role: 'user', text: 'Yes, keep both.' }
@@ -267,6 +316,7 @@ test('a live merge session ends when the integration branch exists', async (t) =
   fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
   spawnSync('git', ['add', '-A'], { cwd: root });
   spawnSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+  installFixtureSkill(root, 'claude', 'merge');
 
   let questions = 0;
 
@@ -362,6 +412,7 @@ test('a live session asks, waits, then finishes at the plan', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-live-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'claude', 'enhancement');
 
   const asked = [];
   const outputs = [];
@@ -407,6 +458,7 @@ test('a live session implements after the plan is approved and ends at the repor
   const asked = [];
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'claude', 'enhancement');
 
   const summary = await runInterviewSession(
     { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
@@ -455,6 +507,7 @@ test('a live session answers a permission request through the studio', async (t)
   const spawnAgent = fakeLiveSpawn(() => '# Plan\n\nLocal disk.');
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'claude', 'enhancement');
 
   const summary = await runInterviewSession(
     { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
@@ -509,6 +562,7 @@ test('a turn-based session replays the transcript and ends at the written spec',
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-turn-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'cursor', 'feature');
 
   const prompts = [];
   const asked = [];
@@ -560,6 +614,7 @@ test('a cancelled session reports a cancellation instead of a failure', async (t
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-cancel-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'claude', 'enhancement');
 
   await assert.rejects(
     runInterviewSession(
@@ -621,6 +676,7 @@ test('a turn-based session shows the text from structured events, not the raw st
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-json-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'opencode', 'enhancement');
 
   const stdout = [
     JSON.stringify({ type: 'text', part: { type: 'text', text: 'Which layout?' } }),
@@ -650,6 +706,7 @@ test('a turn-based session reports a non-zero agent exit', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-fail-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'cursor', 'enhancement');
 
   await assert.rejects(
     runInterviewSession(

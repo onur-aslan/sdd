@@ -1109,6 +1109,12 @@ function createSession(flow) {
                 <button type="button" class="btn quiet sm" data-role="jira-load">Load issues</button>
               </div>
               <p class="session-import-status" data-role="jira-status" role="status"></p>
+              ${flow === 'enhancement' ? `
+                <label class="session-skill-args">
+                  <span>Max implementation attempts</span>
+                  <input data-role="skill-max-turns" type="number" min="1" max="20" step="1" value="5" inputmode="numeric">
+                </label>
+              ` : ''}
               <label class="toggle session-publish">
                 <input type="checkbox" data-role="publish" checked>
                 <span>Create a branch, commit, and open a merge request</span>
@@ -1145,6 +1151,7 @@ function createSession(flow) {
     jiraSelect: q('jira-select'),
     jiraLoad: q('jira-load'),
     jiraStatus: q('jira-status'),
+    skillMaxTurns: q('skill-max-turns'),
     publish: q('publish'),
     richView: q('rich-view'),
     rawView: q('raw-view'),
@@ -2492,6 +2499,9 @@ function createSession(flow) {
     if (dom.publish) {
       dom.publish.checked = true;
     }
+    if (dom.skillMaxTurns) {
+      dom.skillMaxTurns.value = '5';
+    }
     setStatus('ready', false);
     setScope(copy.scope);
 
@@ -2513,9 +2523,17 @@ function createSession(flow) {
   async function start(brief) {
     const { agentPreset, agentCmd } = selectedAgent();
     const publishRequested = flow === 'merge' ? false : Boolean(dom.publish?.checked);
+    const skillArguments = flow === 'enhancement'
+      ? { max_turns: Number(dom.skillMaxTurns?.value ?? 5) }
+      : undefined;
 
     if (agentPreset === 'custom' && !agentCmd) {
       addEntry('session', 'Add an agent command in Settings, or pick a preset.');
+      return;
+    }
+
+    if (skillArguments && (!Number.isInteger(skillArguments.max_turns) || skillArguments.max_turns < 1 || skillArguments.max_turns > 20)) {
+      addEntry('session', 'Max implementation attempts must be a whole number from 1 to 20.');
       return;
     }
 
@@ -2534,6 +2552,7 @@ function createSession(flow) {
           brief,
           agentPreset,
           agentCmd,
+          ...(skillArguments ? { skillArguments } : {}),
           ...(flow === 'merge' ? {} : { publish: publishRequested })
         })
       });

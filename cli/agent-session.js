@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +35,10 @@ export const SESSION_FLOWS = {
     maxTurns: 5,
     // The enhancement skill changes the repository after the plan is approved
     // and has no artifact, so the human closes the session after the report.
-    artifact: null
+    artifact: null,
+    skillArguments: {
+      max_turns: { default: 5, min: 1, max: 20 }
+    }
   },
   feature: {
     id: 'feature',
@@ -91,6 +95,94 @@ export function validateBrief(value) {
   return brief;
 }
 
+export function validateSessionSkillArguments(flow, value = {}) {
+  const config = resolveSessionFlow(flow);
+  const schema = config.skillArguments ?? {};
+  if (value !== undefined && value !== null && (typeof value !== 'object' || Array.isArray(value))) {
+    const error = new Error('Skill arguments must be an object.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const unknown = Object.keys(input).filter((key) => !Object.hasOwn(schema, key));
+
+  if (unknown.length) {
+    const error = new Error(`Unsupported ${config.skillName} argument(s): ${unknown.join(', ')}.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return Object.fromEntries(Object.entries(schema).map(([key, rule]) => {
+    const raw = input[key] ?? rule.default;
+    const number = Number(raw);
+
+    if (!Number.isInteger(number) || number < rule.min || number > rule.max) {
+      const error = new Error(`${key} must be an integer from ${rule.min} to ${rule.max}.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return [key, number];
+  }));
+}
+
+const NATIVE_SKILL_AGENTS = new Set(['claude', 'cursor', 'codex', 'opencode']);
+
+function skillRoots(agentPreset, cwd) {
+  const project = (relative) => path.join(cwd, relative);
+  const home = os.homedir();
+
+  switch (String(agentPreset ?? '').trim().toLowerCase()) {
+    case 'claude':
+      return [project('.claude/skills'), path.join(home, '.claude', 'skills')];
+    case 'cursor':
+      return [project('.cursor/skills'), project('.agents/skills'), project('.claude/skills'), project('.codex/skills'), path.join(home, '.cursor', 'skills'), path.join(home, '.agents', 'skills'), path.join(home, '.claude', 'skills'), path.join(home, '.codex', 'skills')];
+    case 'codex':
+      return [project('.agents/skills'), ...(process.env.CODEX_HOME ? [path.join(process.env.CODEX_HOME, 'skills')] : []), path.join(home, '.agents', 'skills'), path.join(home, '.codex', 'skills')];
+    case 'opencode':
+      return [project('.opencode/skills'), project('.claude/skills'), project('.agents/skills'), path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'opencode', 'skills'), path.join(home, '.claude', 'skills'), path.join(home, '.agents', 'skills')];
+    default:
+      return [];
+  }
+}
+
+function assertNativeSkillAvailable(cwd, agentPreset, config) {
+  const agent = String(agentPreset ?? '').trim().toLowerCase();
+  if (!NATIVE_SKILL_AGENTS.has(agent)) {
+    const error = new Error(`The ${agent || 'custom'} agent has no configured native SDD skill invocation. Choose Claude Code, Cursor, Codex, or OpenCode.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (skillRoots(agent, cwd).some((root) => fs.existsSync(path.join(root, config.skillName, 'SKILL.md')))) return;
+
+  const installTarget = agent === 'opencode' ? 'opencode' : agent;
+  const invoke = agent === 'codex' ? `$${config.skillName}` : agent === 'opencode' ? `the native skill tool for ${config.skillName}` : `/${config.skillName}`;
+  const error = new Error(
+    `${agent} cannot invoke ${invoke} because the skill is not installed where this agent discovers skills. ` +
+    `Install the SDD skills with "sdd install --target ${installTarget} --user", then retry.`
+  );
+  error.statusCode = 400;
+  throw error;
+}
+
+function isNativeSkillAgent(agentPreset) {
+  return NATIVE_SKILL_AGENTS.has(String(agentPreset ?? '').trim().toLowerCase());
+}
+
+function buildNativeSkillCall(config, agentPreset, skillArguments = {}) {
+  const args = Object.entries(skillArguments)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
+  const agent = String(agentPreset ?? '').trim().toLowerCase();
+  const detail = args ? ` Studio arguments: ${args}.` : '';
+
+  if (agent === 'codex') return `Use the $${config.skillName} skill.${detail}`;
+  if (agent === 'opencode') return `Load the ${config.skillName} skill using OpenCode's native skill tool, then follow it.${detail}`;
+  return `/${config.skillName}${detail ? `\n${detail.trim()}` : ''}`;
+}
+
 export function readSessionSkill(flow) {
   const config = resolveSessionFlow(flow);
 
@@ -105,8 +197,14 @@ export function readSessionSkill(flow) {
 // can render: one question per turn, then the artifact, then (for enhancement)
 // an approval-gated implementation loop. The skill file is never modified; this
 // wrapper only changes how the turns are paced.
-export function buildSessionInstructions(flow, { skillText = readSessionSkill(flow) } = {}) {
+export function buildSessionInstructions(flow, { agentPreset, skillArguments = {} } = {}) {
   const config = resolveSessionFlow(flow);
+  const nativeSkillAgent = isNativeSkillAgent(agentPreset);
+  if (!nativeSkillAgent) {
+    const error = new Error('A native skill-capable agent must be selected; embedded skill text is disabled in Studio sessions.');
+    error.statusCode = 400;
+    throw error;
+  }
   const artifactRoot = config.artifact
     ? config.artifact.root.split(path.sep).join('/')
     : '';
@@ -117,6 +215,10 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
     'human. You and the human take turns in a chat.',
     ''
   ];
+
+  if (nativeSkillAgent) {
+    lines.unshift(buildNativeSkillCall(config, agentPreset, skillArguments), '');
+  }
 
   if (config.mode === 'merge') {
     lines.push(
@@ -173,7 +275,7 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
       '- Inspect the existing code, conventions, and current behavior first.',
       '- Apply the smallest change that satisfies the approved plan, then verify the',
       '  relevant behavior and check for regressions.',
-      `- Bound the implementation-and-verification loop to ${config.maxTurns} attempts.`,
+      `- Bound the implementation-and-verification loop to ${skillArguments.max_turns ?? config.maxTurns} attempts.`,
       '  Each change followed by a verification counts as one attempt, and the',
       '  initial attempt counts toward the limit.',
       '- If verification fails, analyze the evidence and reassess the approach before',
@@ -299,38 +401,20 @@ export function buildSessionInstructions(flow, { skillText = readSessionSkill(fl
     ''
   );
 
-  if (skillText) {
-    lines.push(
-      '',
-      '## Skill instructions',
-      '',
-      `Follow the ${config.skillName} skill below, adapted to this interview loop so`,
-      `that this session stops at the ${config.finalLabel}.`,
-      '',
-      '---',
-      '',
-      skillText.trim(),
-      '',
-      '---'
-    );
-  } else {
-    lines.push('', `Use the \`${config.skillName}\` skill when it is available.`);
-  }
-
   lines.push('');
 
   return lines.join('\n');
 }
 
 // The first message of a live session: the whole contract plus the request.
-export function buildSessionOpening(flow, brief) {
+export function buildSessionOpening(flow, brief, options = {}) {
   const config = resolveSessionFlow(flow);
   const closing = config.mode === 'merge'
     ? 'Start the preflight checks and the dry run now. Ask a question only when a decision is needed.'
     : 'Start the interview now. Ask your first single question.';
 
   return [
-    buildSessionInstructions(flow),
+    buildSessionInstructions(flow, options),
     '## The request',
     '',
     validateBrief(brief),
@@ -341,10 +425,10 @@ export function buildSessionOpening(flow, brief) {
 
 // A self-contained prompt for agents that cannot hold a live conversation: the
 // accumulated transcript is replayed and the agent asks the next question.
-export function buildTurnPrompt(flow, { brief, turns = [] } = {}) {
+export function buildTurnPrompt(flow, { brief, turns = [], ...options } = {}) {
   const config = resolveSessionFlow(flow);
   const lines = [
-    buildSessionInstructions(flow),
+    buildSessionInstructions(flow, options),
     '## Conversation so far',
     '',
     `**Human:** ${validateBrief(brief)}`
@@ -1147,7 +1231,10 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       return reply;
     };
 
-    let turnText = await nextTurn(buildSessionOpening(config.id, brief));
+    let turnText = await nextTurn(buildSessionOpening(config.id, brief, {
+      agentPreset: deps.agentPreset,
+      skillArguments: deps.skillArguments
+    }));
 
     while (true) {
       clearWatchdog();
@@ -1296,14 +1383,22 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
   while (true) {
     count += 1;
 
-    const prompt = buildTurnPrompt(config.id, { brief, turns });
+    const prompt = buildTurnPrompt(config.id, {
+      brief,
+      turns,
+      agentPreset: deps.agentPreset,
+      skillArguments: deps.skillArguments
+    });
 
     fs.writeFileSync(promptFile, prompt, 'utf8');
     emit({ type: 'turn-started', turn: count });
 
+    const skillInvocation = `${buildNativeSkillCall(config, deps.agentPreset, deps.skillArguments)} `;
     const agentPrompt = count === 1
-      ? `Read the interview brief at \`${promptFile}\` and follow it. Its file rules are exact; do not commit or push.`
-      : `Read the interview brief at \`${promptFile}\` and follow it. Continue the interview; its file rules still apply.`;
+      ? `${skillInvocation}${config.mode === 'merge'
+        ? `Read the interview brief at \`${promptFile}\` and follow it. Never push; commit only on the specified integration branch.`
+        : `Read the interview brief at \`${promptFile}\` and follow it. Its file rules are exact; do not commit or push.`}`
+      : `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it. Continue the interview; its file rules still apply.`;
     const invocation = buildAgentInvocation(command, { prompt: agentPrompt, promptFile });
     const spec = buildSpawnSpec(invocation);
 
@@ -1414,21 +1509,34 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
 export async function runInterviewSession(request = {}, dependencies = {}) {
   const config = resolveSessionFlow(request.flow);
   const brief = validateBrief(request.brief);
+  const skillArguments = {
+    ...validateSessionSkillArguments(config.id, request.skillArguments),
+    ...(config.mode === 'merge' && request.merge
+      ? { source: request.merge.source, target: request.merge.target }
+      : {})
+  };
+  const agentPreset = request.agentPreset;
   const cwd = dependencies.cwd ?? process.cwd();
+  assertNativeSkillAvailable(cwd, agentPreset, config);
   const id = dependencies.id ?? `session-${Date.now()}`;
   const emit = dependencies.emit ?? (() => {});
   const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);
   const engine = detectAgentEngine(command, request.agentPreset);
   const dir = sessionDir(cwd, id, config);
   const merge = request.merge ?? dependencies.merge ?? null;
-  const sessionDeps = merge ? { ...dependencies, merge } : dependencies;
+  const sessionDeps = {
+    ...dependencies,
+    agentPreset,
+    skillArguments,
+    ...(merge ? { merge } : {})
+  };
   // A spec that exists before the first turn belongs to an earlier session.
   const artifactsBefore = snapshotArtifacts(cwd, config);
 
   emit({ type: 'session-started', flow: config.id, engine, brief });
 
   if (engine === 'live') {
-    writeFile(dir, 'opening.md', buildSessionOpening(config.id, brief));
+    writeFile(dir, 'opening.md', buildSessionOpening(config.id, brief, { agentPreset, skillArguments }));
   }
 
   const result = engine === 'live'
@@ -1441,6 +1549,7 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
     flow: config.id,
     dir,
     promptFile: path.join(dir, 'prompt.md'),
+    skillArguments,
     ...(merge ? { merge } : {})
   };
 }

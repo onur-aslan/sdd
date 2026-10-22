@@ -1463,6 +1463,22 @@ input[type="checkbox"]:disabled {
   line-height: 1.45;
 }
 
+.session-skill-args {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.session-skill-args input {
+  width: 72px;
+  min-height: 30px;
+  padding: 4px 8px;
+  text-align: right;
+}
+
 .session-publish {
   margin-top: 1px;
   color: var(--muted);

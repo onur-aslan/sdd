@@ -992,6 +992,12 @@ export function buildAgentInvocation(command, { prompt, promptFile }) {
 export function buildSpawnSpec(invocation, platform = process.platform) {
   // npm-installed CLIs are .cmd shims on Windows, and those need cmd.exe.
   if (platform === 'win32') {
+    // Native executables can be spawned directly. This also lets preset agents
+    // use an absolute path when their install directory is missing from PATH.
+    if (/\.exe$/i.test(invocation.command)) {
+      return { command: invocation.command, args: invocation.args };
+    }
+
     return {
       command: 'cmd.exe',
       args: ['/d', '/s', '/c', invocation.command, ...invocation.args]
