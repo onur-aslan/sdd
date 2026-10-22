@@ -40,9 +40,9 @@ export const STUDIO_DEFAULT_HOST = '127.0.0.1';
 // through --agent-cmd, so the sweep itself stays agent-agnostic.
 export const STUDIO_AGENT_PRESETS = [
   { id: 'claude', label: 'Claude Code', command: DEFAULT_AGENT_COMMAND },
-  { id: 'cursor', label: 'Cursor', command: '["cursor-agent","-p","--force"]' },
+  { id: 'cursor', label: 'Cursor', command: '["cursor-agent","-p","--force","--output-format","stream-json"]' },
   { id: 'opencode', label: 'OpenCode', command: '["opencode","run","--format","json","--agent","build"]' },
-  { id: 'codex', label: 'Codex', command: '["codex","exec"]' },
+  { id: 'codex', label: 'Codex', command: '["codex","exec","--json","--skip-git-repo-check"]' },
   { id: 'custom', label: 'Custom command', command: '' }
 ];
 
@@ -92,7 +92,7 @@ function studioAgentPresets() {
 
   return STUDIO_AGENT_PRESETS.map((preset) => (
     preset.id === 'codex' && executable
-      ? { ...preset, command: JSON.stringify([executable, 'exec']) }
+      ? { ...preset, command: JSON.stringify([executable, 'exec', '--json', '--skip-git-repo-check']) }
       : preset
   ));
 }
@@ -539,6 +539,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       cwd,
       fetchImpl,
       spawnImpl,
+      agentPreset: effective.agentPreset,
       now,
       signal: job.controller.signal,
       logger: (line) => emit(job, { type: 'log', line }),
@@ -967,7 +968,8 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         pipeline: pipeline.id,
         verify,
         specPath: session.result.artifact,
-        agentCmd: session.request.agentCmd ?? readStore(cwd).agentCmd
+        agentCmd: session.request.agentCmd ?? readStore(cwd).agentCmd,
+        agentPreset: session.request.agentPreset ?? readStore(cwd).agentPreset
       },
       {
         cwd,

@@ -8,6 +8,11 @@ import {
   normalizeAgentCommand,
   runProcess
 } from './bug-sweep.js';
+import {
+  assertNativeSkillAvailable,
+  buildNativeSkillCall,
+  resolveNativeSkillAgent
+} from './native-skills.js';
 
 // The feature workflow has two implementation paths after the spec is approved:
 // one shot (sdd-developer) or task-by-task TDD (spec-to-task -> feature-tdd).
@@ -76,15 +81,16 @@ export function buildFeatureSteps({ pipeline, specRelative, featureRelative, ver
   return [{ skill: 'sdd-developer', args: [specRelative, ...verifyFlag] }];
 }
 
-export function buildStepPrompt(step, { verify = true } = {}) {
+export function buildStepPrompt(step, { verify = true, agentPreset } = {}) {
   const argument = step.args.join(' ');
   const tail = verify
     ? 'Run the E2E verification phase it describes.'
     : 'Skip the E2E verification phase; it is not wanted for this build.';
+  const skillCall = buildNativeSkillCall(step.skill, agentPreset, { arguments: argument });
 
   if (step.skill === 'spec-to-task') {
     return [
-      `Run the \`spec-to-task\` skill with this argument: \`${argument}\`.`,
+      skillCall,
       '',
       `Write \`${step.produces}\` next to the spec, following the skill exactly.`,
       'Do not commit, push, or open a pull request. Print the task breakdown when it is done.'
@@ -92,7 +98,7 @@ export function buildStepPrompt(step, { verify = true } = {}) {
   }
 
   return [
-    `Run the \`${step.skill}\` skill with this argument: \`${argument}\`.`,
+    skillCall,
     '',
     `Follow that skill exactly in this repository. ${tail}`,
     'Do not commit, push, or open a pull request. Print the final report when the pipeline is done.'
@@ -132,6 +138,8 @@ export async function runFeatureBuild(request = {}, dependencies = {}) {
     verify
   });
   const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);
+  const agentPreset = resolveNativeSkillAgent(request.agentPreset, command);
+  for (const step of steps) assertNativeSkillAvailable(cwd, agentPreset, step.skill);
   const timeoutSeconds = Number(dependencies.timeoutSeconds) > 0
     ? Number(dependencies.timeoutSeconds)
     : DEFAULT_BUILD_TIMEOUT_SECONDS;
@@ -158,7 +166,7 @@ export async function runFeatureBuild(request = {}, dependencies = {}) {
   for (const [index, step] of steps.entries()) {
     emit({ type: 'build-step', index, skill: step.skill, status: 'running' });
 
-    const prompt = buildStepPrompt(step, { verify });
+    const prompt = buildStepPrompt(step, { verify, agentPreset });
     const invocation = buildAgentInvocation(command, { prompt });
     const spec = buildSpawnSpec(invocation);
 

@@ -3,6 +3,7 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
+import { assertNativeSkillAvailable, buildNativeSkillCall, resolveNativeSkillAgent } from './native-skills.js';
 
 export const DEFAULT_AGENT_COMMAND = '["claude","-p"]';
 export const DEFAULT_MAX_TURNS = 5;
@@ -924,7 +925,7 @@ export function renderBugPrompt({ bug, maxTurns, resultFile }) {
     '5. Do not weaken, skip, or delete tests.',
     '6. Do not touch unrelated files and do not reformat the repository.',
     '',
-    `Use the \`bug-fix\` skill when it is available and treat ${maxTurns} as \`max_turns\`.`,
+    `Use max_turns=${maxTurns} for this bug-fix run.`,
     'If the skill describes a different final report format, this task file wins for this run.',
     'If the bug cannot be reproduced or verified, stop and report it as not fixed.',
     '',
@@ -1877,7 +1878,8 @@ async function processBug({
   fs.rmSync(resultFile, { force: true });
   fs.writeFileSync(promptFile, renderBugPrompt({ bug, maxTurns: options.maxTurns, resultFile }), 'utf8');
 
-  const shortPrompt = `Read the task file at \`${promptFile}\` and complete it. Write the result JSON to \`${resultFile}\`. Do not commit, push, or ask questions.`;
+  const skillCall = buildNativeSkillCall('bug-fix', options.agentPreset, { max_turns: options.maxTurns });
+  const shortPrompt = `${skillCall} Read the task file at \`${promptFile}\` and complete it. Write the result JSON to \`${resultFile}\`. Do not commit, push, or ask questions.`;
   const invocation = buildAgentInvocation(options.agentCommand, { prompt: shortPrompt, promptFile });
   const spec = buildSpawnSpec(invocation);
   const logStream = fs.createWriteStream(logFile, { flags: 'w' });
@@ -2224,6 +2226,12 @@ export async function runBugSweep(argv, dependencies = {}) {
       return formatBugSweepHelp();
     }
 
+    if (!preflight.dryRun) {
+      const cwd = dependencies.cwd ?? process.cwd();
+      const agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, preflight.agentCommand);
+      assertNativeSkillAvailable(cwd, agentPreset, 'bug-fix');
+    }
+
     return runScheduledSweep(schedule, dependencies);
   }
 
@@ -2242,6 +2250,8 @@ async function runSingleSweep(argv, dependencies = {}) {
   }
 
   const cwd = dependencies.cwd ?? process.cwd();
+  options.agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, options.agentCommand);
+  if (!options.dryRun) assertNativeSkillAvailable(cwd, options.agentPreset, 'bug-fix');
   const logger = dependencies.logger ?? ((line) => process.stderr.write(`${line}\n`));
   const spawnImpl = dependencies.spawnImpl ?? runProcess;
   const now = dependencies.now ?? (() => new Date());

@@ -1085,7 +1085,7 @@ function createSession(flow) {
           <span class="session-agent" data-role="agent"></span>
         </div>
         <div class="session-tools">
-          <div class="segmented" role="group" aria-label="Session view">
+          <div class="segmented" role="group" aria-label="Conversation view">
             <button type="button" class="seg-btn" data-role="rich" aria-pressed="true">Rich</button>
             <button type="button" class="seg-btn" data-role="raw" aria-pressed="false">Raw</button>
           </div>
@@ -1095,7 +1095,7 @@ function createSession(flow) {
         </div>
       </header>
 
-      <div class="session-stage" data-role="stage" role="log" aria-live="off" aria-label="Session transcript" tabindex="0">
+      <div class="session-stage" data-role="stage" role="log" aria-live="off" aria-label="Conversation" tabindex="0">
         <div class="session-empty" data-role="empty">
           <p class="session-empty-title" data-role="empty-title">${copy.emptyTitle}</p>
           <p data-role="empty-body">${copy.emptyBody}</p>
@@ -1109,12 +1109,6 @@ function createSession(flow) {
                 <button type="button" class="btn quiet sm" data-role="jira-load">Load issues</button>
               </div>
               <p class="session-import-status" data-role="jira-status" role="status"></p>
-              ${flow === 'enhancement' ? `
-                <label class="session-skill-args">
-                  <span>Max implementation attempts</span>
-                  <input data-role="skill-max-turns" type="number" min="1" max="20" step="1" value="5" inputmode="numeric">
-                </label>
-              ` : ''}
               <label class="toggle session-publish">
                 <input type="checkbox" data-role="publish" checked>
                 <span>Create a branch, commit, and open a merge request</span>
@@ -1151,7 +1145,6 @@ function createSession(flow) {
     jiraSelect: q('jira-select'),
     jiraLoad: q('jira-load'),
     jiraStatus: q('jira-status'),
-    skillMaxTurns: q('skill-max-turns'),
     publish: q('publish'),
     richView: q('rich-view'),
     rawView: q('raw-view'),
@@ -1375,8 +1368,16 @@ function createSession(flow) {
 
   function rawText() {
     return view.entries
-      .map((entry) => `${entry.role === 'agent' ? 'agent' : entry.role} \u203a\n${entry.text}`)
-      .join('\n\n');
+      .filter((entry) => entry.role === 'agent')
+      .map((entry) => renderTerminalText(entry.text))
+      .join('');
+  }
+
+  function renderTerminalText(value) {
+    return String(value ?? '')
+      .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+      .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\r/g, '');
   }
 
   function renderEntry(entry, index) {
@@ -1387,9 +1388,10 @@ function createSession(flow) {
         return '';
       }
 
-      const body = window.SDDMarkdown ? window.SDDMarkdown.render(entry.text) : `<p>${escapeText(entry.text)}</p>`;
+      const text = renderTerminalText(entry.text);
+      const body = window.SDDMarkdown ? window.SDDMarkdown.render(text) : `<p>${escapeText(text)}</p>`;
 
-      return `<article class="turn turn-agent" role="group" aria-label="Agent"><div class="turn-body">${body}</div></article>`;
+      return '<article class="turn turn-agent" role="group" aria-label="Assistant"><p class="turn-who">Assistant</p><div class="turn-body">' + body + '</div></article>';
     }
 
     if (entry.role === 'you') {
@@ -1573,16 +1575,16 @@ function createSession(flow) {
         scheduleRender();
         break;
       case 'activity':
-        setTurnLabel(event.label || 'working…');
+        // Focused chat view keeps tool names and paths out of the transcript
+        // and status line; only show that the agent is still working.
+        setTurnLabel('working');
         break;
       case 'question': {
-        // The turn's final text replaces the streamed chunks: an agent that
-        // prints structured events should read as its reply, not as JSON.
         stopTurnClock();
         const target = view.active
           ?? [...view.entries].reverse().find((entry) => entry.role === 'agent');
 
-        if (target && typeof event.text === 'string' && event.text) {
+        if (target && !target.text && typeof event.text === 'string' && event.text) {
           target.text = event.text;
         }
 
@@ -2499,9 +2501,6 @@ function createSession(flow) {
     if (dom.publish) {
       dom.publish.checked = true;
     }
-    if (dom.skillMaxTurns) {
-      dom.skillMaxTurns.value = '5';
-    }
     setStatus('ready', false);
     setScope(copy.scope);
 
@@ -2523,17 +2522,8 @@ function createSession(flow) {
   async function start(brief) {
     const { agentPreset, agentCmd } = selectedAgent();
     const publishRequested = flow === 'merge' ? false : Boolean(dom.publish?.checked);
-    const skillArguments = flow === 'enhancement'
-      ? { max_turns: Number(dom.skillMaxTurns?.value ?? 5) }
-      : undefined;
-
     if (agentPreset === 'custom' && !agentCmd) {
       addEntry('session', 'Add an agent command in Settings, or pick a preset.');
-      return;
-    }
-
-    if (skillArguments && (!Number.isInteger(skillArguments.max_turns) || skillArguments.max_turns < 1 || skillArguments.max_turns > 20)) {
-      addEntry('session', 'Max implementation attempts must be a whole number from 1 to 20.');
       return;
     }
 
@@ -2552,7 +2542,6 @@ function createSession(flow) {
           brief,
           agentPreset,
           agentCmd,
-          ...(skillArguments ? { skillArguments } : {}),
           ...(flow === 'merge' ? {} : { publish: publishRequested })
         })
       });

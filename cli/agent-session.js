@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +12,11 @@ import {
   prepareWorkDir,
   runProcess
 } from './bug-sweep.js';
+import {
+  NATIVE_SKILL_AGENTS,
+  assertNativeSkillAvailable,
+  buildNativeSkillCall
+} from './native-skills.js';
 
 const MAX_BRIEF_LENGTH = 4000;
 const DEFAULT_TURN_TIMEOUT_SECONDS = 1800;
@@ -30,15 +34,9 @@ export const SESSION_FLOWS = {
     // The plan is an approved checkpoint; the report is the final reply.
     planLabel: 'plan',
     finalLabel: 'report',
-    // The skill's default: each implement-and-verify attempt counts, including
-    // the initial one.
-    maxTurns: 5,
     // The enhancement skill changes the repository after the plan is approved
     // and has no artifact, so the human closes the session after the report.
     artifact: null,
-    skillArguments: {
-      max_turns: { default: 5, min: 1, max: 20 }
-    }
   },
   feature: {
     id: 'feature',
@@ -126,61 +124,8 @@ export function validateSessionSkillArguments(flow, value = {}) {
   }));
 }
 
-const NATIVE_SKILL_AGENTS = new Set(['claude', 'cursor', 'codex', 'opencode']);
-
-function skillRoots(agentPreset, cwd) {
-  const project = (relative) => path.join(cwd, relative);
-  const home = os.homedir();
-
-  switch (String(agentPreset ?? '').trim().toLowerCase()) {
-    case 'claude':
-      return [project('.claude/skills'), path.join(home, '.claude', 'skills')];
-    case 'cursor':
-      return [project('.cursor/skills'), project('.agents/skills'), project('.claude/skills'), project('.codex/skills'), path.join(home, '.cursor', 'skills'), path.join(home, '.agents', 'skills'), path.join(home, '.claude', 'skills'), path.join(home, '.codex', 'skills')];
-    case 'codex':
-      return [project('.agents/skills'), ...(process.env.CODEX_HOME ? [path.join(process.env.CODEX_HOME, 'skills')] : []), path.join(home, '.agents', 'skills'), path.join(home, '.codex', 'skills')];
-    case 'opencode':
-      return [project('.opencode/skills'), project('.claude/skills'), project('.agents/skills'), path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'opencode', 'skills'), path.join(home, '.claude', 'skills'), path.join(home, '.agents', 'skills')];
-    default:
-      return [];
-  }
-}
-
-function assertNativeSkillAvailable(cwd, agentPreset, config) {
-  const agent = String(agentPreset ?? '').trim().toLowerCase();
-  if (!NATIVE_SKILL_AGENTS.has(agent)) {
-    const error = new Error(`The ${agent || 'custom'} agent has no configured native SDD skill invocation. Choose Claude Code, Cursor, Codex, or OpenCode.`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (skillRoots(agent, cwd).some((root) => fs.existsSync(path.join(root, config.skillName, 'SKILL.md')))) return;
-
-  const installTarget = agent === 'opencode' ? 'opencode' : agent;
-  const invoke = agent === 'codex' ? `$${config.skillName}` : agent === 'opencode' ? `the native skill tool for ${config.skillName}` : `/${config.skillName}`;
-  const error = new Error(
-    `${agent} cannot invoke ${invoke} because the skill is not installed where this agent discovers skills. ` +
-    `Install the SDD skills with "sdd install --target ${installTarget} --user", then retry.`
-  );
-  error.statusCode = 400;
-  throw error;
-}
-
 function isNativeSkillAgent(agentPreset) {
   return NATIVE_SKILL_AGENTS.has(String(agentPreset ?? '').trim().toLowerCase());
-}
-
-function buildNativeSkillCall(config, agentPreset, skillArguments = {}) {
-  const args = Object.entries(skillArguments)
-    .filter(([, value]) => value !== undefined && value !== null && value !== '')
-    .map(([key, value]) => `${key}=${value}`)
-    .join(', ');
-  const agent = String(agentPreset ?? '').trim().toLowerCase();
-  const detail = args ? ` Studio arguments: ${args}.` : '';
-
-  if (agent === 'codex') return `Use the $${config.skillName} skill.${detail}`;
-  if (agent === 'opencode') return `Load the ${config.skillName} skill using OpenCode's native skill tool, then follow it.${detail}`;
-  return `/${config.skillName}${detail ? `\n${detail.trim()}` : ''}`;
 }
 
 export function readSessionSkill(flow) {
@@ -217,7 +162,7 @@ export function buildSessionInstructions(flow, { agentPreset, skillArguments = {
   ];
 
   if (nativeSkillAgent) {
-    lines.unshift(buildNativeSkillCall(config, agentPreset, skillArguments), '');
+    lines.unshift(buildNativeSkillCall(config.skillName, agentPreset, skillArguments), '');
   }
 
   if (config.mode === 'merge') {
@@ -275,12 +220,7 @@ export function buildSessionInstructions(flow, { agentPreset, skillArguments = {
       '- Inspect the existing code, conventions, and current behavior first.',
       '- Apply the smallest change that satisfies the approved plan, then verify the',
       '  relevant behavior and check for regressions.',
-      `- Bound the implementation-and-verification loop to ${skillArguments.max_turns ?? config.maxTurns} attempts.`,
-      '  Each change followed by a verification counts as one attempt, and the',
-      '  initial attempt counts toward the limit.',
-      '- If verification fails, analyze the evidence and reassess the approach before',
-      '  retrying. If the limit is reached, stop and report the outcome, evidence,',
-      '  and unresolved issues.',
+      '- Follow the skill\'s implementation-and-verification workflow.',
       '- A reply in this phase is either a question about a decision you cannot',
       `  infer, or the final ${config.finalLabel}.`,
       '- Do not expand the approved scope. If the plan must change materially, stop,',
@@ -1180,8 +1120,8 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   });
   child.stderr?.setEncoding?.('utf8');
   child.stderr?.on('data', (chunk) => {
-    // stderr is diagnostics, not the agent's reply: keep it for a failure
-    // message instead of streaming it into the conversation as a turn.
+    // Keep diagnostics available if the turn fails, but never mix them into
+    // the user-facing transcript (stderr can contain provider/tool details).
     stderr += chunk.toString();
   });
   child.stdin?.on?.('error', (error) => controller.fail(error));
@@ -1306,11 +1246,12 @@ export function stripAnsi(value) {
     .replace(/\r/g, '');
 }
 
-// Agents that print structured events (`--format json`) mix the assistant text
-// with tool and step events. Reading the events turns that into the reply the
-// conversation should show; an error event becomes a real error, not a turn.
+// Structured streams contain tool events and sometimes the contents of files
+// the agent read. Only assistant text is eligible for the conversation view.
 export function parseAgentReply(stdout) {
   const texts = [];
+  let finalText = '';
+  let textFormat = '';
 
   let structured = false;
   let error = '';
@@ -1352,9 +1293,37 @@ export function parseAgentReply(stdout) {
       continue;
     }
 
+    if (event.type === 'assistant' && event.message?.role === 'assistant') {
+      // Cursor stream-json emits assistant deltas separately from tool calls.
+      textFormat = 'delta';
+      for (const block of event.message.content ?? []) {
+        if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          texts.push(block.text);
+        }
+      }
+      continue;
+    }
+
+    if (event.type === 'result' && typeof event.result === 'string') {
+      // Cursor's result is the aggregated reply; prefer streamed assistant
+      // deltas when present to avoid rendering it twice.
+      finalText = event.result;
+      continue;
+    }
+
     if (event.type === 'text') {
       // OpenCode: { type: "text", part: { text } }.
+      textFormat = 'messages';
       const text = event.part?.text ?? event.text;
+
+      if (typeof text === 'string' && text.trim()) {
+        texts.push(text);
+      }
+    } else if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+      // Codex `exec --json`: completed command/tool items are intentionally
+      // ignored; only the final assistant message is shown.
+      textFormat = 'messages';
+      const text = event.item.text;
 
       if (typeof text === 'string' && text.trim()) {
         texts.push(text);
@@ -1367,7 +1336,7 @@ export function parseAgentReply(stdout) {
     }
   }
 
-  return { text: texts.join('\n\n').trim(), error, structured };
+  return { text: (texts.length ? texts.join(textFormat === 'messages' ? '\n\n' : '') : finalText).trim(), error, structured };
 }
 
 async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps, artifactsBefore }) {
@@ -1393,7 +1362,7 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
     fs.writeFileSync(promptFile, prompt, 'utf8');
     emit({ type: 'turn-started', turn: count });
 
-    const skillInvocation = `${buildNativeSkillCall(config, deps.agentPreset, deps.skillArguments)} `;
+    const skillInvocation = `${buildNativeSkillCall(config.skillName, deps.agentPreset, deps.skillArguments)} `;
     const agentPrompt = count === 1
       ? `${skillInvocation}${config.mode === 'merge'
         ? `Read the interview brief at \`${promptFile}\` and follow it. Never push; commit only on the specified integration branch.`
@@ -1403,10 +1372,40 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
     const spec = buildSpawnSpec(invocation);
 
     let result;
-    // A structured agent (OpenCode `--format json`) writes event lines, not
-    // prose. Streaming those into the conversation would show raw JSON while
-    // the turn runs, so the parsed reply is shown instead when it is ready.
-    let stdoutIsJson = null;
+    const structuredAgent = ['codex', 'cursor', 'opencode'].includes(String(deps.agentPreset ?? '').toLowerCase());
+    let structuredBuffer = '';
+    let streamedAssistant = '';
+
+    const emitStructuredLines = (chunk, flush = false) => {
+      structuredBuffer += String(chunk ?? '');
+
+      let boundary;
+      while ((boundary = structuredBuffer.indexOf('\n')) !== -1 || (flush && structuredBuffer.length)) {
+        const line = boundary === -1 ? structuredBuffer : structuredBuffer.slice(0, boundary);
+        structuredBuffer = boundary === -1 ? '' : structuredBuffer.slice(boundary + 1);
+
+        let event;
+        try {
+          event = JSON.parse(line.trim());
+        } catch {
+          continue;
+        }
+
+        // Cursor's terminal result repeats all assistant deltas. Prefer the
+        // streamed text; use the terminal result only when no delta arrived.
+        if (event.type === 'result' && streamedAssistant) continue;
+        const reply = parseAgentReply(line);
+
+        if (reply.text) {
+          const separateMessages = ['codex', 'opencode'].includes(String(deps.agentPreset ?? '').toLowerCase());
+          const separator = separateMessages && streamedAssistant ? '\n\n' : '';
+          const visibleText = `${separator}${reply.text}`;
+
+          streamedAssistant += visibleText;
+          emit({ type: 'output', stream: 'stdout', chunk: visibleText });
+        }
+      }
+    };
 
     try {
       result = await spawnImpl(spec.command, spec.args, {
@@ -1414,18 +1413,12 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
         signal: deps.signal,
         timeoutMs: timeoutSeconds * 1000,
         onStdout: (chunk) => {
-          if (stdoutIsJson === null) {
-            const head = String(chunk).trimStart();
-
-            if (head) {
-              stdoutIsJson = head.startsWith('{');
-            }
-          }
-
-          if (!stdoutIsJson) {
-            emit({ type: 'output', stream: 'stdout', chunk });
-          }
+          // Codex and OpenCode emit protocol events that include tool output.
+          // Their assistant text is emitted after parsing below.
+          if (structuredAgent) emitStructuredLines(chunk);
+          else emit({ type: 'output', stream: 'stdout', chunk });
         },
+        onStderr: () => {},
         env: {
           ...process.env,
           SDD_SESSION_ID: id,
@@ -1454,19 +1447,24 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
       throw new Error(`The agent exited with code ${result.code}.${detail ? ` ${detail}` : ''}`);
     }
 
-    // Structured events (OpenCode `--format json`) are read, not echoed: the
-    // agent's stderr header and tool events are not part of the conversation.
+    if (structuredAgent) emitStructuredLines('', true);
+
+    // Parse structured output and expose only the assistant reply, never tool
+    // events such as read_file results or command output.
     const parsed = parseAgentReply(result.stdout ?? '');
 
     if (parsed.error) {
       throw new Error(`The agent reported: ${parsed.error}`);
     }
 
-    const text = (parsed.text || stripAnsi(`${result.stdout ?? ''}${result.stderr ? `\n${result.stderr}` : ''}`)).trim();
+    const text = (parsed.text || (structuredAgent ? '' : stripAnsi(result.stdout ?? ''))).trim();
 
     if (!text) {
-      throw new Error('The agent finished without a reply.');
+      const detail = String(result.stderr ?? '').trim().split('\n').slice(-3).join(' ');
+      throw new Error(`The agent finished without a reply.${detail ? ` ${detail}` : ''}`);
     }
+
+    if (structuredAgent && !streamedAssistant) emit({ type: 'output', stream: 'stdout', chunk: text });
 
     turns.push({ role: 'assistant', text });
 
@@ -1517,7 +1515,7 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
   };
   const agentPreset = request.agentPreset;
   const cwd = dependencies.cwd ?? process.cwd();
-  assertNativeSkillAvailable(cwd, agentPreset, config);
+  assertNativeSkillAvailable(cwd, agentPreset, config.skillName);
   const id = dependencies.id ?? `session-${Date.now()}`;
   const emit = dependencies.emit ?? (() => {});
   const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);

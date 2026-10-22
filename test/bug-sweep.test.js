@@ -41,6 +41,12 @@ import {
 } from '../cli/bug-sweep.js';
 import { run } from '../cli/index.js';
 
+function installBugFixFixtureSkill(root) {
+  const skillFile = path.join(root, '.claude', 'skills', 'bug-fix', 'SKILL.md');
+  fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+  fs.writeFileSync(skillFile, '---\nname: bug-fix\ndescription: Test fixture skill.\n---\n', 'utf8');
+}
+
 const fakeFetch = async () => ({
   ok: true,
   status: 200,
@@ -532,6 +538,7 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-resume-agent-'));
 
   try {
+    installBugFixFixtureSkill(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -553,13 +560,13 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
     ];
     const jiraFetch = createFilteringJiraFetch();
 
-    const first = await runBugSweep(baseArgs, { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
+    const first = await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(first, /1 bug\(s\) still pending/);
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), '');
     assert.equal(git(root, ['rev-list', '--count', 'HEAD']), '2');
 
-    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
+    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(second, /Fixed: 1\/2/);
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
@@ -579,6 +586,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-agent-'));
 
   try {
+    installBugFixFixtureSkill(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -596,7 +604,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
     assert.match(output, /✅ ABC-1/);
@@ -628,6 +636,7 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-agent-'));
 
   try {
+    installBugFixFixtureSkill(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -650,7 +659,7 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
 
@@ -692,6 +701,7 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
     git(root, ['config', 'commit.gpgsign', 'false']);
+    installBugFixFixtureSkill(root);
 
     fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
     git(root, ['add', '-A']);
@@ -725,7 +735,7 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
 
@@ -744,6 +754,7 @@ test('--worktree keeps the checkout for --resume and removes it on completion', 
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-resume-agent-'));
 
   try {
+    installBugFixFixtureSkill(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -768,13 +779,13 @@ test('--worktree keeps the checkout for --resume and removes it on completion', 
     ];
     const jiraFetch = createFilteringJiraFetch();
 
-    const first = await runBugSweep(baseArgs, { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
+    const first = await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(first, /1 bug\(s\) still pending/);
     assert.equal(fs.existsSync(worktreePath), true, 'the worktree is kept while bugs are pending');
     assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), originalBranch);
 
-    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
+    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(second, /Fixed: 1\/2/);
     assert.equal(fs.existsSync(worktreePath), false, 'the worktree is removed after the sweep completes');

@@ -84,11 +84,9 @@ test('validateBrief trims and rejects empty or oversized briefs', () => {
   assert.throws(() => validateBrief('x'.repeat(4001)), /4000 characters or fewer/);
 });
 
-test('Studio skill arguments apply defaults and reject unsupported values', () => {
-  assert.deepEqual(validateSessionSkillArguments('enhancement'), { max_turns: 5 });
-  assert.deepEqual(validateSessionSkillArguments('enhancement', { max_turns: '7' }), { max_turns: 7 });
-  assert.throws(() => validateSessionSkillArguments('enhancement', { max_turns: 0 }), /from 1 to 20/);
-  assert.throws(() => validateSessionSkillArguments('enhancement', { max_turns: 21 }), /from 1 to 20/);
+test('Studio leaves skill execution limits to the selected agent and rejects Studio overrides', () => {
+  assert.deepEqual(validateSessionSkillArguments('enhancement'), {});
+  assert.throws(() => validateSessionSkillArguments('enhancement', { max_turns: 7 }), /Unsupported enhancement argument/);
   assert.throws(() => validateSessionSkillArguments('enhancement', { unknown: true }), /Unsupported enhancement argument/);
   assert.throws(() => validateSessionSkillArguments('enhancement', '5'), /must be an object/);
 });
@@ -96,7 +94,6 @@ test('Studio skill arguments apply defaults and reject unsupported values', () =
 test('each flow resolves to its own skill and final artifact', () => {
   assert.equal(resolveSessionFlow('enhancement').planLabel, 'plan');
   assert.equal(resolveSessionFlow('enhancement').finalLabel, 'report');
-  assert.equal(resolveSessionFlow('enhancement').maxTurns, 5);
   assert.equal(resolveSessionFlow('feature').finalLabel, 'spec');
   assert.equal(resolveSessionFlow('merge').mode, 'merge');
   assert.equal(resolveSessionFlow('merge').finalLabel, 'merge report');
@@ -120,7 +117,7 @@ test('the enhancement contract gates implementation on plan approval and invokes
   assert.match(instructions, /Do not modify, create, or delete any file before the human approves the plan/);
   assert.match(instructions, /Phase 2: implement and verify/);
   assert.match(instructions, /explicitly approves/);
-  assert.match(instructions, /Bound the implementation-and-verification loop to 5 attempts/);
+  assert.doesNotMatch(instructions, /Bound the implementation-and-verification loop to \d+ attempts/);
   assert.match(instructions, /Do not commit\. Do not push/);
   assert.doesNotMatch(instructions, /Stop at the plan/);
   assert.match(instructions, /## What the plan must contain/);
@@ -146,15 +143,14 @@ test('the enhancement contract gates implementation on plan approval and invokes
   assert.doesNotMatch(feature, /Do not modify, create, or delete any file/);
 });
 
-test('Codex session instructions explicitly invoke the native skill and Studio arguments', () => {
+test('Codex session instructions explicitly invoke the native skill without overriding its limits', () => {
   const instructions = buildSessionInstructions('enhancement', {
     agentPreset: 'codex',
-    skillArguments: { max_turns: 3 },
     skillText: '# Should not be embedded'
   });
 
-  assert.match(instructions, /Use the \$enhancement skill\. Studio arguments: max_turns=3/);
-  assert.match(instructions, /Bound the implementation-and-verification loop to 3 attempts/);
+  assert.match(instructions, /^Use the \$enhancement skill\./);
+  assert.doesNotMatch(instructions, /Studio arguments:.*max_turns|Bound the implementation-and-verification loop/);
   assert.doesNotMatch(instructions, /Should not be embedded/);
 });
 
@@ -648,6 +644,18 @@ test('structured agent output is read as text, not echoed as JSON', () => {
   assert.equal(parsed.text, 'Where are saved searches stored?\n\nPick one.');
 });
 
+test('Codex JSON output exposes assistant messages and hides tool results', () => {
+  const stdout = [
+    JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'cat secret.txt', aggregated_output: 'SECRET_FILE_CONTENT' } }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'I read the file. What should happen next?' } })
+  ].join('\n');
+  const parsed = parseAgentReply(stdout);
+
+  assert.equal(parsed.structured, true);
+  assert.equal(parsed.text, 'I read the file. What should happen next?');
+  assert.doesNotMatch(parsed.text, /SECRET_FILE_CONTENT/);
+});
+
 test('a structured error event fails the turn instead of becoming the reply', () => {
   const parsed = parseAgentReply(JSON.stringify({
     type: 'error',
@@ -672,25 +680,32 @@ test('a structured error event fails the turn instead of becoming the reply', ()
   assert.equal(stripAnsi('\u001b[0m> build \u00b7 qwen\u001b[0m\r\nPONG'), '> build \u00b7 qwen\nPONG');
 });
 
-test('a turn-based session shows the text from structured events, not the raw stream', async (t) => {
+test('a turn-based session displays only assistant text from structured output', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-json-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   installFixtureSkill(root, 'opencode', 'enhancement');
 
   const stdout = [
+    JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'read', output: 'SECRET_FILE_CONTENT' } }),
     JSON.stringify({ type: 'text', part: { type: 'text', text: 'Which layout?' } }),
     JSON.stringify({ type: 'step_finish', part: { type: 'step-finish' } })
   ].join('\n');
   let asked = '';
+  const events = [];
+  const stderr = '\u001b[0m> build \u00b7 llama\u001b[0m\n';
 
   await runInterviewSession(
     { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'opencode', agentCmd: '["opencode","run"]' },
     {
       cwd: root,
       id: 'json-1',
-      spawnImpl: async () => ({ code: 0, stdout, stderr: '\u001b[0m> build \u00b7 llama\u001b[0m\n' }),
-      emit: () => {},
+      spawnImpl: async (command, args, options) => {
+        options.onStdout(stdout);
+        options.onStderr(stderr);
+        return { code: 0, stdout, stderr };
+      },
+      emit: (event) => events.push(event),
       waitForAnswer: async (question) => {
         asked = question.text;
 
@@ -700,6 +715,9 @@ test('a turn-based session shows the text from structured events, not the raw st
   );
 
   assert.equal(asked, 'Which layout?');
+  const shown = events.filter((event) => event.type === 'output').map((event) => event.chunk).join('');
+  assert.equal(shown, 'Which layout?');
+  assert.doesNotMatch(shown, /SECRET_FILE_CONTENT|llama/);
 });
 
 test('a turn-based session reports a non-zero agent exit', async (t) => {

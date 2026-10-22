@@ -20,6 +20,11 @@ function makeFeature(t) {
 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'spec.md'), '# Spec\n\nSaved searches live in the sidebar.\n', 'utf8');
+  for (const skill of ['sdd-developer', 'spec-to-task', 'feature-tdd']) {
+    const skillFile = path.join(root, '.claude', 'skills', skill, 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(skillFile, `---\nname: ${skill}\ndescription: Test fixture skill.\n---\n`, 'utf8');
+  }
   execFileSync('git', ['init', '-q'], { cwd: root });
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -58,15 +63,15 @@ test('the pipeline maps the E2E checkbox to --no-verify', () => {
   ]);
 });
 
-test('the step prompt names the skill and tells the agent to stop before commit', () => {
-  const prompt = buildStepPrompt({ skill: 'sdd-developer', args: ['docs/sdd/features/x/spec.md'] }, { verify: true });
+test('the step prompt invokes the native skill and tells the agent to stop before commit', () => {
+  const prompt = buildStepPrompt({ skill: 'sdd-developer', args: ['docs/sdd/features/x/spec.md'] }, { verify: true, agentPreset: 'claude' });
 
-  assert.match(prompt, /`sdd-developer`/);
+  assert.match(prompt, /^\/sdd-developer/);
   assert.match(prompt, /docs\/sdd\/features\/x\/spec\.md/);
   assert.match(prompt, /Do not commit/);
   assert.doesNotMatch(prompt, /--no-verify/);
 
-  const skipped = buildStepPrompt({ skill: 'feature-tdd', args: ['feature.md', '--no-verify'] }, { verify: false });
+  const skipped = buildStepPrompt({ skill: 'feature-tdd', args: ['feature.md', '--no-verify'] }, { verify: false, agentPreset: 'claude' });
 
   assert.match(skipped, /Skip the E2E verification/);
 });
@@ -77,7 +82,7 @@ test('a direct build runs one skill step and reports the changed files', async (
   const prompts = [];
 
   const summary = await runFeatureBuild(
-    { pipeline: 'direct', specPath, verify: true, agentCmd: '["fake-agent"]' },
+    { pipeline: 'direct', specPath, verify: true, agentPreset: 'claude', agentCmd: '["fake-agent"]' },
     {
       cwd: root,
       spawnImpl: async (command, args) => {
@@ -106,7 +111,7 @@ test('a TDD build runs spec-to-task before feature-tdd and requires feature.md',
   const prompts = [];
 
   const summary = await runFeatureBuild(
-    { pipeline: 'tdd', specPath, verify: false, agentCmd: '["fake-agent"]' },
+    { pipeline: 'tdd', specPath, verify: false, agentPreset: 'claude', agentCmd: '["fake-agent"]' },
     {
       cwd: root,
       spawnImpl: async (command, args) => {
@@ -138,7 +143,7 @@ test('a TDD build stops when spec-to-task writes no feature.md', async (t) => {
 
   await assert.rejects(
     runFeatureBuild(
-      { pipeline: 'tdd', specPath, verify: true, agentCmd: '["fake-agent"]' },
+      { pipeline: 'tdd', specPath, verify: true, agentPreset: 'claude', agentCmd: '["fake-agent"]' },
       {
         cwd: root,
         spawnImpl: async () => ({ code: 0, stdout: 'ok', stderr: '' }),
@@ -154,7 +159,7 @@ test('a failed step names the skill that failed', async (t) => {
 
   await assert.rejects(
     runFeatureBuild(
-      { pipeline: 'direct', specPath, verify: true, agentCmd: '["fake-agent"]' },
+      { pipeline: 'direct', specPath, verify: true, agentPreset: 'claude', agentCmd: '["fake-agent"]' },
       {
         cwd: root,
         spawnImpl: async () => ({ code: 2, stdout: '', stderr: 'baseline checks failed' }),

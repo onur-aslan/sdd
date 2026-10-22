@@ -82,6 +82,11 @@ function createRepo() {
   git(root, ['config', 'user.email', 'studio@example.com']);
   git(root, ['config', 'user.name', 'Studio Bot']);
   git(root, ['config', 'commit.gpgsign', 'false']);
+  for (const skill of ['enhancement', 'deep-spec', 'merge', 'bug-fix', 'sdd-developer', 'spec-to-task', 'feature-tdd']) {
+    const skillFile = path.join(root, '.cursor', 'skills', skill, 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(skillFile, `---\nname: ${skill}\ndescription: Test fixture skill.\n---\n`, 'utf8');
+  }
   fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
   git(root, ['add', '-A']);
   git(root, ['commit', '-q', '-m', 'init']);
@@ -283,7 +288,8 @@ test('the studio offers a one-click agent choice and forwards it', () => {
   assert.deepEqual(STUDIO_AGENT_PRESETS.map((agent) => agent.id), ['claude', 'cursor', 'opencode', 'codex', 'custom']);
   assert.equal(STUDIO_AGENT_PRESETS[0].command, DEFAULT_AGENT_COMMAND);
   assert.match(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'claude').command, /claude/);
-  assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command, '["cursor-agent","-p","--force"]');
+  assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command, '["cursor-agent","-p","--force","--output-format","stream-json"]');
+  assert.deepEqual(JSON.parse(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'codex').command), ['codex', 'exec', '--json', '--skip-git-repo-check']);
   assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'custom').command, '');
 
   assert.deepEqual(
@@ -292,7 +298,7 @@ test('the studio offers a one-click agent choice and forwards it', () => {
   );
   assert.deepEqual(
     buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command }),
-    ['--project', 'ABC', '--agent-cmd', '["cursor-agent","-p","--force"]']
+    ['--project', 'ABC', '--agent-cmd', '["cursor-agent","-p","--force","--output-format","stream-json"]']
   );
 });
 
@@ -719,6 +725,7 @@ test('the job manager refuses a second sweep while one is running', async (t) =>
   const manager = createJobManager({ cwd: root, fetchImpl: fakeFetch });
   const request = {
     project: 'ABC',
+    agentPreset: 'cursor',
     date: '2026-10-19',
     base: 'HEAD',
     agentCmd: JSON.stringify([agentPath]),
@@ -1239,8 +1246,7 @@ test('a live turn with no assistant text fails with the agent diagnostic', async
 
   const events = manager.snapshot(job).events;
 
-  // The diagnostic stays in the failure message; it must not become a turn or
-  // leave an empty, answerable question behind.
+  // Keep diagnostics in the failure message without displaying stderr as a reply.
   assert.equal(events.some((event) => event.type === 'question'), false);
   assert.equal(events.some((event) => event.type === 'output' && event.stream === 'stderr'), false);
 });
@@ -1343,6 +1349,7 @@ test('cancelling a sweep stops it and reports a cancelled job', async (t) => {
   const manager = createJobManager({ cwd: root, fetchImpl: fakeFetch, spawnImpl });
   const job = manager.startSweep({
     project: 'ABC',
+    agentPreset: 'cursor',
     date: '2026-10-19',
     base: 'HEAD',
     agentCmd: JSON.stringify(['fake-agent']),
