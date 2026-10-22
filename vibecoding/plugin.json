@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "vibecoding",
-  "version": "4.1.0",
-  "description": "Vibecoding utilities for glossary management, working conventions, and Playwright artifact cleanup.",
+  "version": "4.2.0",
+  "description": "Vibecoding utilities for glossary management, working conventions, safe Git branch merging, and Playwright artifact cleanup.",
   "author": {
     "name": "Onur ASLAN"
   },

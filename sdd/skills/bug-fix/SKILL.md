@@ -44,6 +44,7 @@ flowchart TD
 ## Rules
 
 - Reproduce the bug before changing code.
+- For backend bugs, prioritize writing a failing test among suitable tools.
 - If the bug cannot be reproduced within the attempt limit, do not attempt a fix; report the failure and available evidence.
 - Identify the root cause and apply the smallest effective fix.
 - Use tests that exercise the real code path; mock only external dependencies when appropriate.

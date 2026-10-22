@@ -1,95 +1,67 @@
 ---
 name: enhancement
-description: Plan, implement, and verify enhancements through an approved plan and a bounded execution loop.
+description: Guide general-purpose enhancement work through a thorough interview, an approved plan, implementation, and suitable verification.
 disable-model-invocation: true
 ---
 
 # Enhancement
 
-## Arguments
-
-- `max_turns`: Maximum implementation-and-verification attempts. Default: `5`. Must be a positive integer. If invalid, report the invalid value and stop.
-
-## Suitable Tools
-
-Use tools as appropriate to the enhancement; not every tool is required.
-
-- Playwright MCP
-- Python
-- curl
-- CLI tools
-- Tests
-- Logs
-- Build tools
-
 ## Workflow
 
-```mermaid
-flowchart TD
-    A([Enhancement request]) --> B[Interview one question at a time]
-    B --> C[Present plan and ASCII preview]
-    C --> D{User approves?}
-    D -->|No| B
-    D -->|Yes| E[Implement minimal change]
-    E --> F[Verify using suitable tools]
-    F --> G{Resolved without regression?}
-    G -->|No| H[Analyze evidence and reassess approach]
-    H --> E
-    G -->|Yes| I[Report results]
-    I --> J([Done])
-```
-
-## Step 1: Interview and Plan
+### Step 1. Interview
 
 Announce:
 
 `Current Step: Step 1 Interview Next Step: Step 2 Enhance`
 
-- Ask one question at a time until requirements and key decisions are clear.
-- Explore relevant dependencies, edge cases, and assumptions.
-- Avoid questions already answered or resolvable by inspecting the code.
-- Do not use the AskUserQuestion tool.
-- Provide ASCII mock previews for UI choices. For non-UI changes, use a flow or request/response example where useful.
-- Present the plan in this format:
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. Ask very detailed design questions. Expose hidden assumptions. Ask the questions one at a time. Do not use AskUserQuestion Tool. Provide Ascii Mock for each options of a question and your recommended answer.
 
-### Plan
+After interview present a detailed plan in the following format:
 
-**ASCII Mock Preview (Before/After)**
+```markdown
+## ASCII Mock Preview (Before/After)
 
-Show the proposed UI or behavior.
+[Show the current and proposed UI or behavior. For non-UI work, show the current and proposed flow, state, data shape, or output.]
 
-**Components Affected**
-- Relevant component and file paths.
+## Components Affected
 
-**Views Affected**
-- Relevant pages, services, endpoints, or data flows.
+- [Component, module, or file path]
 
-**Implementation and Verification**
-- Planned changes, tests, suitable tools, and known risks.
+## Views Affected
 
-Wait for explicit user confirmation before implementation. If the scope changes materially, update the plan and obtain confirmation again.
+- [View, page, service, endpoint, or data flow]
 
-## Step 2: Enhance
+## Implementation and Verification
+
+- [Implementation approach, suitable verification methods and tools, and known risks]
+```
+
+Wait for the user's explicit confirmation of the plan before proceeding to Step 2. If the user changes the scope materially, update the plan and get confirmation for the revised plan.
+
+### Step 2. Enhance
 
 Announce:
 
-`Current Step: Step 2 Enhance Next Step: Done`
+`Current Step: Step 2 Enhance Next Step: Step 3 Verify and Fix`
 
-- Inspect the existing code, conventions, and current behavior before making changes.
-- Apply the smallest change that satisfies the approved plan.
-- Verify relevant behavior and check for regressions.
-- If verification fails, analyze the evidence and reassess the approach before retrying.
+Inspect the existing code, conventions, and current behavior before making changes. Implement the approved enhancement using the smallest change that satisfies the plan and follows the existing project conventions. Then proceed to Step 3 to verify it and fix any issues found.
+
+### Step 3. Verify and Fix
+
+Announce:
+
+`Current Step: Step 3 Verify and Fix Next Step: Done`
+
+- Verify the approved behavior and regressions using suitable tools.
+- Suitable tools include tests, logs, build tools, CLI or HTTP clients, Bash commands, Python scripts, and browser automation.
+- Review the evidence. If checks fail, fix the issue within the approved scope and repeat verification. If verification cannot be completed, report the outcome and limitations.
 
 ## Rules
 
-- Do not implement before plan approval.
-- Validate `max_turns` before implementation. Each implementation-and-verification iteration, including one change followed by verification, counts as one turn. The initial attempt counts toward the limit.
-- When the phase reaches its limit without success, stop and report the outcome, evidence, and unresolved issues.
 - Never weaken, skip, or delete tests to force success.
 - Do not expand the approved scope without confirmation.
 - Never claim success without verification.
-- If tools or infrastructure are unavailable, complete possible checks and report limitations.
 
 ## Report
 
-Summarize the changes, affected files, attempts used, verification results, and unresolved issues or limitations.
+Summarize the changes, affected files, verification results, and unresolved issues or limitations.
