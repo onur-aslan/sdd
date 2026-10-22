@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sdd",
-  "version": "4.1.0",
-  "description": "Spec-Driven Development (SDD) core workflow from planning to implementation, including project feature discovery, the one-shot sdd-developer pipeline, domain-agnostic bug-fix and enhancement loops, and E2E verification. Companion plugin: vibecoding.",
+  "version": "4.2.0",
+  "description": "Spec-Driven Development (SDD) core workflow from planning to implementation, including project feature discovery, the one-shot sdd-developer pipeline, domain-agnostic bug-fix and enhancement workflows, and E2E verification. The enhancement workflow guides a thorough interview, an approved plan, implementation, and suitable verification. Companion plugin: vibecoding.",
   "author": {
     "name": "Onur ASLAN"
   },

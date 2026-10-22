@@ -53,7 +53,7 @@ Announce:
 `Current Step: Step 3 Verify and Fix Next Step: Done`
 
 - Verify the approved behavior and regressions using suitable tools.
-- Suitable tools include tests, logs, build tools, CLI or HTTP clients, and browser automation.
+- Suitable tools include tests, logs, build tools, CLI or HTTP clients, Bash commands, Python scripts, and browser automation.
 - Review the evidence. If checks fail, fix the issue within the approved scope and repeat verification. If verification cannot be completed, report the outcome and limitations.
 
 ## Rules

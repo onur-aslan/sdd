@@ -89,8 +89,8 @@ npx skills@latest add onur-aslan/sdd
 
 | Plugin | Description |
 |--------|-------------|
-| [**SDD Core**](sdd/) | Spec-driven development workflows from spec design to implementation, plus domain-agnostic bug-fix and enhancement loops |
-| [**Vibecoding**](vibecoding/) | Glossary management, working conventions, and Playwright artifact cleanup |
+| [**SDD Core**](sdd/) | Spec-driven development workflows from spec design to implementation, plus domain-agnostic bug-fix and enhancement workflows with approved plans and suitable verification |
+| [**Vibecoding**](vibecoding/) | Glossary management, working conventions, safe Git branch merging, and Playwright artifact cleanup |
 
 ---
 
@@ -155,14 +155,14 @@ enhancement
 | `sdd-developer` | `/sdd-developer [spec.md] [max_turns] [--no-verify]` | One-shot pipeline: baseline checks, implement, review and fix, and per-story E2E verification, autonomously |
 | `feature-e2e-verifier` | `/feature-e2e-verifier <spec.md>` | E2E verify User Stories by testing all Acceptance Criteria sequentially |
 | `bug-fix` | `/bug-fix "<description>"` | Autonomously reproduce, diagnose, and fix bugs with a bounded fix-and-verify loop |
-| `enhancement` | `/enhancement` | Plan, implement, and verify enhancements through an approved plan and a bounded execution loop |
+| `enhancement` | `/enhancement` | Interview, plan, implement, and verify enhancements with an approved plan and suitable tools |
 | `load-project-features` | `/load-project-features` | Discover existing project features from the codebase and generate a spec for each |
 
 ---
 
 ## Vibecoding Plugin
 
-Utilities for glossary management, working conventions, and Playwright artifact cleanup.
+Utilities for glossary management, working conventions, safe Git branch merging, and Playwright artifact cleanup.
 
 ### Core Skills
 
@@ -173,6 +173,7 @@ Utilities for glossary management, working conventions, and Playwright artifact 
 | `ask-first` | `/ask-first` | Plan before implement — pause for approval on non-trivial tasks |
 | `buy-before-build` | `/buy-before-build` | Prefer industry best practices and proven solutions before custom builds |
 | `grounded-mode` | `/grounded-mode` | Persistent grounded response mode, toggleable by the user |
+| `merge` | `/merge <source-branch> [target-branch]` | Merge branches into a reviewable integration branch and resolve conflicts safely |
 | `git-cleanup-playwright-artifacts` | `/git-cleanup-playwright-artifacts` | Clean up Playwright screenshots and test artifacts |
 
 ---
