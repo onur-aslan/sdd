@@ -40,11 +40,14 @@ import {
   validateBugResult
 } from '../cli/bug-sweep.js';
 import { run } from '../cli/index.js';
+import { buildNativeSkillCall } from '../cli/native-skills.js';
 
-function installBugFixFixtureSkill(root) {
-  const skillFile = path.join(root, '.claude', 'skills', 'bug-fix', 'SKILL.md');
-  fs.mkdirSync(path.dirname(skillFile), { recursive: true });
-  fs.writeFileSync(skillFile, '---\nname: bug-fix\ndescription: Test fixture skill.\n---\n', 'utf8');
+function installSweepFixtureSkills(root) {
+  for (const skill of ['bug-sweep', 'bug-fix']) {
+    const skillFile = path.join(root, '.claude', 'skills', skill, 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(skillFile, `---\nname: ${skill}\ndescription: Test fixture skill.\n---\n`, 'utf8');
+  }
 }
 
 const fakeFetch = async () => ({
@@ -96,12 +99,16 @@ function git(cwd, args) {
   return (result.stdout || '').trim();
 }
 
-function createFakeAgent(root) {
+function createFakeAgent(root, argsFile = null) {
   if (process.platform === 'win32') {
     const scriptPath = path.join(root, 'fake-agent.cmd');
+    const lines = ['@echo off'];
 
-    fs.writeFileSync(scriptPath, [
-      '@echo off',
+    if (argsFile) {
+      lines.push(`> "${argsFile}" echo %*`);
+    }
+
+    lines.push(
       'if not "%SDD_BUG_KEY%"=="ABC-1" goto notfixed',
       '> "%SDD_BUG_RESULT_FILE%" echo {"key":"ABC-1","status":"fixed","summary":"Null guard","how":"Added a guard","critical":false,"evidence":["test"]}',
       'echo patched>> app.txt',
@@ -110,15 +117,20 @@ function createFakeAgent(root) {
       '> "%SDD_BUG_RESULT_FILE%" echo {"key":"ABC-2","status":"not-fixed","reason":"Could not reproduce"}',
       'exit /b 0',
       ''
-    ].join('\r\n'), 'utf8');
+    );
+    fs.writeFileSync(scriptPath, lines.join('\r\n'), 'utf8');
 
     return scriptPath;
   }
 
   const scriptPath = path.join(root, 'fake-agent.sh');
+  const lines = ['#!/bin/sh'];
 
-  fs.writeFileSync(scriptPath, [
-    '#!/bin/sh',
+  if (argsFile) {
+    lines.push(`printf '%s\\n' "$@" > "${argsFile}"`);
+  }
+
+  lines.push(
     'if [ "$SDD_BUG_KEY" = "ABC-1" ]; then',
     '  printf \'%s\\n\' \'{"key":"ABC-1","status":"fixed","summary":"Null guard","how":"Added a guard","critical":false,"evidence":["test"]}\' > "$SDD_BUG_RESULT_FILE"',
     '  printf \'patched\\n\' >> app.txt',
@@ -127,13 +139,14 @@ function createFakeAgent(root) {
     'fi',
     'exit 0',
     ''
-  ].join('\n'), 'utf8');
+  );
+  fs.writeFileSync(scriptPath, lines.join('\n'), 'utf8');
   fs.chmodSync(scriptPath, 0o755);
 
   return scriptPath;
 }
 
-test('bug-sweep defaults to a dated branch, tag, and the OpenCode agent', () => {
+test('bug-sweep defaults to a dated branch, tag, and the Claude Code agent', () => {
   const options = parseBugSweepArgs(['--project', 'ABC']);
 
   assert.equal(options.project, 'ABC');
@@ -441,9 +454,53 @@ test('renderBugPrompt includes the result contract and the attempt limit', () =>
   });
 
   assert.match(prompt, /ABC-1/);
-  assert.match(prompt, /max_turns/);
+  assert.match(prompt, /Pass max_turns=5 to the bug-fix skill/);
+  assert.match(prompt, /Result contract for bug-sweep/);
+  assert.match(prompt, /The bug-sweep orchestrator writes/);
   assert.match(prompt, /\/tmp\/ABC-1.result.json/);
   assert.match(prompt, /"status": "fixed"/);
+});
+
+test('the sweep invokes the bug-sweep skill and passes the attempt limit', () => {
+  assert.match(buildNativeSkillCall('bug-sweep', 'claude', { max_turns: 3 }), /^\/bug-sweep/);
+  assert.match(buildNativeSkillCall('bug-sweep', 'claude', { max_turns: 3 }), /max_turns=3/);
+  assert.match(buildNativeSkillCall('bug-sweep', 'codex', { max_turns: 3 }), /\$bug-sweep/);
+  assert.match(buildNativeSkillCall('bug-sweep', 'opencode', { max_turns: 3 }), /bug-sweep skill/);
+});
+
+test('bug-sweep delegates the fix and owns the JSON result', () => {
+  const sweepSkill = fs.readFileSync(new URL('../sdd/skills/bug-sweep/SKILL.md', import.meta.url), 'utf8');
+  const fixSkill = fs.readFileSync(new URL('../sdd/skills/bug-fix/SKILL.md', import.meta.url), 'utf8');
+
+  assert.match(sweepSkill, /name: bug-sweep/);
+  assert.match(sweepSkill, /disable-model-invocation: true/);
+  assert.match(sweepSkill, /fresh general-purpose subagent/);
+  assert.match(sweepSkill, /Invoke the `bug-fix` skill/);
+  assert.match(sweepSkill, /prepare the JSON object required by the task file/);
+  assert.match(sweepSkill, /You prepare this object from the subagent's report/);
+  assert.doesNotMatch(fixSkill, /disable-model-invocation/);
+  assert.doesNotMatch(fixSkill, /JSON/);
+});
+
+test('bug-sweep requires the bug-sweep skill, not only bug-fix', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-missing-skill-'));
+  const fixSkill = path.join(root, '.claude', 'skills', 'bug-fix', 'SKILL.md');
+
+  try {
+    fs.mkdirSync(path.dirname(fixSkill), { recursive: true });
+    fs.writeFileSync(fixSkill, '---\nname: bug-fix\ndescription: Test fixture skill.\n---\n', 'utf8');
+
+    await assert.rejects(
+      () => runBugSweep(['--project', 'ABC', ...jiraFlags], {
+        cwd: root,
+        agentPreset: 'claude',
+        logger: () => {}
+      }),
+      /cannot invoke \/bug-sweep/
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('tokenizeCommand keeps quoted arguments and Windows backslashes', () => {
@@ -538,7 +595,7 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-resume-agent-'));
 
   try {
-    installBugFixFixtureSkill(root);
+    installSweepFixtureSkills(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -586,7 +643,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-agent-'));
 
   try {
-    installBugFixFixtureSkill(root);
+    installSweepFixtureSkills(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -595,7 +652,8 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
     git(root, ['add', '-A']);
     git(root, ['commit', '-q', '-m', 'init']);
 
-    const agentPath = createFakeAgent(agentDir);
+    const argsFile = path.join(agentDir, 'agent-args.txt');
+    const agentPath = createFakeAgent(agentDir, argsFile);
     const output = await runBugSweep([
       '--project', 'ABC',
       '--date', '2026-10-19',
@@ -607,6 +665,10 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
     ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
+    const agentArgs = fs.readFileSync(argsFile, 'utf8');
+    assert.match(agentArgs, /\/bug-sweep/);
+    const taskPrompt = fs.readFileSync(path.join(root, '.bug-fix', 'ABC-1.prompt.md'), 'utf8');
+    assert.match(taskPrompt, /Pass max_turns=5 to the bug-fix skill/);
     assert.match(output, /✅ ABC-1/);
     assert.match(output, /❌ ABC-2  Not fixed — Could not reproduce/);
 
@@ -636,7 +698,7 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-agent-'));
 
   try {
-    installBugFixFixtureSkill(root);
+    installSweepFixtureSkills(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
@@ -701,7 +763,7 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);
     git(root, ['config', 'commit.gpgsign', 'false']);
-    installBugFixFixtureSkill(root);
+    installSweepFixtureSkills(root);
 
     fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
     git(root, ['add', '-A']);
@@ -754,7 +816,7 @@ test('--worktree keeps the checkout for --resume and removes it on completion', 
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-resume-agent-'));
 
   try {
-    installBugFixFixtureSkill(root);
+    installSweepFixtureSkills(root);
     git(root, ['init', '-q']);
     git(root, ['config', 'user.email', 'sweep@example.com']);
     git(root, ['config', 'user.name', 'Sweep Bot']);

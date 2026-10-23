@@ -114,7 +114,7 @@ npx skills@latest add onur-aslan/sdd
 
 | Plugin | Description |
 |--------|-------------|
-| [**SDD Core**](sdd/) | Spec-driven development workflows from spec design to implementation, plus domain-agnostic bug-fix and enhancement workflows with approved plans and suitable verification |
+| [**SDD Core**](sdd/) | Spec-driven development workflows from spec design to implementation, plus domain-agnostic bug-fix, bug-sweep, and enhancement workflows with approved plans and suitable verification |
 | [**Vibecoding**](vibecoding/) | Glossary management, working conventions, safe Git branch merging, and Playwright artifact cleanup |
 
 ---
@@ -172,7 +172,7 @@ enhancement
 
 ### Batch Bug Sweeps
 
-`sdd bug-sweep` fixes a tracker's open bugs unattended — one at a time, each success committed — then publishes one dated branch, tag, and pull request. Jira is the default source; GitHub and GitLab issues work too.
+`sdd bug-sweep` fixes a tracker's open bugs unattended — one at a time, each success committed — then publishes one dated branch, tag, and pull request. Jira is the default source; GitHub and GitLab issues work too. Each bug is handled by the `bug-sweep` skill: it runs `bug-fix` in a fresh subagent for the fix, then prepares the sweep result as JSON.
 
 The command reference, nightly scheduling, air-gapped Jira, and internal Git setup live in [studio/README.md](studio/README.md#from-the-cli).
 
@@ -198,6 +198,7 @@ The dashboard covers bug sweeps, enhancement and feature interviews, feature bui
 | `sdd-developer` | `/sdd-developer [spec.md] [max_turns] [--no-verify]` | One-shot pipeline: baseline checks, implement, review and fix, and per-story E2E verification, autonomously |
 | `feature-e2e-verifier` | `/feature-e2e-verifier <spec.md>` | E2E verify User Stories by testing all Acceptance Criteria sequentially |
 | `bug-fix` | `/bug-fix "<description>"` | Autonomously reproduce, diagnose, and fix bugs with a bounded fix-and-verify loop |
+| `bug-sweep` | `sdd bug-sweep` | Run one unattended sweep item by delegating the fix to `bug-fix` in a fresh subagent and preparing the JSON result |
 | `enhancement` | `/enhancement` | Interview, plan, implement, and verify enhancements with an approved plan and suitable tools |
 | `load-project-features` | `/load-project-features` | Discover existing project features from the codebase and generate a spec for each |
 

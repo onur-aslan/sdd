@@ -1,7 +1,6 @@
 ---
 name: bug-fix
-description: Autonomously reproduce, diagnose, and fix bugs with a bounded fix-and-verify loop.
-disable-model-invocation: true
+description: Autonomously reproduce, diagnose, and fix bugs with a bounded fix-and-verify loop. Invoke only when explicitly named by the user or another skill/prompt.
 ---
 
 # Bug Fix

@@ -86,7 +86,7 @@ export function formatBugSweepHelp() {
   return `Usage:
   sdd bug-sweep --project <KEY> [options]
 
-Fetch Jira, GitHub, or GitLab bugs in order, fix them one at a time with the bug-fix skill,
+Fetch Jira, GitHub, or GitLab bugs in order, fix them one at a time through the bug-sweep skill,
 commit each successful fix, create one branch and one tag, then open a pull request.
 
 Required (one of):
@@ -120,7 +120,7 @@ Sweep options:
   --tag <name>             Default: bug-fix-<date>
   --limit <n>              Maximum bugs to fix in this run (default: ${DEFAULT_LIMIT});
                            the branch, tag, and PR wait until nothing is pending
-  --max-turns <n>          Attempt limit passed to the bug-fix skill (default: ${DEFAULT_MAX_TURNS})
+  --max-turns <n>          Attempt limit passed to the bug-fix subagent (default: ${DEFAULT_MAX_TURNS})
   --timeout <seconds>      Per-bug agent timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
   --verify-cmd <command>   Optional command run before each commit, e.g. "npm test"
   --work-dir <path>        State, logs, prompts, and reports (default: ${DEFAULT_WORK_DIR})
@@ -1223,7 +1223,7 @@ export function renderBugPrompt({ bug, maxTurns, resultFile }) {
   const tracker = bug.source === 'github' ? 'GitHub' : bug.source === 'gitlab' ? 'GitLab' : 'Jira';
   const status = bug.statusLabel ?? bug.jiraStatus ?? 'unknown';
   const lines = [
-    '# Bug fix task',
+    '# Bug sweep task',
     '',
     `You are fixing exactly one ${tracker} bug as part of an automated sweep.`,
     `Work only on this bug. Do not commit, do not push, and do not change the ${tracker} issue.`,
@@ -1263,13 +1263,12 @@ export function renderBugPrompt({ bug, maxTurns, resultFile }) {
     '5. Do not weaken, skip, or delete tests.',
     '6. Do not touch unrelated files and do not reformat the repository.',
     '',
-    `Use max_turns=${maxTurns} for this bug-fix run.`,
-    'If the skill describes a different final report format, this task file wins for this run.',
+    `Pass max_turns=${maxTurns} to the bug-fix skill.`,
     'If the bug cannot be reproduced or verified, stop and report it as not fixed.',
     '',
-    '## Result contract',
+    '## Result contract for bug-sweep',
     '',
-    `Write exactly one JSON object to this file: ${resultFile}`,
+    `The bug-sweep orchestrator writes exactly one JSON object to this file: ${resultFile}`,
     '',
     '```json',
     '{',
@@ -2224,7 +2223,7 @@ async function processBug({
   fs.rmSync(resultFile, { force: true });
   fs.writeFileSync(promptFile, renderBugPrompt({ bug, maxTurns: options.maxTurns, resultFile }), 'utf8');
 
-  const skillCall = buildNativeSkillCall('bug-fix', options.agentPreset, { max_turns: options.maxTurns });
+  const skillCall = buildNativeSkillCall('bug-sweep', options.agentPreset, { max_turns: options.maxTurns });
   const shortPrompt = `${skillCall} Read the task file at \`${promptFile}\` and complete it. Write the result JSON to \`${resultFile}\`. Do not commit, push, or ask questions.`;
   const invocation = buildAgentInvocation(options.agentCommand, { prompt: shortPrompt, promptFile });
   const spec = buildSpawnSpec(invocation);
@@ -2576,7 +2575,7 @@ export async function runBugSweep(argv, dependencies = {}) {
     if (!preflight.dryRun) {
       const cwd = dependencies.cwd ?? process.cwd();
       const agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, preflight.agentCommand);
-      assertNativeSkillAvailable(cwd, agentPreset, 'bug-fix');
+      assertNativeSkillAvailable(cwd, agentPreset, 'bug-sweep');
     }
 
     return runScheduledSweep(schedule, dependencies);
@@ -2598,7 +2597,7 @@ async function runSingleSweep(argv, dependencies = {}) {
 
   const cwd = dependencies.cwd ?? process.cwd();
   options.agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, options.agentCommand);
-  if (!options.dryRun) assertNativeSkillAvailable(cwd, options.agentPreset, 'bug-fix');
+  if (!options.dryRun) assertNativeSkillAvailable(cwd, options.agentPreset, 'bug-sweep');
   const logger = dependencies.logger ?? ((line) => process.stderr.write(`${line}\n`));
   const spawnImpl = dependencies.spawnImpl ?? runProcess;
   const now = dependencies.now ?? (() => new Date());

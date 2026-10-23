@@ -82,7 +82,7 @@ function createRepo() {
   git(root, ['config', 'user.email', 'studio@example.com']);
   git(root, ['config', 'user.name', 'Studio Bot']);
   git(root, ['config', 'commit.gpgsign', 'false']);
-  for (const skill of ['enhancement', 'deep-spec', 'merge', 'bug-fix', 'sdd-developer', 'spec-to-task', 'feature-tdd']) {
+  for (const skill of ['enhancement', 'deep-spec', 'merge', 'bug-sweep', 'bug-fix', 'sdd-developer', 'spec-to-task', 'feature-tdd']) {
     const skillFile = path.join(root, '.cursor', 'skills', skill, 'SKILL.md');
     fs.mkdirSync(path.dirname(skillFile), { recursive: true });
     fs.writeFileSync(skillFile, `---\nname: ${skill}\ndescription: Test fixture skill.\n---\n`, 'utf8');

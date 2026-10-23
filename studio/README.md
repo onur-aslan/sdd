@@ -104,7 +104,7 @@ sdd bug-sweep --project ABC \
 
 Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The branch is created there and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. The temporary checkout is kept while bugs are pending so `--resume` can continue, and removed once the sweep publishes. The CLI runs in place unless you pass `--worktree`; the dashboard turns it on by default.
 
-The agent reports its outcome through a small JSON contract (`status`, `summary`, `how`, `critical`, `criticalReason`, `evidence`). The generated per-bug task file carries that contract and overrides the skill's normal report format for the run, so the `bug-fix` skill itself stays unchanged.
+The `bug-sweep` skill reports each outcome through a small JSON contract (`status`, `summary`, `how`, `critical`, `criticalReason`, `evidence`). The generated per-bug task file carries that contract. The skill runs `bug-fix` in a fresh subagent for the fix, then prepares the result as one JSON object. Both skills must be installed where the selected agent discovers skills; `sdd install` includes them.
 
 #### Schedule it nightly
 
