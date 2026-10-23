@@ -14,6 +14,15 @@ const el = {
   previewBtn: $('#preview-btn'),
   reloadProjects: $('#reload-projects'),
   projectList: $('#project-list'),
+  projectLabel: $('#project-label'),
+  source: $('#bug-source'),
+  jiraSettings: $('#jira-settings'),
+  githubSettings: $('#github-settings'),
+  githubRepoLabel: $('#github-repo-label'),
+  githubInfo: $('#github-info'),
+  checkGitHub: $('#check-github'),
+  forgetGitHub: $('#forget-github'),
+  githubCheckResult: $('#github-check-result'),
   bugPicker: $('#bug-picker'),
   bugCount: $('#bug-count'),
   reloadBugs: $('#reload-bugs'),
@@ -68,7 +77,8 @@ const state = {
   issueBugs: [],
   issueKeys: [],
   selectedIssues: new Set(),
-  loadedProject: '',
+  loadedSource: '',
+  loadedTarget: '',
   bugRequestId: 0,
   bugLoadTimer: null,
   bugLoadError: false
@@ -91,6 +101,26 @@ async function api(path, options = {}) {
   }
 
   return data;
+}
+
+function currentSource() {
+  return el.form.source?.value === 'github' ? 'github' : 'jira';
+}
+
+function currentTarget(source = currentSource()) {
+  return source === 'github'
+    ? el.form.githubRepo.value.trim()
+    : el.form.project.value.trim();
+}
+
+function currentQueryKey() {
+  const source = currentSource();
+
+  return `${source}:${currentTarget(source)}`;
+}
+
+function targetLabel(source = currentSource()) {
+  return source === 'github' ? 'repository' : 'project';
 }
 
 function setConnection(mode, text) {
@@ -251,6 +281,8 @@ function setRunLocked(locked) {
   el.previewBtn.disabled = locked;
   el.reloadBugs.disabled = locked;
   el.form.project.disabled = locked;
+  el.form.githubRepo.disabled = locked;
+  el.form.source.disabled = locked;
   el.reloadProjects.disabled = locked;
 
   for (const input of $$('#bug-picker input[type="checkbox"]')) {
@@ -418,12 +450,23 @@ function formRequest({ dryRun = false } = {}) {
   const prCommand = prPreset === 'custom' ? text('prCommand') : prPresetCommand(prPreset);
   const gitlabPush = prPreset === 'gitlab-push';
   const jiraAuth = text('jiraAuth');
+  const source = text('source') === 'github' ? 'github' : 'jira';
   const project = text('project');
-  // Only trust the selection when it belongs to the project currently in the form.
-  const issues = state.loadedProject === project && !allIssuesSelected() ? selectedIssueKeys() : [];
+  const githubRepo = text('githubRepo');
+  const target = source === 'github' ? githubRepo : project;
+  // Only trust the selection when it belongs to the source and target currently
+  // in the form. A stale Jira selection must never become GitHub issue numbers.
+  const issues = state.loadedSource === source
+    && state.loadedTarget === target
+    && !allIssuesSelected()
+    ? selectedIssueKeys()
+    : [];
 
   return {
+    source,
     project,
+    githubRepo,
+    githubLabel: text('githubLabel'),
     issues,
     base: text('base'),
     agentPreset,
@@ -450,15 +493,18 @@ function formRequest({ dryRun = false } = {}) {
   };
 }
 
-function jiraPayload(request = formRequest()) {
+function trackerPayload(request = formRequest()) {
   return {
+    source: request.source,
     jiraUrl: request.jiraUrl,
     jiraEmail: request.jiraEmail,
     jiraToken: request.jiraToken,
     jiraAuth: request.jiraAuth,
     jiraApiVersion: request.jiraApiVersion,
     jiraCa: request.jiraCa,
-    jiraInsecure: request.jiraInsecure
+    jiraInsecure: request.jiraInsecure,
+    githubRepo: request.githubRepo,
+    githubLabel: request.githubLabel
   };
 }
 
@@ -470,13 +516,20 @@ function selectedIssueKeys() {
   return state.issueKeys.filter((key) => state.selectedIssues.has(key));
 }
 
+function bugLoadReady() {
+  const source = currentSource();
+
+  return state.loadedSource === source && state.loadedTarget === currentTarget(source);
+}
+
 function updateBugCount() {
   const total = state.issueKeys.length;
   const selected = selectedIssueKeys().length;
+  const label = targetLabel();
 
   if (total === 0) {
-    el.bugCount.textContent = !state.loadedProject
-      ? 'pick a project'
+    el.bugCount.textContent = !bugLoadReady()
+      ? `pick a ${label}`
       : state.bugLoadError
         ? 'not loaded'
         : 'no open bugs';
@@ -499,7 +552,7 @@ function renderBugPicker(error = '') {
   if (error || state.issueBugs.length === 0) {
     const message = document.createElement('p');
     message.className = 'bug-picker-empty';
-    message.textContent = error || 'No open bugs in this project.';
+    message.textContent = error || `No open bugs in this ${targetLabel()}.`;
     el.bugPicker.append(message);
 
     if (error) {
@@ -564,21 +617,23 @@ function toggleAllIssues() {
 }
 
 async function loadBugs({ force = false } = {}) {
-  const project = el.form.project.value.trim();
+  const source = currentSource();
+  const target = currentTarget(source);
 
-  if (!force && project === state.loadedProject) {
+  if (!force && state.loadedSource === source && state.loadedTarget === target) {
     return;
   }
 
   const requestId = ++state.bugRequestId;
 
-  state.loadedProject = project;
+  state.loadedSource = source;
+  state.loadedTarget = target;
   state.issueBugs = [];
   state.issueKeys = [];
   state.selectedIssues.clear();
 
-  if (!project) {
-    renderBugPicker('Pick a project in Settings to load its bugs.');
+  if (!target) {
+    renderBugPicker(source === 'github' ? 'Set a GitHub repository in Settings to load its issues.' : 'Pick a project in Settings to load its bugs.');
     updatePlan();
 
     if (el.startBtn.disabled) {
@@ -596,9 +651,11 @@ async function loadBugs({ force = false } = {}) {
   el.toggleBugs.disabled = true;
 
   try {
-    const result = await api('/api/jira/bugs', {
+    const result = await api(source === 'github' ? '/api/github/bugs' : '/api/jira/bugs', {
       method: 'POST',
-      body: JSON.stringify({ ...jiraPayload(), project })
+      body: JSON.stringify(source === 'github'
+        ? { ...trackerPayload(), ignoreLabels: true }
+        : { ...trackerPayload(), project: target })
     });
 
     if (requestId !== state.bugRequestId) {
@@ -629,9 +686,9 @@ async function loadBugs({ force = false } = {}) {
 function scheduleBugLoad() {
   clearTimeout(state.bugLoadTimer);
   state.bugLoadTimer = setTimeout(() => {
-    const project = el.form.project.value.trim();
+    const target = currentTarget();
 
-    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(project)) {
+    if (currentSource() === 'github' ? /^[^/]+\/[^/]+$/.test(target) : /^[A-Za-z][A-Za-z0-9_]*$/.test(target)) {
       loadBugs();
     }
   }, 400);
@@ -642,10 +699,11 @@ function updateScope() {
     return;
   }
 
-  const project = el.form.project.value.trim();
+  const source = currentSource();
+  const project = currentTarget(source);
   const base = el.form.base.value.trim();
   const bits = [
-    project ? `project ${project}` : 'no project',
+    project ? `${source === 'github' ? 'repository' : 'project'} ${project}` : (source === 'github' ? 'no repository' : 'no project'),
     `base ${base || 'detected'}`,
     el.form.worktree.checked ? 'isolated worktree' : 'working tree'
   ];
@@ -673,12 +731,13 @@ function setPlan(rows) {
 }
 
 function updatePlan() {
-  const project = el.form.project.value.trim();
+  const source = currentSource();
+  const project = currentTarget();
 
   updateScope();
 
   if (!project) {
-    setPlan([['scope', 'Pick a project in Settings.']]);
+    setPlan([['scope', currentSource() === 'github' ? 'Set a GitHub repository in Settings.' : 'Pick a project in Settings.']]);
     return;
   }
 
@@ -689,15 +748,15 @@ function updatePlan() {
   const verify = defaults.verifyCommand || '';
   const push = el.form.push.checked;
   const pr = el.form.pr.checked;
-  const loaded = state.loadedProject === project;
+  const loaded = state.loadedSource === source && state.loadedTarget === project;
   const total = loaded ? state.issueKeys.length : 0;
   const selected = loaded ? selectedIssueKeys().length : 0;
-  let scope = `all open ${project} bugs`;
+  let scope = source === 'github' ? `all open ${project} issues` : `all open ${project} bugs`;
 
   if (total > 0) {
     scope = selected === total
-      ? `all ${total} ${project} bug${total === 1 ? '' : 's'}`
-      : `${selected} of ${total} ${project} bugs`;
+      ? `all ${total} ${project} ${source === 'github' ? 'issue' : 'bug'}${total === 1 ? '' : 's'}`
+      : `${selected} of ${total} ${project} ${source === 'github' ? 'issues' : 'bugs'}`;
   }
 
   const base = el.form.base.value.trim() || defaults.base || 'detected';
@@ -745,7 +804,7 @@ async function loadProjects({ announce = false } = {}) {
   try {
     const { projects, error } = await api('/api/jira/projects', {
       method: 'POST',
-      body: JSON.stringify(jiraPayload(request))
+      body: JSON.stringify(trackerPayload(request))
     });
 
     el.projectList.innerHTML = '';
@@ -779,7 +838,7 @@ async function checkJira() {
   try {
     const result = await api('/api/jira/health', {
       method: 'POST',
-      body: JSON.stringify(jiraPayload())
+      body: JSON.stringify(trackerPayload())
     });
 
     if (!result.configured) {
@@ -798,6 +857,30 @@ async function checkJira() {
     }
   } catch (error) {
     el.jiraCheckResult.textContent = error.message;
+  }
+}
+
+async function checkGitHub() {
+  el.githubCheckResult.textContent = 'checking…';
+  try {
+    const result = await api('/api/github/health', { method: 'POST', body: JSON.stringify(trackerPayload()) });
+    el.githubCheckResult.textContent = result.ok ? `OK · ${result.repo}` : (result.error || 'GitHub check failed.');
+    if (result.ok) loadBugs({ force: true });
+  } catch (error) {
+    el.githubCheckResult.textContent = error.message;
+  }
+}
+
+async function forgetGitHub() {
+  try {
+    await api('/api/settings', { method: 'POST', body: JSON.stringify({ githubRepo: '', githubLabel: '' }) });
+    for (const name of ['githubRepo', 'githubLabel']) el.form[name].value = '';
+    state.loadedSource = '';
+    el.githubInfo.textContent = 'GitHub CLI: not configured';
+    el.githubCheckResult.textContent = 'Repository setting cleared.';
+    loadBugs({ force: true });
+  } catch (error) {
+    el.githubCheckResult.textContent = error.message;
   }
 }
 
@@ -824,7 +907,7 @@ async function forgetJira() {
     el.form.jiraInsecure.checked = false;
     el.form.jiraToken.placeholder = '••••••••';
     toggleJiraEmail();
-    state.loadedProject = '';
+    state.loadedSource = '';
     state.issueBugs = [];
     state.issueKeys = [];
     state.selectedIssues.clear();
@@ -842,6 +925,8 @@ let settingsSaveTimer = null;
 function settingsPayload() {
   const request = formRequest({ dryRun: true });
   const payload = {
+    source: request.source,
+    githubRepo: request.githubRepo,
     project: request.project,
     base: request.base,
     agentPreset: request.agentPreset,
@@ -868,8 +953,14 @@ function settingsPayload() {
   if (token) {
     payload.jiraToken = token;
   }
-
   return payload;
+}
+
+function updateSourceSettings() {
+  const github = currentSource() === 'github';
+  el.jiraSettings.classList.toggle('hidden', github);
+  el.githubSettings.classList.toggle('hidden', !github);
+  el.reloadProjects.disabled = github;
 }
 
 function queueSettingsSave() {
@@ -920,13 +1011,13 @@ async function startSweep({ dryRun = false } = {}) {
 
   const request = formRequest({ dryRun });
 
-  if (!request.project) {
-    el.formError.textContent = 'Pick a Jira project in Settings first.';
+  if (!currentTarget(request.source)) {
+    el.formError.textContent = request.source === 'github' ? 'Set a GitHub repository in Settings first.' : 'Pick a Jira project in Settings first.';
     el.formError.classList.remove('hidden');
     return;
   }
 
-  if (state.loadedProject === request.project && state.issueKeys.length > 0 && state.selectedIssues.size === 0) {
+  if (state.loadedSource === request.source && state.loadedTarget === currentTarget(request.source) && state.issueKeys.length > 0 && state.selectedIssues.size === 0) {
     el.formError.textContent = 'Select at least one bug to fix.';
     el.formError.classList.remove('hidden');
     return;
@@ -2981,6 +3072,10 @@ async function loadConfig() {
 
     // Remembered choices win; detected defaults fill the gaps.
     setFormValue('project', settings.project);
+    setFormValue('source', settings.source);
+    setFormValue('githubRepo', settings.githubRepo || config.github?.repo);
+    el.githubInfo.textContent = config.github?.repo ? `GitHub CLI: ${config.github.repo}` : 'GitHub CLI: not configured';
+    updateSourceSettings();
     setFormValue('base', settings.base);
     setFormValue('jiraAuth', settings.jiraAuth);
     setFormValue('jiraApiVersion', settings.jiraApiVersion);
@@ -3048,7 +3143,7 @@ async function loadConfig() {
     // With no remembered project there is nothing to start; open Settings on the
     // first visit so the project is the first thing in reach, then stay out of
     // the way on later reloads.
-    if (!el.form.project.value.trim() && settings.settingsSeen !== true) {
+    if (!currentTarget() && settings.settingsSeen !== true) {
       openAdvanced();
     }
     loadProjects();
@@ -3099,8 +3194,8 @@ function openAdvanced() {
   el.advancedToggle.setAttribute('aria-expanded', 'true');
 
   // On the first visit the project is the one thing the user must choose.
-  if (!el.form.project.value.trim()) {
-    el.form.project.focus();
+  if (!currentTarget()) {
+    (currentSource() === 'github' ? el.form.githubRepo : el.form.project).focus();
   }
 }
 
@@ -3133,7 +3228,17 @@ function init() {
   });
   el.form.project.addEventListener('change', () => loadBugs());
   el.form.project.addEventListener('input', scheduleBugLoad);
+  el.form.githubRepo.addEventListener('change', () => loadBugs());
+  el.form.githubRepo.addEventListener('input', scheduleBugLoad);
+  el.form.source.addEventListener('change', () => {
+    updateSourceSettings();
+    loadBugs({ force: true });
+    updatePlan();
+    queueSettingsSave();
+  });
   el.checkJira.addEventListener('click', checkJira);
+  el.checkGitHub.addEventListener('click', checkGitHub);
+  el.forgetGitHub.addEventListener('click', forgetGitHub);
   el.forgetJira.addEventListener('click', forgetJira);
   el.advancedToggle.addEventListener('click', toggleAdvanced);
   el.settingsClose.addEventListener('click', () => el.settingsDialog.close());
@@ -3142,11 +3247,11 @@ function init() {
     el.advancedToggle.setAttribute('aria-expanded', 'false');
     queueSettingsSave();
 
-    const project = el.form.project.value.trim();
+    const target = currentTarget();
 
     // Closing settings after fixing credentials should make the queue usable
     // without requiring a manual reload. Never re-render the picker mid-run.
-    if (project && !el.startBtn.disabled && (state.bugLoadError || state.loadedProject !== project)) {
+    if (target && !el.startBtn.disabled && (state.bugLoadError || state.loadedSource !== currentSource() || state.loadedTarget !== target)) {
       loadBugs({ force: true });
     }
   });

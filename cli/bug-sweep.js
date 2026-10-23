@@ -11,6 +11,8 @@ export const DEFAULT_LIMIT = 50;
 export const DEFAULT_FETCH_LIMIT = 500;
 export const DEFAULT_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_WORK_DIR = '.bug-fix';
+export const DEFAULT_GITHUB_API_URL = 'https://api.github.com';
+export const DEFAULT_GITHUB_STATE = 'open';
 
 export const DEFAULT_JIRA_FIELDS = [
   'summary',
@@ -45,6 +47,12 @@ const VALUE_FLAGS = new Set([
   '--jira-auth',
   '--jira-api-version',
   '--jira-ca',
+  '--github-repo',
+  '--github-token',
+  '--github-label',
+  '--github-api-url',
+  '--github-state',
+  '--source',
   '--pr-cmd',
   '--extra-fields'
 ]);
@@ -76,13 +84,25 @@ export function formatBugSweepHelp() {
   return `Usage:
   sdd bug-sweep --project <KEY> [options]
 
-Fetch Jira bugs in order, fix them one at a time with the bug-fix skill, commit each
-successful fix, create one branch and one tag, then open a pull request.
+Fetch Jira or GitHub bugs in order, fix them one at a time with the bug-fix skill,
+commit each successful fix, create one branch and one tag, then open a pull request.
 
 Required (one of):
   --project <KEY>          Jira project key, e.g. ABC
   --jql <query>            Custom JQL; --project is optional when the JQL names one
+  --github-repo <repo>     GitHub repository, e.g. owner/repo (implies GitHub)
   --issues <keys>          Fix only these bugs, comma-separated, e.g. ABC-1,ABC-2
+                           or 12,15 / GH-12,GH-15 for GitHub issues
+
+Source:
+  --source <jira|github>   Bug source (default: jira, or github with --github-repo)
+
+GitHub:
+  --github-repo <repo>     GitHub repository, e.g. owner/repo or a GitHub URL
+  --github-token <token>   Token for private repositories; GITHUB_TOKEN/GH_TOKEN works
+  --github-label <labels>  Only issues with all of these comma-separated labels
+  --github-state <state>   open | closed | all (default: open)
+  --github-api-url <url>   API base for GitHub Enterprise (default: ${DEFAULT_GITHUB_API_URL})
 
 Sweep options:
   --date <YYYY-MM-DD>      Sweep date (default: today)
@@ -158,8 +178,8 @@ Jira (Cloud, Server, or Data Center):
 
 Run "sdd jira-check" first to verify reachability, TLS, and credentials.
 
-Exit status is non-zero only for setup, Jira, git, push, or PR failures. A bug that
-cannot be fixed is recorded as "not fixed" and does not stop the sweep.`;
+Exit status is non-zero only for setup, tracker, git, push, or PR failures. A bug
+that cannot be fixed is recorded as "not fixed" and does not stop the sweep.`;
 }
 
 function localDate(now = new Date()) {
@@ -248,6 +268,275 @@ export function parseIssueKeys(value) {
   }
 
   return keys;
+}
+
+const GITHUB_KEY_PATTERN = /^GH-(\d+)$/;
+
+// GitHub issues are selected by number. Accept "#12", "12", "GH-12", or an
+// issue URL and normalize all of them to the stable sweep key "GH-12".
+export function parseGitHubIssueKeys(value) {
+  if (!value) {
+    return [];
+  }
+
+  const entries = Array.isArray(value) ? value : String(value).split(',');
+  const keys = [];
+
+  for (const entry of entries) {
+    const text = String(entry).trim();
+
+    if (!text) {
+      continue;
+    }
+
+    const fromUrl = /\/issues\/(\d+)(?:[?#].*)?$/.exec(text)?.[1] ?? null;
+    const normalized = text.toUpperCase();
+    const fromKey = GITHUB_KEY_PATTERN.exec(normalized)?.[1] ?? null;
+    const fromNumber = /^#?(\d+)$/.exec(text)?.[1] ?? null;
+    const number = Number(fromUrl ?? fromKey ?? fromNumber);
+
+    if (!Number.isInteger(number) || number <= 0) {
+      throw new Error(`Invalid GitHub issue "${entry}". Use 123, #123, GH-123, or an issue URL.`);
+    }
+
+    const key = `GH-${number}`;
+
+    if (!keys.includes(key)) {
+      keys.push(key);
+    }
+  }
+
+  return keys;
+}
+
+export function normalizeBugSource(value) {
+  const source = String(value ?? 'jira').trim().toLowerCase();
+
+  if (source === 'jira' || source === 'github') {
+    return source;
+  }
+
+  throw new Error(`Invalid --source "${value}". Use jira or github.`);
+}
+
+export function normalizeGitHubRepo(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  let text = String(value).trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+
+  // Accept a full browser or SSH URL as well as the owner/repo shorthand.
+  text = text
+    .replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '')
+    .replace(/^git@[^:]+:/i, '');
+
+  const parts = text.split('/').filter(Boolean);
+  const repo = parts.slice(-2).join('/');
+
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error(`Invalid GitHub repository "${value}". Use owner/repo.`);
+  }
+
+  return repo;
+}
+
+export function normalizeGitHubState(value = DEFAULT_GITHUB_STATE) {
+  const state = String(value || DEFAULT_GITHUB_STATE).trim().toLowerCase();
+
+  if (state === 'open' || state === 'closed' || state === 'all') {
+    return state;
+  }
+
+  throw new Error(`Invalid --github-state "${value}". Use open, closed, or all.`);
+}
+
+function mapGitHubIssue(issue) {
+  const labels = Array.isArray(issue.labels)
+    ? issue.labels.map((label) => (typeof label === 'string' ? label : label?.name)).filter(Boolean)
+    : [];
+  const priorityLabel = labels.find((label) => /^(priority\s*[:/]\s*\S+|p[0-3]|critical|high|medium|low)$/i.test(label)) ?? '';
+  const state = issue.state === 'closed' ? 'Closed' : 'Open';
+
+  return {
+    key: `GH-${issue.number}`,
+    id: issue.id == null ? null : String(issue.id),
+    number: issue.number,
+    summary: issue.title ?? '',
+    description: issue.body ?? '',
+    priority: priorityLabel,
+    jiraStatus: '',
+    statusLabel: state,
+    labels,
+    url: issue.html_url ?? '',
+    source: 'github',
+    tracker: 'GitHub',
+    state: issue.state ?? '',
+    extraFields: {}
+  };
+}
+
+async function readGitHubError(response) {
+  try {
+    const text = await response.text();
+    const data = JSON.parse(text);
+
+    return String(data.message ?? text).slice(0, 800);
+  } catch {
+    return '';
+  }
+}
+
+function githubHeaders(token) {
+  return {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'sdd-bug-sweep',
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  };
+}
+
+async function githubRequest({ url, token, fetchImpl }) {
+  const response = await fetchImpl(url, { headers: githubHeaders(token) });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API failed (${response.status}): ${await readGitHubError(response)}`);
+  }
+
+  return response.json();
+}
+
+// Open GitHub issues can be selected directly. Pull requests are filtered out,
+// and optional labels use GitHub's AND semantics.
+export async function fetchGitHubBugs({
+  repo,
+  token = null,
+  labels = [],
+  state = DEFAULT_GITHUB_STATE,
+  issues = [],
+  limit = DEFAULT_FETCH_LIMIT,
+  apiUrl = DEFAULT_GITHUB_API_URL,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('This Node.js version does not provide fetch. Use Node.js 18 or newer.');
+  }
+
+  const normalizedRepo = normalizeGitHubRepo(repo);
+
+  if (!normalizedRepo) {
+    throw new Error('A GitHub repository is required. Use owner/repo.');
+  }
+
+  const base = String(apiUrl || DEFAULT_GITHUB_API_URL).replace(/\/+$/, '');
+  const issueKeys = Array.isArray(issues) ? issues : parseGitHubIssueKeys(issues);
+  const numbers = issueKeys.map((key) => Number(GH_PATTERN_FOR_NUMBER(key)));
+
+  if (numbers.length > 0) {
+    const bugs = [];
+
+    for (const number of numbers.slice(0, limit)) {
+      const issue = await githubRequest({
+        url: `${base}/repos/${normalizedRepo}/issues/${number}`,
+        token,
+        fetchImpl
+      });
+
+      if (!issue?.pull_request) {
+        bugs.push(mapGitHubIssue(issue));
+      }
+    }
+
+    return bugs;
+  }
+
+  const normalizedState = normalizeGitHubState(state);
+  const labelFilter = (Array.isArray(labels) ? labels : parseCsv(labels)).filter(Boolean);
+  const perPage = 100;
+  const bugs = [];
+
+  for (let page = 1; bugs.length < limit; page += 1) {
+    const search = new URLSearchParams({
+      state: normalizedState,
+      sort: 'created',
+      direction: 'asc',
+      per_page: String(perPage),
+      page: String(page)
+    });
+
+    if (labelFilter.length > 0) {
+      search.set('labels', labelFilter.join(','));
+    }
+
+    const batch = await githubRequest({
+      url: `${base}/repos/${normalizedRepo}/issues?${search.toString()}`,
+      token,
+      fetchImpl
+    });
+    const pageItems = Array.isArray(batch) ? batch : [];
+    const issuesOnly = pageItems.filter((issue) => !issue.pull_request);
+
+    bugs.push(...issuesOnly.map(mapGitHubIssue));
+
+    if (pageItems.length < perPage) {
+      break;
+    }
+  }
+
+  return bugs.slice(0, limit);
+}
+
+function GH_PATTERN_FOR_NUMBER(key) {
+  const match = GITHUB_KEY_PATTERN.exec(String(key).toUpperCase());
+
+  if (!match) {
+    throw new Error(`Invalid GitHub issue key "${key}".`);
+  }
+
+  return match[1];
+}
+
+export function describeGitHubQuery({ repo, labels = [], state = DEFAULT_GITHUB_STATE } = {}) {
+  const labelFilter = (Array.isArray(labels) ? labels : parseCsv(labels)).filter(Boolean);
+  const bits = [`${normalizeGitHubRepo(repo)}`, `${normalizeGitHubState(state)} issues`];
+
+  if (labelFilter.length > 0) {
+    bits.push(`labels ${labelFilter.join(', ')}`);
+  }
+
+  return bits.join(' · ');
+}
+
+export async function probeGitHub({
+  repo,
+  token = null,
+  apiUrl = DEFAULT_GITHUB_API_URL,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  const normalizedRepo = normalizeGitHubRepo(repo);
+
+  if (!normalizedRepo) {
+    return { ok: false, error: 'A GitHub repository is required. Use owner/repo.' };
+  }
+
+  const base = String(apiUrl || DEFAULT_GITHUB_API_URL).replace(/\/+$/, '');
+
+  try {
+    const data = await githubRequest({
+      url: `${base}/repos/${normalizedRepo}`,
+      token,
+      fetchImpl
+    });
+
+    return {
+      ok: true,
+      repo: data.full_name ?? normalizedRepo,
+      private: data.private === true,
+      url: data.html_url ?? `https://github.com/${normalizedRepo}`
+    };
+  } catch (error) {
+    return { ok: false, repo: normalizedRepo, error: error.message };
+  }
 }
 
 const DURATION_UNITS = {
@@ -503,14 +792,28 @@ export function parseBugSweepArgs(argv) {
   const date = raw['--date'] ?? localDate();
   validateDate(date);
 
-  const jql = raw['--jql'] ?? null;
+  const source = normalizeBugSource(
+    raw['--source'] ?? (raw['--github-repo'] ? 'github' : 'jira')
+  );
+  const jql = source === 'jira' ? raw['--jql'] ?? null : null;
   const projectFromJql = jql
     ? /project\s*=\s*"?([A-Za-z][A-Za-z0-9_]*)"?/i.exec(jql)?.[1] ?? null
     : null;
-  const project = raw['--project'] ?? projectFromJql ?? null;
-  const issues = parseIssueKeys(raw['--issues']);
+  let project = source === 'jira' ? raw['--project'] ?? projectFromJql ?? null : null;
+  const githubRepo = source === 'github'
+    ? normalizeGitHubRepo(raw['--github-repo'] ?? process.env.GITHUB_REPOSITORY ?? null)
+    : null;
+  const issues = source === 'github'
+    ? parseGitHubIssueKeys(raw['--issues'])
+    : parseIssueKeys(raw['--issues']);
 
-  if (!project && !jql && issues.length === 0) {
+  if (source === 'github') {
+    if (!githubRepo) {
+      throw new Error('--github-repo is required for --source github (or set GITHUB_REPOSITORY).');
+    }
+
+    project = githubRepo;
+  } else if (!project && !jql && issues.length === 0) {
     throw new Error('Either --project, --jql, or --issues is required.');
   }
 
@@ -522,9 +825,19 @@ export function parseBugSweepArgs(argv) {
 
   return {
     help: false,
+    source,
     project: project ?? 'JIRA',
     jql,
     issues,
+    githubRepo,
+    githubToken: source === 'github'
+      ? raw['--github-token'] ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? null
+      : null,
+    githubLabels: source === 'github' ? parseCsv(raw['--github-label']) : [],
+    githubState: source === 'github' ? normalizeGitHubState(raw['--github-state']) : DEFAULT_GITHUB_STATE,
+    githubApiUrl: source === 'github'
+      ? raw['--github-api-url'] ?? process.env.GITHUB_API_URL ?? DEFAULT_GITHUB_API_URL
+      : null,
     date,
     base: raw['--base'] ?? null,
     branch,
@@ -544,7 +857,7 @@ export function parseBugSweepArgs(argv) {
     jiraCa: raw['--jira-ca'] ?? process.env.JIRA_CA_CERT ?? null,
     jiraInsecure: Boolean(raw['--jira-insecure']) || process.env.JIRA_INSECURE === '1',
     prCommand: raw['--pr-cmd'] ?? process.env.SDD_PR_CMD ?? null,
-    extraFields: parseCsv(raw['--extra-fields']),
+    extraFields: source === 'jira' ? parseCsv(raw['--extra-fields']) : [],
     resume: Boolean(raw['--resume']),
     retryFailed: Boolean(raw['--retry-failed']),
     worktree: Boolean(raw['--worktree']),
@@ -654,9 +967,12 @@ function mapJiraIssue(issue, { baseUrl, extraFields }) {
     description: normalizeAdfText(fields.description),
     priority: fields.priority?.name ?? '',
     jiraStatus: fields.status?.name ?? '',
+    statusLabel: fields.status?.name ?? '',
     jiraType: fields.issuetype?.name ?? '',
     labels: Array.isArray(fields.labels) ? fields.labels : [],
     url: `${baseUrl}/browse/${issue.key}`,
+    source: 'jira',
+    tracker: 'Jira',
     extraFields: extra
   };
 }
@@ -874,21 +1190,24 @@ function escapeTableCell(value) {
   return oneLine(value).replace(/\|/g, '\\|');
 }
 
-export function buildCommitMessage({ key, summary, how, url }) {
+export function buildCommitMessage({ key, summary, how, url, source = 'jira' }) {
   const title = `fix(${key}): ${truncate(summary, 90)}`;
+  const tracker = source === 'github' ? 'Issue' : 'Jira';
 
   return {
     title,
-    body: [how.trim(), '', url ? `Jira: ${url}` : ''].filter(Boolean).join('\n')
+    body: [how.trim(), '', url ? `${tracker}: ${url}` : ''].filter(Boolean).join('\n')
   };
 }
 
 export function renderBugPrompt({ bug, maxTurns, resultFile }) {
+  const tracker = bug.source === 'github' ? 'GitHub' : 'Jira';
+  const status = bug.statusLabel ?? bug.jiraStatus ?? 'unknown';
   const lines = [
     '# Bug fix task',
     '',
-    'You are fixing exactly one Jira bug as part of an automated sweep.',
-    'Work only on this bug. Do not commit, do not push, and do not change Jira.',
+    `You are fixing exactly one ${tracker} bug as part of an automated sweep.`,
+    `Work only on this bug. Do not commit, do not push, and do not change the ${tracker} issue.`,
     'The orchestrator owns git history and the pull request.',
     '',
     '## Bug',
@@ -896,7 +1215,7 @@ export function renderBugPrompt({ bug, maxTurns, resultFile }) {
     `- Key: ${bug.key}`,
     `- Summary: ${bug.summary}`,
     `- Priority: ${bug.priority || 'unknown'}`,
-    `- Status: ${bug.jiraStatus || 'unknown'}`,
+    `- Status: ${status}`,
     `- URL: ${bug.url}`
   ];
 
@@ -1385,8 +1704,12 @@ function mergeBugs(state, fetchedBugs, { retryFailed }) {
       description: bug.description,
       priority: bug.priority,
       jiraStatus: bug.jiraStatus,
+      statusLabel: bug.statusLabel,
       labels: bug.labels,
       url: bug.url,
+      source: bug.source ?? existing.source,
+      tracker: bug.tracker ?? existing.tracker,
+      number: bug.number ?? existing.number,
       extraFields: bug.extraFields
     };
 
@@ -1420,10 +1743,11 @@ export function renderPrBody({ project, date, branch, tag, bugs }) {
   const fixed = bugs.filter((bug) => bug.status === 'fixed');
   const notFixed = bugs.filter((bug) => bug.status === 'not-fixed');
   const critical = fixed.filter((bug) => bug.critical);
+  const tracker = bugs[0]?.tracker ?? 'Jira';
   const lines = [
     `## Bug Fix Sweep — ${date}`,
     '',
-    `Jira ${project} · ${bugs.length} bugs · ${fixed.length} fixed · ${notFixed.length} not fixed`,
+    `${tracker} ${project} · ${bugs.length} bugs · ${fixed.length} fixed · ${notFixed.length} not fixed`,
     '',
     '| Bug | Status | What / How | Human review |',
     '|---|---|---|---|'
@@ -1493,10 +1817,13 @@ export function formatSweepSummary(state, { prUrl = null, pushed = false } = {})
   return `${lines.join('\n')}\n`;
 }
 
-function formatDryRun({ project, date, jql, branch, tag, bugs }) {
+function formatDryRun({ project, date, jql, branch, tag, bugs, source = 'jira', githubRepo = null, githubLabels = [], githubState = DEFAULT_GITHUB_STATE }) {
+  const query = source === 'github'
+    ? describeGitHubQuery({ repo: githubRepo, labels: githubLabels, state: githubState })
+    : jql;
   const lines = [
     `Bug sweep plan — ${project} (${date})`,
-    `JQL: ${jql}`,
+    `${source === 'github' ? 'GitHub' : 'JQL'}: ${query}`,
     `Branch: ${branch}`,
     `Tag: ${tag}`,
     `Bugs: ${bugs.length}`
@@ -2005,7 +2332,8 @@ async function processBug({
     key,
     summary: result.summary,
     how: result.how,
-    url: bug.url
+    url: bug.url,
+    source: bug.source
   });
 
   try {
@@ -2257,22 +2585,35 @@ async function runSingleSweep(argv, dependencies = {}) {
   const now = dependencies.now ?? (() => new Date());
   const signal = dependencies.signal;
   const emit = dependencies.onEvent ?? (() => {});
-  const jira = resolveJiraConfig(options);
+  const jira = options.source === 'github' ? null : resolveJiraConfig(options);
   // Jira requests use node:https so an internal CA (--jira-ca) can be trusted per
   // request. Tests inject their own fetch through dependencies.fetchImpl.
-  const fetchImpl = dependencies.fetchImpl ?? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure });
-  const jql = buildJql({ project: options.project, jql: options.jql, issues: options.issues });
+  const fetchImpl = dependencies.fetchImpl
+    ?? (jira ? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure }) : globalThis.fetch);
+  const jql = options.source === 'jira'
+    ? buildJql({ project: options.project, jql: options.jql, issues: options.issues })
+    : null;
+  const githubQuery = options.source === 'github'
+    ? describeGitHubQuery({
+      repo: options.githubRepo,
+      labels: options.githubLabels,
+      state: options.githubState
+    })
+    : null;
   const workDir = path.resolve(cwd, options.workDir);
   const statePath = path.join(workDir, `state-${options.date}.json`);
   let state = null;
 
   emit({
     type: 'sweep-started',
+    source: options.source,
     project: options.project,
+    repo: options.githubRepo,
     date: options.date,
     branch: options.branch,
     tag: options.tag,
     jql,
+    query: githubQuery ?? jql,
     dryRun: options.dryRun
   });
 
@@ -2301,47 +2642,77 @@ async function runSingleSweep(argv, dependencies = {}) {
       .filter((bug) => bug.status === 'fixed' || (bug.status === 'not-fixed' && !options.retryFailed))
       .map((bug) => bug.key)
     : [];
-  const effectiveJql = buildResumeJql(jql, excludedKeys);
+  const effectiveJql = options.source === 'jira' ? buildResumeJql(jql, excludedKeys) : null;
 
-  logger(`Fetching Jira bugs for ${options.project}...`);
+  logger(options.source === 'github'
+    ? `Fetching GitHub issues for ${options.githubRepo}...`
+    : `Fetching Jira bugs for ${options.project}...`);
 
   let fetchedBugs;
 
   try {
-    fetchedBugs = await fetchJiraBugs({
-      baseUrl: jira.baseUrl,
-      auth: jira.auth,
-      email: jira.email,
-      token: jira.token,
-      apiVersion: jira.apiVersion,
-      jql: effectiveJql,
-      // --limit caps how many bugs are fixed per run; the scan stays wider so the run
-      // knows whether anything is still pending before it publishes.
-      limit: Math.max(options.limit, DEFAULT_FETCH_LIMIT),
-      fields: [...new Set([...DEFAULT_JIRA_FIELDS, ...options.extraFields])],
-      extraFields: options.extraFields,
-      fetchImpl
-    });
+    if (options.source === 'github') {
+      fetchedBugs = await fetchGitHubBugs({
+        repo: options.githubRepo,
+        token: options.githubToken,
+        labels: options.githubLabels,
+        state: options.githubState,
+        issues: options.issues,
+        apiUrl: options.githubApiUrl,
+        // --limit caps how many bugs are fixed per run; the scan stays wider so the run
+        // knows whether anything is still pending before it publishes.
+        limit: Math.max(options.limit, DEFAULT_FETCH_LIMIT),
+        fetchImpl
+      });
+      fetchedBugs = fetchedBugs.filter((bug) => !excludedKeys.includes(bug.key));
+    } else {
+      fetchedBugs = await fetchJiraBugs({
+        baseUrl: jira.baseUrl,
+        auth: jira.auth,
+        email: jira.email,
+        token: jira.token,
+        apiVersion: jira.apiVersion,
+        jql: effectiveJql,
+        // --limit caps how many bugs are fixed per run; the scan stays wider so the run
+        // knows whether anything is still pending before it publishes.
+        limit: Math.max(options.limit, DEFAULT_FETCH_LIMIT),
+        fields: [...new Set([...DEFAULT_JIRA_FIELDS, ...options.extraFields])],
+        extraFields: options.extraFields,
+        fetchImpl
+      });
+    }
   } catch (error) {
+    if (options.source === 'github') {
+      throw new Error(`Could not fetch GitHub issues: ${error.message}`);
+    }
+
     const diagnosis = describeJiraError(error);
 
     throw new Error(`Could not fetch Jira bugs: ${diagnosis.hint}`);
   }
 
+  const query = githubQuery ?? effectiveJql;
+
   logger(`Found ${fetchedBugs.length} bug(s).`);
 
   emit({
     type: 'bugs-found',
+    source: options.source,
     total: fetchedBugs.length,
     jql: effectiveJql,
+    query,
     bugs: fetchedBugs.map((bug) => ({ key: bug.key, summary: bug.summary, priority: bug.priority, url: bug.url }))
   });
 
   if (options.dryRun) {
     return formatDryRun({
+      source: options.source,
       project: options.project,
       date: options.date,
       jql: effectiveJql,
+      githubRepo: options.githubRepo,
+      githubLabels: options.githubLabels,
+      githubState: options.githubState,
       branch: options.branch,
       tag: options.tag,
       bugs: fetchedBugs
@@ -2351,7 +2722,7 @@ async function runSingleSweep(argv, dependencies = {}) {
   const hasActionedBugs = Boolean(state) && state.bugs.some((bug) => bug.status !== 'pending');
 
   if (fetchedBugs.length === 0 && !hasActionedBugs) {
-    return `No bugs matched: ${effectiveJql}\n`;
+    return `No bugs matched: ${query}\n`;
   }
 
   if (!state) {
@@ -2359,6 +2730,8 @@ async function runSingleSweep(argv, dependencies = {}) {
 
     state = {
       version: 1,
+      source: options.source,
+      repo: options.githubRepo,
       project: options.project,
       date: options.date,
       branch: options.branch,

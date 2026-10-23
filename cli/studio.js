@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_AGENT_COMMAND,
   DEFAULT_FETCH_LIMIT,
+  DEFAULT_GITHUB_API_URL,
+  DEFAULT_GITHUB_STATE,
   DEFAULT_LIMIT,
   DEFAULT_MAX_TURNS,
   DEFAULT_TIMEOUT_SECONDS,
@@ -15,9 +17,12 @@ import {
   buildJiraAuthHeader,
   buildJql,
   createJiraFetch,
+  fetchGitHubBugs,
   fetchJiraBugs,
   fetchJiraProjects,
   normalizeAgentCommand,
+  normalizeGitHubRepo,
+  probeGitHub,
   probeJira,
   runBugSweep,
   runProcess
@@ -173,10 +178,10 @@ Options:
   --host <addr>  Interface to bind (default: ${STUDIO_DEFAULT_HOST}, local only)
   --no-open      Do not open the dashboard in your browser
 
-The dashboard drives "sdd bug-sweep" from the browser: pick a Jira project,
-watch each bug get fixed one at a time, and open the pull request. Later
-enhancement and feature runs reuse the same job view, including the interview
-steps that need your input.
+The dashboard drives "sdd bug-sweep" from the browser: pick a Jira project or a
+GitHub repository, watch each bug get fixed one at a time, and open the pull
+request. Later enhancement and feature runs reuse the same job view, including
+the interview steps that need your input.
 
 Examples:
   sdd studio
@@ -239,12 +244,32 @@ export function buildSweepArgs(request = {}) {
     }
   };
 
-  value('--project', request.project);
-  value('--jql', request.jql);
-  value(
-    '--issues',
-    Array.isArray(request.issues) && request.issues.length > 0 ? request.issues.join(',') : ''
-  );
+  const source = request.source === 'github' ? 'github' : 'jira';
+
+  if (source === 'github') {
+    value('--source', 'github');
+    value('--github-repo', request.githubRepo);
+    value('--github-token', request.githubToken);
+    value(
+      '--github-label',
+      Array.isArray(request.githubLabels) && request.githubLabels.length > 0
+        ? request.githubLabels.join(',')
+        : request.githubLabel
+    );
+    value('--github-state', request.githubState);
+    value('--github-api-url', request.githubApiUrl);
+    value(
+      '--issues',
+      Array.isArray(request.issues) && request.issues.length > 0 ? request.issues.join(',') : ''
+    );
+  } else {
+    value('--project', request.project);
+    value('--jql', request.jql);
+    value(
+      '--issues',
+      Array.isArray(request.issues) && request.issues.length > 0 ? request.issues.join(',') : ''
+    );
+  }
 
   value('--date', request.date);
   value('--base', request.base);
@@ -535,16 +560,22 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
     emit(job, { type: 'job-started', jobId: id, kind: 'bug-sweep' });
 
-    runBugSweep(buildSweepArgs(effective), {
-      cwd,
-      fetchImpl,
-      spawnImpl,
-      agentPreset: effective.agentPreset,
-      now,
-      signal: job.controller.signal,
-      logger: (line) => emit(job, { type: 'log', line }),
-      onEvent: (event) => emit(job, event)
-    })
+    Promise.resolve()
+      .then(async () => {
+        const sweepRequest = effective.source === 'github'
+          ? { ...effective, githubToken: await githubCliToken(cwd) }
+          : effective;
+        return runBugSweep(buildSweepArgs(sweepRequest), {
+          cwd,
+          fetchImpl,
+          spawnImpl,
+          agentPreset: effective.agentPreset,
+          now,
+          signal: job.controller.signal,
+          logger: (line) => emit(job, { type: 'log', line }),
+          onEvent: (event) => emit(job, event)
+        });
+      })
       .then((summary) => {
         job.result = summary;
 
@@ -1284,6 +1315,7 @@ async function describeGit(cwd) {
 
     const dirty = (await runProcess('git', ['status', '--porcelain'], { cwd })).stdout.trim() !== '';
     const branches = await localBranches(cwd);
+    const remoteUrl = (await runProcess('git', ['remote', 'get-url', 'origin'], { cwd })).stdout.trim();
 
     return {
       repo: true,
@@ -1292,6 +1324,7 @@ async function describeGit(cwd) {
       base,
       dirty,
       branches,
+      remote: remoteUrl,
       detached: branch === 'HEAD'
     };
   } catch {
@@ -1352,6 +1385,7 @@ const SETTINGS_FILE = 'studio.settings.json';
 // Only choices a human actually has to make. Dates, branch, tag, base branch, work
 // directory, limits, and timeouts are derived by the command at run time.
 const SETTINGS_KEYS = [
+  'source',
   'project',
   'base',
   'agentPreset',
@@ -1367,6 +1401,8 @@ const SETTINGS_KEYS = [
   'jiraApiVersion',
   'jiraCa',
   'jiraInsecure',
+  'githubRepo',
+  'githubLabel',
   'prPreset',
   'prCommand',
   // Set once the Settings drawer has been seen, so it opens on the first visit
@@ -1374,9 +1410,10 @@ const SETTINGS_KEYS = [
   'settingsSeen'
 ];
 
-// The dashboard runs on localhost, so it remembers the Jira token in the same
-// git-ignored file. The token is never sent back to the browser; the API only
-// exposes hasSavedToken. A blank token field means "keep using the saved one".
+// The dashboard runs on localhost, so it remembers tracker tokens in the same
+// git-ignored file. Tokens are never sent back to the browser; the API only
+// exposes hasSavedToken and hasSavedGitHubToken. A blank token field means
+// "keep using the saved one".
 const SECRET_SETTINGS_KEYS = ['jiraToken'];
 const STORE_KEYS = [...SETTINGS_KEYS, ...SECRET_SETTINGS_KEYS];
 
@@ -1412,6 +1449,10 @@ export function readSettings(cwd) {
 
 export function hasSavedToken(cwd) {
   return Boolean(readStore(cwd).jiraToken);
+}
+
+export function hasSavedGitHubToken(cwd) {
+  return Boolean(readStore(cwd).githubToken);
 }
 
 export function writeSettings(cwd, settings = {}) {
@@ -1478,6 +1519,124 @@ export function resolveStudioJira(input = {}, saved = {}) {
     ca: pick(input.jiraCa, saved.jiraCa, env.JIRA_CA_CERT, null),
     insecure: Boolean(input.jiraInsecure) || Boolean(saved.jiraInsecure) || env.JIRA_INSECURE === '1'
   };
+}
+
+export function resolveStudioGitHub(input = {}, saved = {}) {
+  const env = process.env;
+  const pick = (inputValue, savedValue, envValue, fallback = '') => {
+    if (inputValue !== undefined && inputValue !== null && inputValue !== '') {
+      return inputValue;
+    }
+    if (savedValue !== undefined && savedValue !== null && savedValue !== '') {
+      return savedValue;
+    }
+    return envValue ?? fallback;
+  };
+
+  return {
+    repo: pick(input.githubRepo, saved.githubRepo, env.GITHUB_REPOSITORY, ''),
+    label: pick(input.githubLabel, saved.githubLabel, '', ''),
+    apiUrl: DEFAULT_GITHUB_API_URL
+  };
+}
+
+async function githubCliToken(cwd) {
+  let result;
+
+  try {
+    result = await runProcess('gh', ['auth', 'token'], { cwd, timeoutMs: 10000 });
+  } catch (error) {
+    throw new Error(`GitHub CLI (gh) is required and must be authenticated: ${error.message}`);
+  }
+
+  const token = result.stdout.trim();
+
+  if (result.code !== 0 || !token) {
+    throw new Error(`GitHub CLI is not authenticated. Run "gh auth login"${result.stderr ? `: ${result.stderr.trim()}` : '.'}`);
+  }
+
+  return token;
+}
+
+function studioGitHubLabels(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter(Boolean);
+  }
+
+  return String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+export async function listGitHubBugs(input = {}, saved = {}) {
+  const github = resolveStudioGitHub(input, saved);
+  let repo;
+
+  try {
+    repo = normalizeGitHubRepo(github.repo);
+  } catch (error) {
+    return { configured: true, bugs: [], error: error.message };
+  }
+
+  if (!repo) {
+    return { configured: false, bugs: [], error: 'Set a GitHub repository in Settings first.' };
+  }
+
+  try {
+    const token = await githubCliToken(input.cwd ?? process.cwd());
+    const bugs = await fetchGitHubBugs({
+      repo,
+      token,
+      labels: input.ignoreLabels ? [] : studioGitHubLabels(github.label),
+      state: DEFAULT_GITHUB_STATE,
+      limit: input.limit ?? DEFAULT_FETCH_LIMIT,
+      apiUrl: github.apiUrl,
+      fetchImpl: input.fetchImpl
+    });
+
+    return {
+      configured: true,
+      repo,
+      total: bugs.length,
+      bugs: bugs.map((bug) => ({
+        key: bug.key,
+        number: bug.number,
+        summary: bug.summary,
+        priority: bug.priority,
+        status: bug.statusLabel,
+        labels: bug.labels,
+        url: bug.url
+      }))
+    };
+  } catch (error) {
+    return { configured: true, bugs: [], error: error.message };
+  }
+}
+
+export async function checkGitHubHealth(input = {}, saved = {}) {
+  const github = resolveStudioGitHub(input, saved);
+
+  if (!github.repo) {
+    return { configured: false, ok: false, error: 'Set a GitHub repository in Settings first.' };
+  }
+
+  let token;
+
+  try {
+    token = await githubCliToken(input.cwd ?? process.cwd());
+  } catch (error) {
+    return { configured: true, ok: false, repo: github.repo, error: error.message };
+  }
+
+  const result = await probeGitHub({
+    repo: github.repo,
+    token,
+    apiUrl: github.apiUrl,
+    fetchImpl: input.fetchImpl
+  });
+
+  return { configured: true, ...result };
 }
 
 export async function listJiraProjects(input = {}, saved = {}) {
@@ -1680,6 +1839,13 @@ export async function checkJiraHealth(input = {}, saved = {}) {
 async function buildConfig({ cwd, version }) {
   const git = await describeGit(cwd);
   const date = todayLocal();
+  let detectedGitHubRepo = '';
+
+  try {
+    detectedGitHubRepo = normalizeGitHubRepo(git.remote) ?? '';
+  } catch {
+    // The remote may point at an internal forge; it is only a convenience hint.
+  }
 
   return {
     version,
@@ -1694,6 +1860,10 @@ async function buildConfig({ cwd, version }) {
       insecure: process.env.JIRA_INSECURE === '1',
       hasToken: Boolean(process.env.JIRA_API_TOKEN),
       hasSavedToken: hasSavedToken(cwd)
+    },
+    github: {
+      repo: process.env.GITHUB_REPOSITORY ?? detectedGitHubRepo,
+      usesCliAuth: true
     },
     settings: readSettings(cwd),
     agents: studioAgentPresets(),
@@ -1755,7 +1925,8 @@ async function handleRequest(req, res, context) {
   if (req.method === 'GET' && pathname === '/api/settings') {
     sendJson(res, 200, {
       settings: readSettings(context.cwd),
-      hasSavedToken: hasSavedToken(context.cwd)
+      hasSavedToken: hasSavedToken(context.cwd),
+      hasSavedGitHubToken: false
     });
     return;
   }
@@ -1769,7 +1940,8 @@ async function handleRequest(req, res, context) {
 
     sendJson(res, 200, {
       settings: cleanKeys(stored, SETTINGS_KEYS),
-      hasSavedToken: Boolean(stored.jiraToken)
+      hasSavedToken: Boolean(stored.jiraToken),
+      hasSavedGitHubToken: false
     });
     return;
   }
@@ -1809,6 +1981,22 @@ async function handleRequest(req, res, context) {
   if (req.method === 'POST' && pathname === '/api/jira/health') {
     const body = await readJsonBody(req);
     const result = await checkJiraHealth({ ...body, fetchImpl: context.fetchImpl }, readStore(context.cwd));
+
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/github/bugs') {
+    const body = await readJsonBody(req);
+    const result = await listGitHubBugs({ ...body, cwd: context.cwd, fetchImpl: context.fetchImpl }, readStore(context.cwd));
+
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/github/health') {
+    const body = await readJsonBody(req);
+    const result = await checkGitHubHealth({ ...body, cwd: context.cwd, fetchImpl: context.fetchImpl }, readStore(context.cwd));
 
     sendJson(res, 200, result);
     return;

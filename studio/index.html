@@ -44,7 +44,7 @@
         </span>
         <span class="nav-copy">
           <span class="nav-title">Bug fixing</span>
-          <span class="nav-sub">Jira, one at a time</span>
+          <span class="nav-sub">Jira or GitHub, one at a time</span>
         </span>
       </button>
 
@@ -91,7 +91,7 @@
       <section class="view" data-view="sweep">
         <header class="page-head">
           <div class="page-title">
-            <h1>Fix Jira bugs</h1>
+            <h1>Fix bugs</h1>
             <p>Choose the bugs, start the run, review what needs a human.</p>
           </div>
           <p class="scope" id="scope-meta">no project · base detected</p>
@@ -111,6 +111,14 @@
                 </button>
               </div>
             </div>
+
+            <label class="field queue-source">
+              <span>Bug source</span>
+              <select form="sweep-form" name="source" id="bug-source">
+                <option value="jira">Jira</option>
+                <option value="github">GitHub</option>
+              </select>
+            </label>
 
             <div class="bug-picker" id="bug-picker" tabindex="0" aria-label="Open bugs">
               <p class="bug-picker-empty">Pick a project in Settings to load its bugs.</p>
@@ -246,7 +254,7 @@
         <section class="settings-section">
           <h3>Workspace</h3>
 
-          <label class="field">
+          <label class="field" id="jira-settings">
             <span>Jira project</span>
             <div class="input-row">
               <input form="sweep-form" name="project" list="project-list" placeholder="ABC" autocomplete="off">
@@ -255,6 +263,11 @@
               </button>
             </div>
             <datalist id="project-list"></datalist>
+          </label>
+
+          <label class="field hidden" id="github-settings">
+            <span id="github-repo-label">GitHub repository</span>
+            <input form="sweep-form" name="githubRepo" placeholder="owner/repo" autocomplete="off">
           </label>
 
           <div class="grid-2">
@@ -342,6 +355,17 @@
             <button type="button" class="btn quiet" id="forget-jira">Forget saved</button>
             <span class="check-result" id="jira-check-result"></span>
           </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>GitHub connection</h3>
+          <p class="hint">GitHub access uses your authenticated GitHub CLI (<code>gh</code>) account.</p>
+          <div class="settings-actions">
+            <button type="button" class="btn" id="check-github">Check GitHub</button>
+            <button type="button" class="btn quiet" id="forget-github">Clear repository</button>
+            <span class="check-result" id="github-check-result"></span>
+          </div>
+          <p class="hint" id="github-info">GitHub: not configured</p>
         </section>
       </div>
 
