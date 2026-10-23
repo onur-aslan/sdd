@@ -1423,6 +1423,9 @@ function ensureWorkDir(workDir) {
   }
 }
 
+// Studio state is shared by every workflow, so it lives in its own directory
+// instead of the bug-sweep work dir.
+const STUDIO_STATE_DIR = '.sdd';
 const SETTINGS_FILE = 'studio.settings.json';
 // Only choices a human actually has to make. Dates, branch, tag, base branch, work
 // directory, limits, and timeouts are derived by the command at run time.
@@ -1464,6 +1467,12 @@ const SECRET_SETTINGS_KEYS = ['jiraToken'];
 const STORE_KEYS = [...SETTINGS_KEYS, ...SECRET_SETTINGS_KEYS];
 
 function settingsFile(cwd) {
+  return path.join(path.resolve(cwd, STUDIO_STATE_DIR), SETTINGS_FILE);
+}
+
+// Older versions wrote the same file under the bug-sweep work dir. It is moved
+// once so existing projects keep their project, agent, and tracker token.
+function legacySettingsFile(cwd) {
   return path.join(path.resolve(cwd, DEFAULT_WORK_DIR), SETTINGS_FILE);
 }
 
@@ -1483,6 +1492,29 @@ function cleanKeys(raw, keys) {
 export function readStore(cwd) {
   try {
     return cleanKeys(JSON.parse(fs.readFileSync(settingsFile(cwd), 'utf8')), STORE_KEYS);
+  } catch {
+    // Fall through to the legacy location.
+  }
+
+  const legacy = legacySettingsFile(cwd);
+
+  try {
+    const store = cleanKeys(JSON.parse(fs.readFileSync(legacy, 'utf8')), STORE_KEYS);
+
+    if (Object.keys(store).length === 0) {
+      return store;
+    }
+
+    // Write the new copy first; the legacy file is only removed once it succeeded
+    // so an unreadable or read-only project keeps working from the old location.
+    try {
+      writeSettings(cwd, store);
+      fs.rmSync(legacy, { force: true });
+    } catch {
+      // Keep serving the legacy copy when the new location cannot be written.
+    }
+
+    return store;
   } catch {
     return {};
   }
@@ -1504,7 +1536,7 @@ export function hasSavedGitHubToken(cwd) {
 export function writeSettings(cwd, settings = {}) {
   const clean = cleanKeys(settings, STORE_KEYS);
 
-  ensureWorkDir(path.resolve(cwd, DEFAULT_WORK_DIR));
+  ensureWorkDir(path.resolve(cwd, STUDIO_STATE_DIR));
 
   const file = settingsFile(cwd);
 

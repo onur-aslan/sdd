@@ -398,7 +398,7 @@ code {
   color: var(--muted);
 }
 
-.jira-status {
+.tracker-status {
   margin: 0;
   padding: 0 8px;
   color: var(--muted);
@@ -2662,7 +2662,7 @@ input[type="checkbox"]:disabled {
     padding: 7px 9px;
   }
 
-  .jira-status {
+  .tracker-status {
     display: none;
   }
 }

@@ -83,7 +83,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1.5 14h5M9.5 8h5M17.5 16h5"/></svg>
           <span>Settings</span>
         </button>
-        <p class="jira-status" id="jira-info">Jira: not configured</p>
+        <p class="tracker-status" id="tracker-info">Trackers: not configured</p>
       </div>
     </nav>
 
@@ -266,15 +266,17 @@
             <datalist id="project-list"></datalist>
           </label>
 
-          <label class="field hidden" id="github-settings">
+          <label class="field" id="github-settings">
             <span id="github-repo-label">GitHub repository</span>
             <input form="sweep-form" name="githubRepo" placeholder="owner/repo" autocomplete="off">
           </label>
 
-          <label class="field hidden" id="gitlab-settings">
+          <label class="field" id="gitlab-settings">
             <span>GitLab project</span>
             <input form="sweep-form" name="gitlabProject" placeholder="group/subgroup/project" autocomplete="off">
           </label>
+
+          <p class="hint">Each workflow uses the target for its own source picker.</p>
 
           <div class="grid-2">
             <label class="field">
@@ -378,7 +380,7 @@
       </div>
 
       <footer class="settings-foot">
-        <span class="saved-note">Saved locally in <code>.bug-fix/studio.settings.json</code></span>
+        <span class="saved-note">Saved locally in <code>.sdd/studio.settings.json</code></span>
         <span class="save-status" id="settings-status" role="status"></span>
         <button type="button" class="btn" id="settings-done">Done</button>
       </footer>

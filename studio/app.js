@@ -6,7 +6,7 @@ const el = {
   versionChip: $('#version-chip'),
   connection: $('#connection'),
   connectionText: $('#connection-text'),
-  jiraInfo: $('#jira-info'),
+  trackerInfo: $('#tracker-info'),
   form: $('#sweep-form'),
   formError: $('#form-error'),
   startBtn: $('#start-btn'),
@@ -16,9 +16,6 @@ const el = {
   projectList: $('#project-list'),
   projectLabel: $('#project-label'),
   source: $('#bug-source'),
-  jiraSettings: $('#jira-settings'),
-  githubSettings: $('#github-settings'),
-  gitlabSettings: $('#gitlab-settings'),
   githubRepoLabel: $('#github-repo-label'),
   githubInfo: $('#github-info'),
   checkGitHub: $('#check-github'),
@@ -946,6 +943,7 @@ async function forgetGitHub() {
     state.loadedSource = '';
     el.githubInfo.textContent = 'GitHub CLI: not configured';
     el.githubCheckResult.textContent = 'Repository setting cleared.';
+    updateTrackerStatus();
     loadBugs({ force: true });
   } catch (error) {
     el.githubCheckResult.textContent = error.message;
@@ -983,7 +981,7 @@ async function forgetJira() {
     state.selectedIssues.clear();
     renderBugPicker('Pick a project in Settings to load its bugs.');
     updatePlan();
-    el.jiraInfo.textContent = 'Jira: not configured';
+    updateTrackerStatus();
     el.jiraCheckResult.textContent = 'Saved Jira settings cleared.';
   } catch (error) {
     el.jiraCheckResult.textContent = error.message;
@@ -1028,13 +1026,19 @@ function settingsPayload() {
   return payload;
 }
 
-function updateSourceSettings() {
-  const github = currentSource() === 'github';
-  const gitlab = currentSource() === 'gitlab';
-  el.jiraSettings.classList.toggle('hidden', github || gitlab);
-  el.githubSettings.classList.toggle('hidden', !github);
-  el.gitlabSettings.classList.toggle('hidden', !gitlab);
-  el.reloadProjects.disabled = github || gitlab;
+function updateTrackerStatus() {
+  const names = [];
+
+  if (el.form.jiraUrl.value.trim()) names.push('Jira');
+  if (el.form.githubRepo.value.trim()) names.push('GitHub');
+  if (el.form.gitlabProject.value.trim()) names.push('GitLab');
+
+  el.trackerInfo.textContent = names.length
+    ? `Trackers: ${names.join(' · ')}`
+    : 'Trackers: not configured';
+  el.trackerInfo.title = names.length
+    ? `Configured targets: ${names.join(', ')}`
+    : 'No tracker target is configured yet.';
 }
 
 function queueSettingsSave() {
@@ -1050,7 +1054,7 @@ function queueSettingsSave() {
 
 async function saveSettings() {
   try {
-    const result = await api('/api/settings', {
+    await api('/api/settings', {
       method: 'POST',
       body: JSON.stringify(settingsPayload())
     });
@@ -1062,19 +1066,7 @@ async function saveSettings() {
       }
     }, 1600);
 
-    const saved = result.settings ?? {};
-
-    if (saved.jiraUrl) {
-      const bits = [saved.jiraUrl, saved.jiraAuth ? `auth ${saved.jiraAuth}` : 'auth auto'];
-
-      if (result.hasSavedToken) {
-        bits.push('token saved');
-      }
-
-      el.jiraInfo.textContent = `Jira: ${bits.join(' · ')}`;
-    } else {
-      el.jiraInfo.textContent = 'Jira: not configured';
-    }
+    updateTrackerStatus();
   } catch {
     el.settingsStatus.textContent = 'Not saved';
   }
@@ -3181,34 +3173,12 @@ async function loadConfig() {
 
     const jira = config.jira ?? {};
 
-    if (jira.url) {
-      const bits = [jira.url, jira.auth === 'auto' || !jira.auth ? 'auth auto' : `auth ${jira.auth}`];
-
-      if (jira.apiVersion && jira.apiVersion !== 'auto') {
-        bits.push(`REST v${jira.apiVersion}`);
-      }
-      if (!jira.hasToken) {
-        bits.push('no token');
-      }
-      if (jira.hasCa) {
-        bits.push('internal CA');
-      }
-      if (jira.insecure) {
-        bits.push('insecure TLS');
-      }
-
-      el.jiraInfo.textContent = `Jira: ${bits.join(' · ')}`;
-    } else {
-      el.jiraInfo.textContent = 'Jira: not configured';
-    }
-
     // Remembered choices win; detected defaults fill the gaps.
     setFormValue('project', settings.project);
     setFormValue('source', settings.source);
     setFormValue('githubRepo', settings.githubRepo || config.github?.repo);
     setFormValue('gitlabProject', settings.gitlabProject);
     el.githubInfo.textContent = config.github?.repo ? `GitHub CLI: ${config.github.repo}` : 'GitHub CLI: not configured';
-    updateSourceSettings();
     setFormValue('base', settings.base);
     const detectedJiraType = settings.jiraType || (
       (settings.jiraAuth === 'bearer' || settings.jiraApiVersion === '2' || jira.auth === 'bearer')
@@ -3231,6 +3201,7 @@ async function loadConfig() {
       : jira.hasToken
         ? '•••••••• (from environment)'
         : '••••••••';
+    updateTrackerStatus();
 
     el.form.agentPreset.innerHTML = '';
     for (const agent of agentPresets()) {
@@ -3374,7 +3345,6 @@ function init() {
   el.form.gitlabProject.addEventListener('change', () => loadBugs());
   el.form.gitlabProject.addEventListener('input', scheduleBugLoad);
   el.form.source.addEventListener('change', () => {
-    updateSourceSettings();
     loadBugs({ force: true });
     updatePlan();
     queueSettingsSave();

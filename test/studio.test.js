@@ -387,7 +387,29 @@ test('settings remember the Jira connection locally but keep the token off the A
     });
     assert.equal('jiraToken' in publicSettings, false);
     assert.equal(readStore(root).jiraToken, 'secret');
-    assert.ok(fs.existsSync(path.join(root, '.bug-fix', '.gitignore')));
+    assert.ok(fs.existsSync(path.join(root, '.sdd', 'studio.settings.json')));
+    assert.ok(fs.existsSync(path.join(root, '.sdd', '.gitignore')));
+    assert.equal(fs.existsSync(path.join(root, '.bug-fix', 'studio.settings.json')), false);
+    assert.equal(git(root, ['status', '--porcelain']), '');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('settings left under the bug-sweep work dir move to the studio state dir', () => {
+  const root = createRepo();
+
+  try {
+    const legacy = path.join(root, '.bug-fix', 'studio.settings.json');
+
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, JSON.stringify({ project: 'ABC', agentPreset: 'cursor', jiraToken: 'secret' }), 'utf8');
+
+    assert.deepEqual(readSettings(root), { project: 'ABC', agentPreset: 'cursor' });
+    assert.equal(readStore(root).jiraToken, 'secret');
+    assert.ok(fs.existsSync(path.join(root, '.sdd', 'studio.settings.json')));
+    assert.ok(fs.existsSync(path.join(root, '.sdd', '.gitignore')));
+    assert.equal(fs.existsSync(legacy), false);
     assert.equal(git(root, ['status', '--porcelain']), '');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -632,6 +654,15 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
 
   const page = await (await fetch(`${base}/`)).text();
   assert.match(page, /sdd <em>studio<\/em>/);
+
+  // Settings is shared by every workflow, so its tracker targets are not
+  // filtered by the bug sweep's source, and the rail reports all of them
+  // instead of a Jira-only connection.
+  assert.doesNotMatch(page, /class="field hidden" id="(?:github|gitlab)-settings"/);
+  assert.match(page, /Each workflow uses the target for its own source picker\./);
+  assert.match(page, /id="tracker-info"/);
+  assert.match(page, /Trackers: not configured/);
+  assert.doesNotMatch(page, /id="jira-info"/);
 
   const script = await (await fetch(`${base}/app.js`)).text();
   assert.match(script, /EventSource/);
