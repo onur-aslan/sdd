@@ -27,6 +27,7 @@ import {
   runBugSweep,
   runProcess
 } from './bug-sweep.js';
+import { fetchGitLabIssues, normalizeGitLabProject } from './gitlab-issues.js';
 import { runInterviewSession, resolveSessionFlow, validateBrief, validateSessionSkillArguments } from './agent-session.js';
 import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
 import {
@@ -48,6 +49,7 @@ export const STUDIO_AGENT_PRESETS = [
   { id: 'cursor', label: 'Cursor', command: '["cursor-agent","-p","--force","--output-format","stream-json"]' },
   { id: 'opencode', label: 'OpenCode', command: '["opencode","run","--format","json","--agent","build"]' },
   { id: 'codex', label: 'Codex', command: '["codex","exec","--json","--skip-git-repo-check"]' },
+  { id: 'antigravity', label: 'Antigravity', command: '["agy","--dangerously-skip-permissions","-p"]' },
   { id: 'custom', label: 'Custom command', command: '' }
 ];
 
@@ -92,14 +94,50 @@ function findCodexExecutable(env = process.env) {
   return candidates[0]?.path ?? '';
 }
 
-function studioAgentPresets() {
-  const executable = process.platform === 'win32' ? findCodexExecutable() : '';
+function findAntigravityExecutable(env = process.env) {
+  const candidates = [];
+  const add = (candidate) => {
+    if (!candidate || !fs.existsSync(candidate)) return;
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs });
+    } catch {
+      // A stale PATH entry or an install being updated should not block startup.
+    }
+  };
 
-  return STUDIO_AGENT_PRESETS.map((preset) => (
-    preset.id === 'codex' && executable
-      ? { ...preset, command: JSON.stringify([executable, 'exec', '--json', '--skip-git-repo-check']) }
-      : preset
-  ));
+  for (const directory of String(env.PATH ?? '').split(path.delimiter)) {
+    if (directory) {
+      for (const name of ['agy.exe', 'agy.cmd', 'agy.bat', 'agy', 'antigravity.exe', 'antigravity.cmd', 'antigravity.bat', 'antigravity']) {
+        add(path.join(directory.replace(/^"|"$/g, ''), name));
+      }
+    }
+  }
+
+  const localAppData = env.LOCALAPPDATA
+    || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Local') : '');
+  if (localAppData) {
+    add(path.join(localAppData, 'agy', 'bin', 'agy.exe'));
+    add(path.join(localAppData, 'Programs', 'Antigravity', 'bin', 'agy.exe'));
+  }
+
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return candidates[0]?.path ?? '';
+}
+
+function studioAgentPresets() {
+  const codexExecutable = process.platform === 'win32' ? findCodexExecutable() : '';
+  const agyExecutable = findAntigravityExecutable();
+
+  return STUDIO_AGENT_PRESETS.map((preset) => {
+    if (preset.id === 'codex' && codexExecutable) {
+      return { ...preset, command: JSON.stringify([codexExecutable, 'exec', '--json', '--skip-git-repo-check']) };
+    }
+    if (preset.id === 'antigravity' && agyExecutable) {
+      return { ...preset, command: JSON.stringify([agyExecutable, '--dangerously-skip-permissions', '-p']) };
+    }
+    return preset;
+  });
 }
 
 // One-click forge choices. GitHub uses the built-in gh path (an empty command).
@@ -244,7 +282,7 @@ export function buildSweepArgs(request = {}) {
     }
   };
 
-  const source = request.source === 'github' ? 'github' : 'jira';
+  const source = ['github', 'gitlab'].includes(request.source) ? request.source : 'jira';
 
   if (source === 'github') {
     value('--source', 'github');
@@ -262,6 +300,10 @@ export function buildSweepArgs(request = {}) {
       '--issues',
       Array.isArray(request.issues) && request.issues.length > 0 ? request.issues.join(',') : ''
     );
+  } else if (source === 'gitlab') {
+    value('--source', 'gitlab');
+    value('--gitlab-project', request.gitlabProject);
+    value('--issues', Array.isArray(request.issues) && request.issues.length > 0 ? request.issues.join(',') : '');
   } else {
     value('--project', request.project);
     value('--jql', request.jql);
@@ -1395,6 +1437,7 @@ const SETTINGS_KEYS = [
   'retryFailed',
   'worktree',
   'fetchBase',
+  'jiraType',
   'jiraUrl',
   'jiraEmail',
   'jiraAuth',
@@ -1403,6 +1446,9 @@ const SETTINGS_KEYS = [
   'jiraInsecure',
   'githubRepo',
   'githubLabel',
+  'gitlabProject',
+  'enhancementSource',
+  'featureSource',
   'prPreset',
   'prCommand',
   // Set once the Settings drawer has been seen, so it opens on the first visit
@@ -1507,15 +1553,20 @@ export function resolveStudioJira(input = {}, saved = {}) {
     return envValue ?? fallback;
   };
 
-  const auth = pick(input.jiraAuth, saved.jiraAuth, env.JIRA_AUTH, 'auto');
+  const jiraType = pick(input.jiraType, saved.jiraType, env.JIRA_TYPE, '');
+  const defaultAuth = jiraType === 'cloud' ? 'basic' : jiraType === 'datacenter' ? 'bearer' : 'auto';
+  const defaultApiVersion = jiraType === 'cloud' ? '3' : jiraType === 'datacenter' ? '2' : 'auto';
+
+  const auth = pick(input.jiraAuth, saved.jiraAuth, env.JIRA_AUTH, defaultAuth);
 
   return {
+    jiraType,
     url: pick(input.jiraUrl, saved.jiraUrl, env.JIRA_BASE_URL, ''),
     // An email only matters for Basic auth; auto and bearer use the token alone.
     email: auth === 'basic' ? pick(input.jiraEmail, saved.jiraEmail, env.JIRA_EMAIL, '') : '',
     token: pick(input.jiraToken, saved.jiraToken, env.JIRA_API_TOKEN, ''),
     auth,
-    apiVersion: pick(input.jiraApiVersion, saved.jiraApiVersion, env.JIRA_API_VERSION, 'auto'),
+    apiVersion: pick(input.jiraApiVersion, saved.jiraApiVersion, env.JIRA_API_VERSION, defaultApiVersion),
     ca: pick(input.jiraCa, saved.jiraCa, env.JIRA_CA_CERT, null),
     insecure: Boolean(input.jiraInsecure) || Boolean(saved.jiraInsecure) || env.JIRA_INSECURE === '1'
   };
@@ -1603,6 +1654,7 @@ export async function listGitHubBugs(input = {}, saved = {}) {
         key: bug.key,
         number: bug.number,
         summary: bug.summary,
+        description: bug.description,
         priority: bug.priority,
         status: bug.statusLabel,
         labels: bug.labels,
@@ -1637,6 +1689,28 @@ export async function checkGitHubHealth(input = {}, saved = {}) {
   });
 
   return { configured: true, ...result };
+}
+
+export async function checkGitLabHealth(input = {}) {
+  try {
+    const result = await runProcess('glab', ['auth', 'status'], {
+      cwd: input.cwd ?? process.cwd(),
+      timeoutMs: 10000
+    });
+
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      return { configured: true, ok: false, error: detail || 'GitLab CLI is not authenticated. Run "glab auth login".' };
+    }
+
+    return { configured: true, ok: true, detail: (result.stdout || result.stderr).trim() };
+  } catch (error) {
+    const message = error.code === 'ENOENT'
+      ? 'GitLab CLI (glab) is not installed or is not on PATH. Install it from https://docs.gitlab.com/cli/.'
+      : `GitLab CLI (glab) check failed: ${error.message}`;
+
+    return { configured: false, ok: false, error: message };
+  }
 }
 
 export async function listJiraProjects(input = {}, saved = {}) {
@@ -1706,6 +1780,59 @@ export async function listJiraBugs(input = {}, saved = {}) {
     };
   } catch (error) {
     return { configured: true, bugs: [], error: error.message };
+  }
+}
+
+export async function listGitLabIssues(input = {}, saved = {}) {
+  const projectValue = input.gitlabProject ?? input.project ?? saved.gitlabProject ?? '';
+  if (!String(projectValue).trim()) {
+    return { configured: true, issues: [], error: 'Set a GitLab project in Settings first.' };
+  }
+
+  try {
+    const issues = await fetchGitLabIssues({
+      project: projectValue,
+      limit: input.limit ?? 100,
+      cwd: input.cwd ?? process.cwd(),
+      run: input.run ?? runProcess
+    });
+    return {
+      configured: true,
+      total: issues.length,
+      issues: issues.map((issue) => ({
+        key: issue.key,
+        summary: issue.summary,
+        description: issue.description,
+        type: 'Issue',
+        priority: issue.priority,
+        status: issue.statusLabel,
+        url: issue.url
+      }))
+    };
+  } catch (error) {
+    return { configured: true, issues: [], error: error.message };
+  }
+}
+
+export async function fetchGitLabIssue(input = {}, saved = {}) {
+  const projectValue = input.gitlabProject ?? input.project ?? saved.gitlabProject ?? '';
+  if (!String(projectValue).trim()) {
+    return { configured: true, issue: null, error: 'Set a GitLab project in Settings first.' };
+  }
+
+  try {
+    const issues = await fetchGitLabIssues({
+      project: projectValue,
+      issues: [input.key],
+      limit: 1,
+      cwd: input.cwd ?? process.cwd(),
+      run: input.run ?? runProcess
+    });
+    return issues.length
+      ? { configured: true, issue: issues[0] }
+      : { configured: true, issue: null, error: `GitLab issue ${input.key} was not found.` };
+  } catch (error) {
+    return { configured: true, issue: null, error: error.message };
   }
 }
 
@@ -1994,9 +2121,50 @@ async function handleRequest(req, res, context) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/gitlab/bugs') {
+    const body = await readJsonBody(req);
+    const listed = await listGitLabIssues({ ...body, cwd: context.cwd }, readStore(context.cwd));
+    sendJson(res, 200, {
+      configured: listed.configured,
+      error: listed.error,
+      total: listed.total ?? 0,
+      bugs: (listed.issues ?? []).map((issue) => ({
+        key: issue.key,
+        summary: issue.summary,
+        description: issue.description,
+        priority: issue.priority,
+        status: issue.status,
+        url: issue.url
+      }))
+    });
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/github/health') {
     const body = await readJsonBody(req);
     const result = await checkGitHubHealth({ ...body, cwd: context.cwd, fetchImpl: context.fetchImpl }, readStore(context.cwd));
+
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/gitlab/issues') {
+    const body = await readJsonBody(req);
+    const result = await listGitLabIssues({ ...body, cwd: context.cwd }, readStore(context.cwd));
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/gitlab/issue') {
+    const body = await readJsonBody(req);
+    const result = await fetchGitLabIssue({ ...body, cwd: context.cwd }, readStore(context.cwd));
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/gitlab/health') {
+    const body = await readJsonBody(req);
+    const result = await checkGitLabHealth({ ...body, cwd: context.cwd });
 
     sendJson(res, 200, result);
     return;

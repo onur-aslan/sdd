@@ -1457,7 +1457,7 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
       throw new Error(`The agent reported: ${parsed.error}`);
     }
 
-    const text = (parsed.text || (structuredAgent ? '' : stripAnsi(result.stdout ?? ''))).trim();
+    const text = (parsed.text || (parsed.structured ? '' : stripAnsi(result.stdout ?? ''))).trim();
 
     if (!text) {
       const detail = String(result.stderr ?? '').trim().split('\n').slice(-3).join(' ');

@@ -18,11 +18,14 @@ const el = {
   source: $('#bug-source'),
   jiraSettings: $('#jira-settings'),
   githubSettings: $('#github-settings'),
+  gitlabSettings: $('#gitlab-settings'),
   githubRepoLabel: $('#github-repo-label'),
   githubInfo: $('#github-info'),
   checkGitHub: $('#check-github'),
   forgetGitHub: $('#forget-github'),
   githubCheckResult: $('#github-check-result'),
+  checkGitLab: $('#check-gitlab'),
+  gitlabCheckResult: $('#gitlab-check-result'),
   bugPicker: $('#bug-picker'),
   bugCount: $('#bug-count'),
   reloadBugs: $('#reload-bugs'),
@@ -36,7 +39,13 @@ const el = {
   prCustomField: $('#pr-custom-field'),
   checkJira: $('#check-jira'),
   forgetJira: $('#forget-jira'),
+  jiraType: $('#jira-type'),
+  jiraUrlLabel: $('#jira-url-label'),
   jiraEmailField: $('#jira-email-field'),
+  jiraTokenLabel: $('#jira-token-label'),
+  jiraCloudHint: $('#jira-cloud-hint'),
+  jiraDatacenterHint: $('#jira-datacenter-hint'),
+  jiraDatacenterTls: $('#jira-datacenter-tls'),
   jiraCheckResult: $('#jira-check-result'),
   settingsDialog: $('#settings-dialog'),
   settingsClose: $('#settings-close'),
@@ -104,13 +113,13 @@ async function api(path, options = {}) {
 }
 
 function currentSource() {
-  return el.form.source?.value === 'github' ? 'github' : 'jira';
+  return ['github', 'gitlab'].includes(el.form.source?.value) ? el.form.source.value : 'jira';
 }
 
 function currentTarget(source = currentSource()) {
-  return source === 'github'
-    ? el.form.githubRepo.value.trim()
-    : el.form.project.value.trim();
+  if (source === 'github') return el.form.githubRepo.value.trim();
+  if (source === 'gitlab') return el.form.gitlabProject.value.trim();
+  return el.form.project.value.trim();
 }
 
 function currentQueryKey() {
@@ -282,6 +291,7 @@ function setRunLocked(locked) {
   el.reloadBugs.disabled = locked;
   el.form.project.disabled = locked;
   el.form.githubRepo.disabled = locked;
+  el.form.gitlabProject.disabled = locked;
   el.form.source.disabled = locked;
   el.reloadProjects.disabled = locked;
 
@@ -449,11 +459,14 @@ function formRequest({ dryRun = false } = {}) {
   const prPreset = text('prPreset') || 'github';
   const prCommand = prPreset === 'custom' ? text('prCommand') : prPresetCommand(prPreset);
   const gitlabPush = prPreset === 'gitlab-push';
-  const jiraAuth = text('jiraAuth');
-  const source = text('source') === 'github' ? 'github' : 'jira';
+  const jiraType = text('jiraType') === 'datacenter' ? 'datacenter' : 'cloud';
+  const jiraAuth = jiraType === 'cloud' ? 'basic' : 'bearer';
+  const jiraApiVersion = jiraType === 'cloud' ? '3' : '2';
+  const source = ['github', 'gitlab'].includes(text('source')) ? text('source') : 'jira';
   const project = text('project');
   const githubRepo = text('githubRepo');
-  const target = source === 'github' ? githubRepo : project;
+  const gitlabProject = text('gitlabProject');
+  const target = source === 'github' ? githubRepo : source === 'gitlab' ? gitlabProject : project;
   // Only trust the selection when it belongs to the source and target currently
   // in the form. A stale Jira selection must never become GitHub issue numbers.
   const issues = state.loadedSource === source
@@ -466,20 +479,22 @@ function formRequest({ dryRun = false } = {}) {
     source,
     project,
     githubRepo,
+    gitlabProject,
     githubLabel: text('githubLabel'),
     issues,
     base: text('base'),
     agentPreset,
     agentCmd,
     verifyCmd: state.config?.defaults?.verifyCommand ?? '',
+    jiraType,
     jiraUrl: text('jiraUrl'),
     // An email only matters for Basic auth; auto and bearer use the token alone.
-    jiraEmail: jiraAuth === 'basic' ? text('jiraEmail') : '',
+    jiraEmail: jiraType === 'cloud' ? text('jiraEmail') : '',
     jiraToken: text('jiraToken'),
     jiraAuth,
     jiraApiVersion: text('jiraApiVersion'),
-    jiraCa: text('jiraCa'),
-    jiraInsecure: checked('jiraInsecure'),
+    jiraCa: jiraType === 'datacenter' ? text('jiraCa') : '',
+    jiraInsecure: jiraType === 'datacenter' && checked('jiraInsecure'),
     prPreset,
     prCommand,
     gitlabPush,
@@ -496,6 +511,7 @@ function formRequest({ dryRun = false } = {}) {
 function trackerPayload(request = formRequest()) {
   return {
     source: request.source,
+    jiraType: request.jiraType,
     jiraUrl: request.jiraUrl,
     jiraEmail: request.jiraEmail,
     jiraToken: request.jiraToken,
@@ -504,7 +520,8 @@ function trackerPayload(request = formRequest()) {
     jiraCa: request.jiraCa,
     jiraInsecure: request.jiraInsecure,
     githubRepo: request.githubRepo,
-    githubLabel: request.githubLabel
+    githubLabel: request.githubLabel,
+    gitlabProject: request.gitlabProject
   };
 }
 
@@ -633,7 +650,12 @@ async function loadBugs({ force = false } = {}) {
   state.selectedIssues.clear();
 
   if (!target) {
-    renderBugPicker(source === 'github' ? 'Set a GitHub repository in Settings to load its issues.' : 'Pick a project in Settings to load its bugs.');
+    const targetHint = source === 'github'
+      ? 'Set a GitHub repository in Settings to load its issues.'
+      : source === 'gitlab'
+        ? 'Set a GitLab project in Settings to load its issues.'
+        : 'Pick a project in Settings to load its bugs.';
+    renderBugPicker(targetHint);
     updatePlan();
 
     if (el.startBtn.disabled) {
@@ -651,11 +673,12 @@ async function loadBugs({ force = false } = {}) {
   el.toggleBugs.disabled = true;
 
   try {
-    const result = await api(source === 'github' ? '/api/github/bugs' : '/api/jira/bugs', {
+    const endpoint = source === 'github' ? '/api/github/bugs' : source === 'gitlab' ? '/api/gitlab/bugs' : '/api/jira/bugs';
+    const result = await api(endpoint, {
       method: 'POST',
-      body: JSON.stringify(source === 'github'
-        ? { ...trackerPayload(), ignoreLabels: true }
-        : { ...trackerPayload(), project: target })
+      body: JSON.stringify(source === 'jira'
+        ? { ...trackerPayload(), project: target }
+        : { ...trackerPayload(), ignoreLabels: true })
     });
 
     if (requestId !== state.bugRequestId) {
@@ -688,7 +711,13 @@ function scheduleBugLoad() {
   state.bugLoadTimer = setTimeout(() => {
     const target = currentTarget();
 
-    if (currentSource() === 'github' ? /^[^/]+\/[^/]+$/.test(target) : /^[A-Za-z][A-Za-z0-9_]*$/.test(target)) {
+    const source = currentSource();
+    const valid = source === 'github'
+      ? /^[^/]+\/[^/]+$/.test(target)
+      : source === 'gitlab'
+        ? /^(https?:\/\/)?[^\s/]+(?:\/[^\s/]+){1,}$/.test(target)
+        : /^[A-Za-z][A-Za-z0-9_]*$/.test(target);
+    if (valid) {
       loadBugs();
     }
   }, 400);
@@ -737,7 +766,8 @@ function updatePlan() {
   updateScope();
 
   if (!project) {
-    setPlan([['scope', currentSource() === 'github' ? 'Set a GitHub repository in Settings.' : 'Pick a project in Settings.']]);
+    const hint = source === 'github' ? 'Set a GitHub repository in Settings.' : source === 'gitlab' ? 'Set a GitLab project in Settings.' : 'Pick a Jira project in Settings.';
+    setPlan([['scope', hint]]);
     return;
   }
 
@@ -751,12 +781,12 @@ function updatePlan() {
   const loaded = state.loadedSource === source && state.loadedTarget === project;
   const total = loaded ? state.issueKeys.length : 0;
   const selected = loaded ? selectedIssueKeys().length : 0;
-  let scope = source === 'github' ? `all open ${project} issues` : `all open ${project} bugs`;
+  let scope = source === 'jira' ? `all open ${project} bugs` : `all open ${project} issues`;
 
   if (total > 0) {
     scope = selected === total
-      ? `all ${total} ${project} ${source === 'github' ? 'issue' : 'bug'}${total === 1 ? '' : 's'}`
-      : `${selected} of ${total} ${project} ${source === 'github' ? 'issues' : 'bugs'}`;
+      ? `all ${total} ${project} ${source === 'jira' ? 'bug' : 'issue'}${total === 1 ? '' : 's'}`
+      : `${selected} of ${total} ${project} ${source === 'jira' ? 'bugs' : 'issues'}`;
   }
 
   const base = el.form.base.value.trim() || defaults.base || 'detected';
@@ -828,8 +858,34 @@ async function loadProjects({ announce = false } = {}) {
   }
 }
 
+function updateJiraTypeSettings() {
+  const isCloud = (el.form.jiraType?.value ?? 'cloud') !== 'datacenter';
+
+  if (el.jiraEmailField) el.jiraEmailField.classList.toggle('hidden', !isCloud);
+  if (el.jiraDatacenterTls) el.jiraDatacenterTls.classList.toggle('hidden', isCloud);
+  if (el.jiraCloudHint) el.jiraCloudHint.classList.toggle('hidden', !isCloud);
+  if (el.jiraDatacenterHint) el.jiraDatacenterHint.classList.toggle('hidden', isCloud);
+
+  if (el.jiraUrlLabel) {
+    el.jiraUrlLabel.textContent = isCloud ? 'Cloud URL' : 'Data Center URL';
+  }
+  if (el.form.jiraUrl) {
+    el.form.jiraUrl.placeholder = isCloud ? 'https://your-domain.atlassian.net' : 'https://jira.yourcompany.com';
+  }
+  if (el.jiraTokenLabel) {
+    el.jiraTokenLabel.textContent = isCloud ? 'API token' : 'Personal access token (PAT)';
+  }
+
+  if (el.form.jiraAuth) {
+    el.form.jiraAuth.value = isCloud ? 'basic' : 'bearer';
+  }
+  if (el.form.jiraApiVersion) {
+    el.form.jiraApiVersion.value = isCloud ? '3' : '2';
+  }
+}
+
 function toggleJiraEmail() {
-  el.jiraEmailField.classList.toggle('hidden', el.form.jiraAuth.value !== 'basic');
+  updateJiraTypeSettings();
 }
 
 async function checkJira() {
@@ -871,6 +927,18 @@ async function checkGitHub() {
   }
 }
 
+async function checkGitLab() {
+  el.gitlabCheckResult.textContent = 'checking…';
+  try {
+    const result = await api('/api/gitlab/health', { method: 'POST', body: JSON.stringify({}) });
+    el.gitlabCheckResult.textContent = result.ok
+      ? `OK${result.detail ? ` · ${result.detail}` : ''}`
+      : (result.error || 'GitLab check failed.');
+  } catch (error) {
+    el.gitlabCheckResult.textContent = error.message;
+  }
+}
+
 async function forgetGitHub() {
   try {
     await api('/api/settings', { method: 'POST', body: JSON.stringify({ githubRepo: '', githubLabel: '' }) });
@@ -889,24 +957,26 @@ async function forgetJira() {
     await api('/api/settings', {
       method: 'POST',
       body: JSON.stringify({
+        jiraType: 'cloud',
         jiraUrl: '',
         jiraEmail: '',
         jiraToken: '',
         jiraCa: '',
-        jiraAuth: '',
-        jiraApiVersion: '',
+        jiraAuth: 'basic',
+        jiraApiVersion: '3',
         jiraInsecure: false
       })
     });
 
+    if (el.form.jiraType) el.form.jiraType.value = 'cloud';
     for (const name of ['jiraUrl', 'jiraEmail', 'jiraToken', 'jiraCa']) {
       el.form[name].value = '';
     }
-    el.form.jiraAuth.value = '';
-    el.form.jiraApiVersion.value = '';
+    el.form.jiraAuth.value = 'basic';
+    el.form.jiraApiVersion.value = '3';
     el.form.jiraInsecure.checked = false;
     el.form.jiraToken.placeholder = '••••••••';
-    toggleJiraEmail();
+    updateJiraTypeSettings();
     state.loadedSource = '';
     state.issueBugs = [];
     state.issueKeys = [];
@@ -927,6 +997,7 @@ function settingsPayload() {
   const payload = {
     source: request.source,
     githubRepo: request.githubRepo,
+    gitlabProject: request.gitlabProject,
     project: request.project,
     base: request.base,
     agentPreset: request.agentPreset,
@@ -936,6 +1007,7 @@ function settingsPayload() {
     retryFailed: request.retryFailed,
     worktree: request.worktree,
     fetchBase: request.fetchBase,
+    jiraType: request.jiraType,
     jiraUrl: request.jiraUrl,
     jiraEmail: request.jiraEmail,
     jiraAuth: request.jiraAuth,
@@ -958,9 +1030,11 @@ function settingsPayload() {
 
 function updateSourceSettings() {
   const github = currentSource() === 'github';
-  el.jiraSettings.classList.toggle('hidden', github);
+  const gitlab = currentSource() === 'gitlab';
+  el.jiraSettings.classList.toggle('hidden', github || gitlab);
   el.githubSettings.classList.toggle('hidden', !github);
-  el.reloadProjects.disabled = github;
+  el.gitlabSettings.classList.toggle('hidden', !gitlab);
+  el.reloadProjects.disabled = github || gitlab;
 }
 
 function queueSettingsSave() {
@@ -1012,7 +1086,11 @@ async function startSweep({ dryRun = false } = {}) {
   const request = formRequest({ dryRun });
 
   if (!currentTarget(request.source)) {
-    el.formError.textContent = request.source === 'github' ? 'Set a GitHub repository in Settings first.' : 'Pick a Jira project in Settings first.';
+    el.formError.textContent = request.source === 'github'
+      ? 'Set a GitHub repository in Settings first.'
+      : request.source === 'gitlab'
+        ? 'Set a GitLab project in Settings first.'
+        : 'Pick a Jira project in Settings first.';
     el.formError.classList.remove('hidden');
     return;
   }
@@ -1124,7 +1202,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another enhancement…',
     answerPlaceholder: 'Type your answer, or approve the plan…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the enhancement below or start from a Jira issue. The agent asks one question at a time, drafts a plan, and after you approve it implements and verifies the change. When the report is ready the studio commits the change on its own branch and opens a merge request.'
+    emptyBody: 'Describe the enhancement below or start from a Jira, GitHub, or GitLab issue. The agent asks one question at a time, drafts a plan, and after you approve it implements and verifies the change. When the report is ready the studio commits the change on its own branch and opens a merge request.'
   },
   feature: {
     endpoint: '/api/features',
@@ -1134,7 +1212,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another feature…',
     answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the feature below or start from a Jira issue. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready you choose how to build it; the build commits to the session branch and opens a merge request.'
+    emptyBody: 'Describe the feature below or start from a Jira, GitHub, or GitLab issue. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready you choose how to build it; the build commits to the session branch and opens a merge request.'
   },
   merge: {
     endpoint: '/api/merges',
@@ -1193,13 +1271,18 @@ function createSession(flow) {
           ${flow === 'merge' ? '' : `
             <div class="session-import">
               <div class="session-import-row">
-                <label class="session-import-label" for="jira-${flow}">Start from Jira</label>
-                <select id="jira-${flow}" data-role="jira-select" disabled>
+                <label class="session-import-label" for="source-${flow}">Start from</label>
+                <select id="source-${flow}" data-role="issue-source" aria-label="Issue source">
+                  <option value="jira">Jira</option>
+                  <option value="github">GitHub</option>
+                  <option value="gitlab">GitLab</option>
+                </select>
+                <select id="issue-${flow}" data-role="issue-select" disabled>
                   <option value="">Load open issues…</option>
                 </select>
-                <button type="button" class="btn quiet sm" data-role="jira-load">Load issues</button>
+                <button type="button" class="btn quiet sm" data-role="issue-load">Load issues</button>
               </div>
-              <p class="session-import-status" data-role="jira-status" role="status"></p>
+              <p class="session-import-status" data-role="issue-status" role="status"></p>
               <label class="toggle session-publish">
                 <input type="checkbox" data-role="publish" checked>
                 <span>Create a branch, commit, and open a merge request</span>
@@ -1233,9 +1316,10 @@ function createSession(flow) {
     stop: q('stop'),
     stage: q('stage'),
     empty: q('empty'),
-    jiraSelect: q('jira-select'),
-    jiraLoad: q('jira-load'),
-    jiraStatus: q('jira-status'),
+    issueSource: q('issue-source'),
+    issueSelect: q('issue-select'),
+    issueLoad: q('issue-load'),
+    issueStatus: q('issue-status'),
     publish: q('publish'),
     richView: q('rich-view'),
     rawView: q('raw-view'),
@@ -1268,6 +1352,7 @@ function createSession(flow) {
     mergeMeta: null,
     setup: false
   };
+  view.issueChoices = [];
 
   function setStatus(text, live) {
     dom.badge.textContent = text;
@@ -1341,86 +1426,125 @@ function createSession(flow) {
     ].filter(Boolean).join('\n\n');
   }
 
-  async function loadJiraIssues() {
-    if (!dom.jiraLoad || !dom.jiraSelect) {
+  function syncIssueSource() {
+    if (!dom.issueSource) return;
+    const saved = state.config?.settings?.[`${flow}Source`] ?? 'jira';
+    dom.issueSource.value = ['jira', 'github', 'gitlab'].includes(saved) ? saved : 'jira';
+  }
+
+  async function saveIssueSource() {
+    if (!dom.issueSource) return;
+    const source = dom.issueSource.value;
+    try {
+      await api('/api/settings', { method: 'POST', body: JSON.stringify({ [`${flow}Source`]: source }) });
+      if (state.config?.settings) state.config.settings[`${flow}Source`] = source;
+    } catch (error) {
+      dom.issueStatus.textContent = `Could not save source: ${error.message}`;
+    }
+  }
+
+  async function loadExternalIssues() {
+    if (!dom.issueLoad || !dom.issueSelect) {
       return;
     }
 
-    dom.jiraLoad.disabled = true;
-    dom.jiraSelect.disabled = true;
-    dom.jiraStatus.textContent = 'Loading open issues…';
+    const source = dom.issueSource.value;
+    const settings = state.config?.settings ?? {};
+    const request = source === 'github'
+      ? { githubRepo: settings.githubRepo, ignoreLabels: true, limit: 100 }
+      : source === 'gitlab'
+        ? { gitlabProject: settings.gitlabProject, limit: 100 }
+        : { project: settings.project };
+    const target = source === 'github' ? request.githubRepo : source === 'gitlab' ? request.gitlabProject : request.project;
+    const endpoint = source === 'github' ? '/api/github/bugs' : source === 'gitlab' ? '/api/gitlab/issues' : '/api/jira/issues';
+
+    dom.issueLoad.disabled = true;
+    dom.issueSelect.disabled = true;
+    dom.issueStatus.textContent = 'Loading open issues…';
 
     try {
-      const result = await api('/api/jira/issues', {
+      if (!target) {
+        const label = source === 'github' ? 'GitHub repository' : source === 'gitlab' ? 'GitLab project' : 'Jira project';
+        dom.issueStatus.textContent = `Set a ${label} in Settings first.`;
+        return;
+      }
+      const result = await api(endpoint, {
         method: 'POST',
-        body: JSON.stringify({})
+        body: JSON.stringify(request)
       });
 
       if (!result.configured) {
-        dom.jiraStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
+        dom.issueStatus.textContent = result.error || `${source} is not configured. Check Settings.`;
         return;
       }
 
       if (result.error) {
-        dom.jiraStatus.textContent = result.error;
+        dom.issueStatus.textContent = result.error;
         return;
       }
 
-      const issues = result.issues ?? [];
+      const issues = source === 'github' ? (result.bugs ?? []) : (result.issues ?? []);
+      view.issueChoices = issues;
 
-      dom.jiraSelect.replaceChildren(new Option('Choose an issue…', ''));
+      dom.issueSelect.replaceChildren(new Option('Choose an issue…', ''));
 
       for (const issue of issues) {
-        dom.jiraSelect.append(new Option(`${issue.key} — ${issue.summary}`, issue.key));
+        dom.issueSelect.append(new Option(`${issue.key} — ${issue.summary}`, issue.key));
       }
 
-      dom.jiraSelect.disabled = issues.length === 0;
-      dom.jiraStatus.textContent = issues.length === 0
+      dom.issueSelect.disabled = issues.length === 0;
+      dom.issueStatus.textContent = issues.length === 0
         ? 'No open issues in the project.'
         : `${issues.length} open issue${issues.length === 1 ? '' : 's'}. Pick one to import.`;
     } catch (error) {
-      dom.jiraStatus.textContent = error.message;
+      dom.issueStatus.textContent = error.message;
     } finally {
-      dom.jiraLoad.disabled = false;
+      dom.issueLoad.disabled = false;
     }
   }
 
-  async function importJiraIssue() {
-    const key = dom.jiraSelect?.value;
+  async function importSelectedIssue() {
+    const key = dom.issueSelect?.value;
 
     if (!key) {
       return;
     }
 
-    dom.jiraSelect.disabled = true;
-    dom.jiraLoad.disabled = true;
-    dom.jiraStatus.textContent = `Loading ${key}…`;
+    const source = dom.issueSource.value;
+    dom.issueSelect.disabled = true;
+    dom.issueLoad.disabled = true;
+    dom.issueStatus.textContent = `Loading ${key}…`;
 
     try {
-      const result = await api('/api/jira/issue', {
-        method: 'POST',
-        body: JSON.stringify({ key })
-      });
+      let issue = view.issueChoices.find((candidate) => candidate.key === key);
+      if (source === 'jira') {
+        const result = await api('/api/jira/issue', { method: 'POST', body: JSON.stringify({ key }) });
 
-      if (!result.configured) {
-        dom.jiraStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
-        return;
+        if (!result.configured) {
+          dom.issueStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
+          return;
+        }
+
+        if (result.error || !result.issue) {
+          dom.issueStatus.textContent = result.error || `Jira issue ${key} was not found.`;
+          return;
+        }
+        issue = result.issue;
       }
 
-      if (result.error || !result.issue) {
-        dom.jiraStatus.textContent = result.error || `Jira issue ${key} was not found.`;
+      if (!issue) {
+        dom.issueStatus.textContent = `Issue ${key} is no longer in the loaded list. Reload issues.`;
         return;
       }
-
-      dom.input.value = issueBrief(result.issue);
+      dom.input.value = issueBrief(issue);
       autoGrow();
       dom.input.focus();
-      dom.jiraStatus.textContent = `Imported ${result.issue.key}. Edit it below and press Send.`;
+      dom.issueStatus.textContent = `Imported ${issue.key}. Edit it below and press Send.`;
     } catch (error) {
-      dom.jiraStatus.textContent = error.message;
+      dom.issueStatus.textContent = error.message;
     } finally {
-      dom.jiraSelect.disabled = false;
-      dom.jiraLoad.disabled = false;
+      dom.issueSelect.disabled = false;
+      dom.issueLoad.disabled = false;
     }
   }
 
@@ -2795,8 +2919,15 @@ function createSession(flow) {
   dom.rawBtn.addEventListener('click', () => setMode('raw'));
   dom.stop.addEventListener('click', stop);
   dom.finish?.addEventListener('click', finish);
-  dom.jiraLoad?.addEventListener('click', loadJiraIssues);
-  dom.jiraSelect?.addEventListener('change', importJiraIssue);
+  dom.issueLoad?.addEventListener('click', loadExternalIssues);
+  dom.issueSelect?.addEventListener('change', importSelectedIssue);
+  dom.issueSource?.addEventListener('change', () => {
+    view.issueChoices = [];
+    dom.issueSelect.replaceChildren(new Option('Load open issues…', ''));
+    dom.issueSelect.disabled = true;
+    dom.issueStatus.textContent = '';
+    saveIssueSource();
+  });
   // Approval is a security decision, not an interview answer: it keeps its own
   // explicit control instead of flowing through the composer.
   dom.richView.addEventListener('click', (event) => {
@@ -2859,6 +2990,7 @@ function createSession(flow) {
     restore,
     updateAgent,
     syncPublish,
+    syncIssueSource,
     refreshSetup: () => {
       if (flow === 'merge' && view.setup && !view.running) {
         renderMergeSetup(view.setupError ?? '');
@@ -3074,16 +3206,23 @@ async function loadConfig() {
     setFormValue('project', settings.project);
     setFormValue('source', settings.source);
     setFormValue('githubRepo', settings.githubRepo || config.github?.repo);
+    setFormValue('gitlabProject', settings.gitlabProject);
     el.githubInfo.textContent = config.github?.repo ? `GitHub CLI: ${config.github.repo}` : 'GitHub CLI: not configured';
     updateSourceSettings();
     setFormValue('base', settings.base);
-    setFormValue('jiraAuth', settings.jiraAuth);
-    setFormValue('jiraApiVersion', settings.jiraApiVersion);
+    const detectedJiraType = settings.jiraType || (
+      (settings.jiraAuth === 'bearer' || settings.jiraApiVersion === '2' || jira.auth === 'bearer')
+        ? 'datacenter'
+        : 'cloud'
+    );
+    setFormValue('jiraType', detectedJiraType);
+    setFormValue('jiraAuth', settings.jiraAuth || (detectedJiraType === 'datacenter' ? 'bearer' : 'basic'));
+    setFormValue('jiraApiVersion', settings.jiraApiVersion || (detectedJiraType === 'datacenter' ? '2' : '3'));
     setFormValue('jiraCa', settings.jiraCa);
     setFormValue('prCommand', settings.prCommand);
     setFormValue('jiraUrl', settings.jiraUrl || jira.url);
     setFormValue('jiraEmail', settings.jiraEmail || jira.email);
-    toggleJiraEmail();
+    updateJiraTypeSettings();
 
     el.form.jiraInsecure.checked = settings.jiraInsecure === true || jira.insecure === true;
     el.form.jiraToken.value = '';
@@ -3136,6 +3275,8 @@ async function loadConfig() {
     updatePlan();
     sessionViews.enhancement?.syncPublish?.();
     sessionViews.feature?.syncPublish?.();
+    sessionViews.enhancement?.syncIssueSource?.();
+    sessionViews.feature?.syncIssueSource?.();
     // The merge setup reads local branches from this config, so it refreshes
     // after a landing or a retry without leaving the tab.
     sessionViews.merge?.refreshSetup?.();
@@ -3230,6 +3371,8 @@ function init() {
   el.form.project.addEventListener('input', scheduleBugLoad);
   el.form.githubRepo.addEventListener('change', () => loadBugs());
   el.form.githubRepo.addEventListener('input', scheduleBugLoad);
+  el.form.gitlabProject.addEventListener('change', () => loadBugs());
+  el.form.gitlabProject.addEventListener('input', scheduleBugLoad);
   el.form.source.addEventListener('change', () => {
     updateSourceSettings();
     loadBugs({ force: true });
@@ -3238,6 +3381,7 @@ function init() {
   });
   el.checkJira.addEventListener('click', checkJira);
   el.checkGitHub.addEventListener('click', checkGitHub);
+  el.checkGitLab.addEventListener('click', checkGitLab);
   el.forgetGitHub.addEventListener('click', forgetGitHub);
   el.forgetJira.addEventListener('click', forgetJira);
   el.advancedToggle.addEventListener('click', toggleAdvanced);
@@ -3273,7 +3417,11 @@ function init() {
   el.copyLog.addEventListener('click', copyLog);
   el.form.agentPreset.addEventListener('change', toggleAgentCustom);
   el.form.prPreset.addEventListener('change', togglePrCustom);
-  el.form.jiraAuth.addEventListener('change', toggleJiraEmail);
+  el.form.jiraType?.addEventListener('change', () => {
+    updateJiraTypeSettings();
+    queueSettingsSave();
+  });
+  el.form.jiraAuth?.addEventListener('change', toggleJiraEmail);
 
   for (const item of $$('.nav-item')) {
     item.addEventListener('click', () => switchView(item.dataset.view));

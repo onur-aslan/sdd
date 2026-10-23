@@ -159,6 +159,7 @@ test('every supported preset uses its own native skill call, with no embedded-sk
   assert.match(buildSessionInstructions('enhancement', { agentPreset: 'cursor' }), /^\/enhancement/);
   assert.match(buildSessionInstructions('enhancement', { agentPreset: 'codex' }), /^Use the \$enhancement skill/);
   assert.match(buildSessionInstructions('enhancement', { agentPreset: 'opencode' }), /native skill tool/);
+  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'antigravity' }), /^\/enhancement/);
   assert.throws(() => buildSessionInstructions('enhancement'), /native skill-capable agent/);
   assert.throws(() => buildSessionInstructions('enhancement', { agentPreset: 'custom', skillText: '# silently embedded' }), /native skill-capable agent/);
 });

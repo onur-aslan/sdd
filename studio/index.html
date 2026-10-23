@@ -44,7 +44,7 @@
         </span>
         <span class="nav-copy">
           <span class="nav-title">Bug fixing</span>
-          <span class="nav-sub">Jira or GitHub, one at a time</span>
+          <span class="nav-sub">Jira, GitHub, or GitLab issues</span>
         </span>
       </button>
 
@@ -117,6 +117,7 @@
               <select form="sweep-form" name="source" id="bug-source">
                 <option value="jira">Jira</option>
                 <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
               </select>
             </label>
 
@@ -270,6 +271,11 @@
             <input form="sweep-form" name="githubRepo" placeholder="owner/repo" autocomplete="off">
           </label>
 
+          <label class="field hidden" id="gitlab-settings">
+            <span>GitLab project</span>
+            <input form="sweep-form" name="gitlabProject" placeholder="group/subgroup/project" autocomplete="off">
+          </label>
+
           <div class="grid-2">
             <label class="field">
               <span>Base branch <em>(blank = detected)</em></span>
@@ -312,44 +318,36 @@
 
         <section class="settings-section">
           <h3>Jira connection</h3>
-          <div class="grid-2">
-            <label class="field">
-              <span>Base URL</span>
-              <input form="sweep-form" name="jiraUrl" placeholder="https://jira.internal" autocomplete="off">
-            </label>
-            <label class="field">
-              <span>Personal access token</span>
-              <input form="sweep-form" name="jiraToken" type="password" placeholder="••••••••" autocomplete="off">
-            </label>
-          </div>
-          <p class="hint">A base URL and a personal access token are all a self-hosted Data Center or Server Jira needs. Email is only for Basic auth.</p>
-          <div class="grid-2">
-            <label class="field">
-              <span>Auth</span>
-              <select form="sweep-form" name="jiraAuth">
-                <option value="">auto (token ⇒ bearer)</option>
-                <option value="bearer">Bearer (personal access token)</option>
-                <option value="basic">Basic (email + password/token)</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>REST version</span>
-              <select form="sweep-form" name="jiraApiVersion">
-                <option value="">auto</option>
-                <option value="2">2 · Data Center / Server</option>
-                <option value="3">3 · Cloud</option>
-              </select>
-            </label>
-          </div>
-          <label class="field hidden" id="jira-email-field">
-            <span>Email <em>(basic auth only)</em></span>
-            <input form="sweep-form" name="jiraEmail" placeholder="you@team.com" autocomplete="off">
+          <label class="field">
+            <span>Deployment type</span>
+            <select form="sweep-form" name="jiraType" id="jira-type">
+              <option value="cloud">Jira Cloud</option>
+              <option value="datacenter">Jira Data Center / Server</option>
+            </select>
           </label>
           <label class="field">
-            <span>Internal CA <em>(PEM path)</em></span>
-            <input form="sweep-form" name="jiraCa" placeholder="path/to/jira-ca.pem" autocomplete="off">
+            <span id="jira-url-label">Cloud URL</span>
+            <input form="sweep-form" name="jiraUrl" id="jira-url" placeholder="https://your-domain.atlassian.net" autocomplete="off">
           </label>
-          <label class="toggle"><input form="sweep-form" type="checkbox" name="jiraInsecure"><span>Skip TLS verification <em class="muted">(unsafe)</em></span></label>
+          <label class="field" id="jira-email-field">
+            <span>Atlassian email</span>
+            <input form="sweep-form" name="jiraEmail" placeholder="you@company.com" autocomplete="off">
+          </label>
+          <label class="field" id="jira-token-field">
+            <span id="jira-token-label">API token</span>
+            <input form="sweep-form" name="jiraToken" type="password" placeholder="••••••••" autocomplete="off">
+          </label>
+          <p class="hint" id="jira-cloud-hint">Generate an API token at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noreferrer">id.atlassian.com</a>.</p>
+          <p class="hint hidden" id="jira-datacenter-hint">Generate a Personal Access Token (PAT) from your Jira profile (<strong>Profile &gt; Personal Access Tokens</strong>).</p>
+          <div id="jira-datacenter-tls" class="datacenter-tls hidden">
+            <label class="field">
+              <span>Internal CA <em>(PEM path)</em></span>
+              <input form="sweep-form" name="jiraCa" placeholder="path/to/jira-ca.pem" autocomplete="off">
+            </label>
+            <label class="toggle"><input form="sweep-form" type="checkbox" name="jiraInsecure"><span>Skip TLS verification <em class="muted">(unsafe)</em></span></label>
+          </div>
+          <input form="sweep-form" type="hidden" name="jiraAuth" id="jira-auth" value="basic">
+          <input form="sweep-form" type="hidden" name="jiraApiVersion" id="jira-api-version" value="3">
           <div class="settings-actions">
             <button type="button" class="btn" id="check-jira">Check Jira</button>
             <button type="button" class="btn quiet" id="forget-jira">Forget saved</button>
@@ -366,6 +364,16 @@
             <span class="check-result" id="github-check-result"></span>
           </div>
           <p class="hint" id="github-info">GitHub: not configured</p>
+        </section>
+
+        <section class="settings-section">
+          <h3>GitLab connection</h3>
+          <p class="hint">GitLab access uses your authenticated GitLab CLI (<code>glab</code>) account.</p>
+          <div class="settings-actions">
+            <button type="button" class="btn" id="check-gitlab">Check GitLab</button>
+            <span class="check-result" id="gitlab-check-result"></span>
+          </div>
+          <p class="hint">Install <a href="https://docs.gitlab.com/cli/" target="_blank" rel="noreferrer">GitLab CLI</a>, then sign in with <code>glab auth login</code>.</p>
         </section>
       </div>
 

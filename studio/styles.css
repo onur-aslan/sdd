@@ -2445,6 +2445,12 @@ input[type="checkbox"]:disabled {
   text-transform: uppercase;
 }
 
+.datacenter-tls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;

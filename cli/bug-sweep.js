@@ -4,6 +4,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { assertNativeSkillAvailable, buildNativeSkillCall, resolveNativeSkillAgent } from './native-skills.js';
+import { fetchGitLabIssues, normalizeGitLabProject, parseGitLabIssueKeys } from './gitlab-issues.js';
 
 export const DEFAULT_AGENT_COMMAND = '["claude","-p"]';
 export const DEFAULT_MAX_TURNS = 5;
@@ -52,6 +53,7 @@ const VALUE_FLAGS = new Set([
   '--github-label',
   '--github-api-url',
   '--github-state',
+  '--gitlab-project',
   '--source',
   '--pr-cmd',
   '--extra-fields'
@@ -84,18 +86,19 @@ export function formatBugSweepHelp() {
   return `Usage:
   sdd bug-sweep --project <KEY> [options]
 
-Fetch Jira or GitHub bugs in order, fix them one at a time with the bug-fix skill,
+Fetch Jira, GitHub, or GitLab bugs in order, fix them one at a time with the bug-fix skill,
 commit each successful fix, create one branch and one tag, then open a pull request.
 
 Required (one of):
   --project <KEY>          Jira project key, e.g. ABC
   --jql <query>            Custom JQL; --project is optional when the JQL names one
   --github-repo <repo>     GitHub repository, e.g. owner/repo (implies GitHub)
+  --gitlab-project <path>  GitLab group/project (implies GitLab)
   --issues <keys>          Fix only these bugs, comma-separated, e.g. ABC-1,ABC-2
-                           or 12,15 / GH-12,GH-15 for GitHub issues
+                           or 12,15 / GH-12,GH-15 / GL-12,GL-15 for forge issues
 
 Source:
-  --source <jira|github>   Bug source (default: jira, or github with --github-repo)
+  --source <jira|github|gitlab> Bug source (default: jira, inferred from repository flags)
 
 GitHub:
   --github-repo <repo>     GitHub repository, e.g. owner/repo or a GitHub URL
@@ -103,6 +106,10 @@ GitHub:
   --github-label <labels>  Only issues with all of these comma-separated labels
   --github-state <state>   open | closed | all (default: open)
   --github-api-url <url>   API base for GitHub Enterprise (default: ${DEFAULT_GITHUB_API_URL})
+
+GitLab:
+  --gitlab-project <path>  GitLab group/project or full project URL
+                           GitLab CLI (glab) must be installed and authenticated
 
 Sweep options:
   --date <YYYY-MM-DD>      Sweep date (default: today)
@@ -312,11 +319,11 @@ export function parseGitHubIssueKeys(value) {
 export function normalizeBugSource(value) {
   const source = String(value ?? 'jira').trim().toLowerCase();
 
-  if (source === 'jira' || source === 'github') {
+  if (source === 'jira' || source === 'github' || source === 'gitlab') {
     return source;
   }
 
-  throw new Error(`Invalid --source "${value}". Use jira or github.`);
+  throw new Error(`Invalid --source "${value}". Use jira, github, or gitlab.`);
 }
 
 export function normalizeGitHubRepo(value) {
@@ -793,7 +800,7 @@ export function parseBugSweepArgs(argv) {
   validateDate(date);
 
   const source = normalizeBugSource(
-    raw['--source'] ?? (raw['--github-repo'] ? 'github' : 'jira')
+    raw['--source'] ?? (raw['--github-repo'] ? 'github' : raw['--gitlab-project'] ? 'gitlab' : 'jira')
   );
   const jql = source === 'jira' ? raw['--jql'] ?? null : null;
   const projectFromJql = jql
@@ -803,9 +810,14 @@ export function parseBugSweepArgs(argv) {
   const githubRepo = source === 'github'
     ? normalizeGitHubRepo(raw['--github-repo'] ?? process.env.GITHUB_REPOSITORY ?? null)
     : null;
+  const gitlabProject = source === 'gitlab'
+    ? normalizeGitLabProject(raw['--gitlab-project'] ?? null)
+    : null;
   const issues = source === 'github'
     ? parseGitHubIssueKeys(raw['--issues'])
-    : parseIssueKeys(raw['--issues']);
+    : source === 'gitlab'
+      ? parseGitLabIssueKeys(raw['--issues'])
+      : parseIssueKeys(raw['--issues']);
 
   if (source === 'github') {
     if (!githubRepo) {
@@ -813,6 +825,12 @@ export function parseBugSweepArgs(argv) {
     }
 
     project = githubRepo;
+  } else if (source === 'gitlab') {
+    if (!gitlabProject) {
+      throw new Error('--gitlab-project is required for --source gitlab.');
+    }
+
+    project = gitlabProject.project;
   } else if (!project && !jql && issues.length === 0) {
     throw new Error('Either --project, --jql, or --issues is required.');
   }
@@ -830,6 +848,7 @@ export function parseBugSweepArgs(argv) {
     jql,
     issues,
     githubRepo,
+    gitlabProject,
     githubToken: source === 'github'
       ? raw['--github-token'] ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? null
       : null,
@@ -1192,7 +1211,7 @@ function escapeTableCell(value) {
 
 export function buildCommitMessage({ key, summary, how, url, source = 'jira' }) {
   const title = `fix(${key}): ${truncate(summary, 90)}`;
-  const tracker = source === 'github' ? 'Issue' : 'Jira';
+  const tracker = source === 'github' ? 'GitHub issue' : source === 'gitlab' ? 'GitLab issue' : 'Jira';
 
   return {
     title,
@@ -1201,7 +1220,7 @@ export function buildCommitMessage({ key, summary, how, url, source = 'jira' }) 
 }
 
 export function renderBugPrompt({ bug, maxTurns, resultFile }) {
-  const tracker = bug.source === 'github' ? 'GitHub' : 'Jira';
+  const tracker = bug.source === 'github' ? 'GitHub' : bug.source === 'gitlab' ? 'GitLab' : 'Jira';
   const status = bug.statusLabel ?? bug.jiraStatus ?? 'unknown';
   const lines = [
     '# Bug fix task',
@@ -1820,10 +1839,10 @@ export function formatSweepSummary(state, { prUrl = null, pushed = false } = {})
 function formatDryRun({ project, date, jql, branch, tag, bugs, source = 'jira', githubRepo = null, githubLabels = [], githubState = DEFAULT_GITHUB_STATE }) {
   const query = source === 'github'
     ? describeGitHubQuery({ repo: githubRepo, labels: githubLabels, state: githubState })
-    : jql;
+    : source === 'gitlab' ? `${project} · open issues` : jql;
   const lines = [
     `Bug sweep plan — ${project} (${date})`,
-    `${source === 'github' ? 'GitHub' : 'JQL'}: ${query}`,
+    `${source === 'github' ? 'GitHub' : source === 'gitlab' ? 'GitLab' : 'JQL'}: ${query}`,
     `Branch: ${branch}`,
     `Tag: ${tag}`,
     `Bugs: ${bugs.length}`
@@ -2585,7 +2604,7 @@ async function runSingleSweep(argv, dependencies = {}) {
   const now = dependencies.now ?? (() => new Date());
   const signal = dependencies.signal;
   const emit = dependencies.onEvent ?? (() => {});
-  const jira = options.source === 'github' ? null : resolveJiraConfig(options);
+  const jira = options.source === 'jira' ? resolveJiraConfig(options) : null;
   // Jira requests use node:https so an internal CA (--jira-ca) can be trusted per
   // request. Tests inject their own fetch through dependencies.fetchImpl.
   const fetchImpl = dependencies.fetchImpl
@@ -2600,6 +2619,7 @@ async function runSingleSweep(argv, dependencies = {}) {
       state: options.githubState
     })
     : null;
+  const gitlabQuery = options.source === 'gitlab' ? `${options.project} · open issues` : null;
   const workDir = path.resolve(cwd, options.workDir);
   const statePath = path.join(workDir, `state-${options.date}.json`);
   let state = null;
@@ -2608,12 +2628,12 @@ async function runSingleSweep(argv, dependencies = {}) {
     type: 'sweep-started',
     source: options.source,
     project: options.project,
-    repo: options.githubRepo,
+    repo: options.githubRepo ?? options.gitlabProject?.project,
     date: options.date,
     branch: options.branch,
     tag: options.tag,
     jql,
-    query: githubQuery ?? jql,
+    query: githubQuery ?? gitlabQuery ?? jql,
     dryRun: options.dryRun
   });
 
@@ -2646,7 +2666,9 @@ async function runSingleSweep(argv, dependencies = {}) {
 
   logger(options.source === 'github'
     ? `Fetching GitHub issues for ${options.githubRepo}...`
-    : `Fetching Jira bugs for ${options.project}...`);
+    : options.source === 'gitlab'
+      ? `Fetching GitLab issues for ${options.project}...`
+      : `Fetching Jira bugs for ${options.project}...`);
 
   let fetchedBugs;
 
@@ -2663,6 +2685,17 @@ async function runSingleSweep(argv, dependencies = {}) {
         // knows whether anything is still pending before it publishes.
         limit: Math.max(options.limit, DEFAULT_FETCH_LIMIT),
         fetchImpl
+      });
+      fetchedBugs = fetchedBugs.filter((bug) => !excludedKeys.includes(bug.key));
+    } else if (options.source === 'gitlab') {
+      fetchedBugs = await fetchGitLabIssues({
+        project: options.gitlabProject?.hostname
+          ? `https://${options.gitlabProject.hostname}/${options.gitlabProject.project}`
+          : options.gitlabProject?.project,
+        issues: options.issues,
+        limit: Math.max(options.limit, DEFAULT_FETCH_LIMIT),
+        cwd,
+        run: spawnImpl
       });
       fetchedBugs = fetchedBugs.filter((bug) => !excludedKeys.includes(bug.key));
     } else {
@@ -2682,8 +2715,9 @@ async function runSingleSweep(argv, dependencies = {}) {
       });
     }
   } catch (error) {
-    if (options.source === 'github') {
-      throw new Error(`Could not fetch GitHub issues: ${error.message}`);
+    if (options.source === 'github' || options.source === 'gitlab') {
+      const tracker = options.source === 'github' ? 'GitHub' : 'GitLab';
+      throw new Error(`Could not fetch ${tracker} issues: ${error.message}`);
     }
 
     const diagnosis = describeJiraError(error);
@@ -2691,7 +2725,7 @@ async function runSingleSweep(argv, dependencies = {}) {
     throw new Error(`Could not fetch Jira bugs: ${diagnosis.hint}`);
   }
 
-  const query = githubQuery ?? effectiveJql;
+  const query = githubQuery ?? gitlabQuery ?? effectiveJql;
 
   logger(`Found ${fetchedBugs.length} bug(s).`);
 

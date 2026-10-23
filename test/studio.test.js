@@ -285,11 +285,12 @@ test('formatStudioHelp documents the command', () => {
 });
 
 test('the studio offers a one-click agent choice and forwards it', () => {
-  assert.deepEqual(STUDIO_AGENT_PRESETS.map((agent) => agent.id), ['claude', 'cursor', 'opencode', 'codex', 'custom']);
+  assert.deepEqual(STUDIO_AGENT_PRESETS.map((agent) => agent.id), ['claude', 'cursor', 'opencode', 'codex', 'antigravity', 'custom']);
   assert.equal(STUDIO_AGENT_PRESETS[0].command, DEFAULT_AGENT_COMMAND);
   assert.match(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'claude').command, /claude/);
   assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command, '["cursor-agent","-p","--force","--output-format","stream-json"]');
   assert.deepEqual(JSON.parse(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'codex').command), ['codex', 'exec', '--json', '--skip-git-repo-check']);
+  assert.deepEqual(JSON.parse(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'antigravity').command), ['agy', '--dangerously-skip-permissions', '-p']);
   assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'custom').command, '');
 
   assert.deepEqual(
@@ -299,6 +300,10 @@ test('the studio offers a one-click agent choice and forwards it', () => {
   assert.deepEqual(
     buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command }),
     ['--project', 'ABC', '--agent-cmd', '["cursor-agent","-p","--force","--output-format","stream-json"]']
+  );
+  assert.deepEqual(
+    buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'antigravity').command }),
+    ['--project', 'ABC', '--agent-cmd', '["agy","--dangerously-skip-permissions","-p"]']
   );
 });
 
@@ -1430,6 +1435,36 @@ test('resolveStudioJira ignores an email unless Basic auth is selected', () => {
   });
 
   assert.equal(basic.email, 'bot@example.com');
+});
+
+test('resolveStudioJira defaults to basic auth and v3 for Jira Cloud', () => {
+  const cloud = resolveStudioJira({
+    jiraType: 'cloud',
+    jiraUrl: 'https://company.atlassian.net',
+    jiraToken: 'api-token',
+    jiraEmail: 'user@company.com'
+  });
+
+  assert.equal(cloud.jiraType, 'cloud');
+  assert.equal(cloud.auth, 'basic');
+  assert.equal(cloud.apiVersion, '3');
+  assert.equal(cloud.email, 'user@company.com');
+  assert.equal(cloud.token, 'api-token');
+});
+
+test('resolveStudioJira defaults to bearer auth, v2, and strips email for Jira Data Center', () => {
+  const dc = resolveStudioJira({
+    jiraType: 'datacenter',
+    jiraUrl: 'https://jira.company.com',
+    jiraToken: 'pat-token',
+    jiraEmail: 'unused@company.com'
+  });
+
+  assert.equal(dc.jiraType, 'datacenter');
+  assert.equal(dc.auth, 'bearer');
+  assert.equal(dc.apiVersion, '2');
+  assert.equal(dc.email, '');
+  assert.equal(dc.token, 'pat-token');
 });
 
 test('checkJiraHealth probes v2 with a bearer token', async () => {
