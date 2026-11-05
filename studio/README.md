@@ -42,22 +42,22 @@ Pick a bug source (**Jira**, **GitHub**, or **GitLab**) and a project or reposit
 
 The source selector only changes which target the queue loads. **Settings** keeps the Jira project, GitHub repository, and GitLab project available at all times, because the enhancement and feature **Start from** pickers use them independently of the bug sweep.
 
-The plan under the queue spells out the scope, branch, tag, base, verify command, and publish behavior that will be used:
+The plan under the queue spells out the scope, branch, base, verify command, and publish behavior that will be used:
 
 | Behavior | Default |
 | --- | --- |
-| Branch | `bug-fix/<date>` |
-| Tag | `bug-fix-<date>` |
+| Branch | `bug-fix/<git-user>/sdd-studio` (one persistent branch per user) |
+| Tag | None per run; a merge tag is created when the branch is merged |
 | Base | Detected from `origin/HEAD`, then `main` or `master` |
 | Agent | Claude Code (`claude -p`) |
 | Verify command | Detected from `package.json` |
 | Per-bug timeout | 1800 seconds |
 
-Dates, branch, tag, work directory, turn limit, and timeout are computed at run time and are not shown as fields.
+The date, branch owner, work directory, turn limit, and timeout are computed at run time and are not shown as fields. The owner is the git `user.name` plus a short hash of `user.email`, so the same name on two computers does not collide; `--branch-owner` overrides it.
 
 ### The run
 
-Each bug gets a fresh agent session, so a previous fix cannot leak into the next one. The agent edits the working tree; the command owns git, the tag, and the pull request. A fix that fails verification or the result contract is reset and recorded as not fixed, and the issue tracker is never modified.
+Each bug gets a fresh agent session, so a previous fix cannot leak into the next one. The agent edits the working tree; the command owns git, the optional tag, and the pull request. A fix that fails verification or the result contract is reset and recorded as not fixed, and the issue tracker is never modified.
 
 The run view shows each bug moving from pending to running to fixed, not fixed, or flagged for human review, with a progress ruler, the live agent log, **Stop run**, and the merge request link when the run finishes. Changes to authentication, payments, migrations, infrastructure, or CI/CD are force-flagged for review.
 
@@ -65,7 +65,7 @@ Only one run of any kind can execute at a time. A running sweep also holds the s
 
 ### Publishing
 
-The **Push branch** and **Open merge request** toggles decide where the run stops. With push off, the fixes stay on the local branch; with the merge request off, the branch is pushed without one.
+The **Publish** choice decides where the run stops: **Commit only** keeps the fixes on the local branch, **Push branch** pushes without a merge request, and **Push + pull request** does both. Invalid combinations cannot happen because push is implied by the merge request.
 
 The **Merge request** setting chooses the forge:
 
@@ -100,9 +100,9 @@ sdd bug-sweep --project ABC \
   --limit 20
 ```
 
-`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--resume` to continue an interrupted sweep, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
+`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. The persistent branch resumes automatically; `--resume` remains a compatibility flag. Pass `--tag <name>` only when you also want a per-run tag, and `--reset-branch` to archive and delete the branch after a squash merge. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
 
-Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The branch is created there and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. The temporary checkout is kept while bugs are pending so `--resume` can continue, and removed once the sweep publishes. The CLI runs in place unless you pass `--worktree`; the dashboard turns it on by default.
+Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The checkout path is stable per branch and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. A directory left behind by an interrupted run is removed, or replaced with a one-off fallback path if Windows still holds it; the next run reuses the registered checkout for the branch. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. It is kept while the branch is unmerged, so the next run — and the same user on another computer — continues in the same branch. When the branch is merged into the base, the next run leaves a merge tag, removes the checkout, deletes the branch and its state, and starts a fresh one. The default GitHub path also reads the pull request state, so a squash merge is detected even though git no longer sees the branch as an ancestor; on another forge, pass `--reset-branch` after a squash merge. The CLI runs in place unless you pass `--worktree`; the dashboard always uses an isolated worktree.
 
 The `bug-sweep` skill reports each outcome through a small JSON contract (`status`, `summary`, `how`, `critical`, `criticalReason`, `evidence`). The generated per-bug task file carries that contract. The skill runs `bug-fix` in a fresh subagent for the fix, then prepares the result as one JSON object. Both skills must be installed where the selected agent discovers skills; `sdd install` includes them.
 
@@ -116,7 +116,7 @@ There are two ways to start a sweep at midnight.
 sdd bug-sweep --project ABC --at 00:00 --every 1d
 ```
 
-`--at 00:00` waits for the next midnight, `--every 1d` repeats after each sweep, and `--run-now` starts immediately and then repeats. The process must stay alive, so run it in a terminal, tmux, systemd, or another service manager. Each iteration computes its own date, so the branch, tag, and PR are dated to that night. A failed sweep is logged and the schedule continues; a lock file stops a new run from overlapping a running one.
+`--at 00:00` waits for the next midnight, `--every 1d` repeats after each sweep, and `--run-now` starts immediately and then repeats. The process must stay alive, so run it in a terminal, tmux, systemd, or another service manager. Each iteration computes its own date for the report and merge tag, and continues the single per-user bug-fix branch instead of creating a new one. A failed sweep is logged and the schedule continues; a lock file stops a new run from overlapping a running one.
 
 **2. Let the operating system start a one-shot sweep.**
 
@@ -130,7 +130,7 @@ sdd bug-sweep --project ABC --at 00:00 --every 1d
 schtasks /Create /TN "sdd-bug-sweep" /SC DAILY /ST 00:00 /TR "cmd /c cd /d C:\path\to\repo && sdd bug-sweep --project ABC"
 ```
 
-Keep `JIRA_BASE_URL` and `JIRA_API_TOKEN` in the scheduler's environment or a private env file rather than in the scheduled command line. Add `JIRA_AUTH`, `JIRA_API_VERSION`, and `JIRA_CA_CERT` when the Jira server needs them (see below). Because `--date` is not passed, each run picks up the current date on its own.
+Keep `JIRA_BASE_URL` and `JIRA_API_TOKEN` in the scheduler's environment or a private env file rather than in the scheduled command line. Add `JIRA_AUTH`, `JIRA_API_VERSION`, and `JIRA_CA_CERT` when the Jira server needs them (see below). Because `--date` is not passed, each run picks up the current date for its report and merge tag; the branch itself stays the same.
 
 #### Air-gapped Jira
 
@@ -165,14 +165,14 @@ sdd jira-check --project ABC --json
 
 #### Internal Git instead of GitHub
 
-`--pr` uses the GitHub CLI by default. On GitLab, Gitea, or Bitbucket, pass `--pr-cmd`. A plain command runs through the shell and reads `SDD_PR_TITLE`, `SDD_PR_BODY`, `SDD_PR_BODY_FILE`, `SDD_PR_BASE`, `SDD_PR_HEAD`, and `SDD_PR_REMOTE`:
+The sweep uses the GitHub CLI by default. On GitLab, Gitea, or Bitbucket, pass `--pr-cmd`. A plain command runs through the shell and reads `SDD_PR_TITLE`, `SDD_PR_BODY`, `SDD_PR_BODY_FILE`, `SDD_PR_BASE`, `SDD_PR_HEAD`, `SDD_PR_REMOTE`, `SDD_PR_PROJECT`, `SDD_PR_DATE`, and `SDD_PR_URL` (the previous merge request URL, empty on the first run):
 
 ```bash
 sdd bug-sweep --project ABC \
   --pr-cmd 'glab mr create --title "$SDD_PR_TITLE" --description "$(cat $SDD_PR_BODY_FILE)" --source-branch "$SDD_PR_HEAD" --target-branch "$SDD_PR_BASE"'
 ```
 
-A JSON array runs without a shell, so the same value works on Windows and POSIX. It supports `{title}`, `{body}`, `{bodyFile}`, `{base}`, `{head}`, `{remote}`, `{project}`, and `{date}`, and must print the merge request URL.
+A JSON array runs without a shell, so the same value works on Windows and POSIX. It supports `{title}`, `{body}`, `{bodyFile}`, `{base}`, `{head}`, `{remote}`, `{project}`, `{date}`, and `{url}`, and must print the merge request URL. Since the sweep branch is persistent, make the command update the existing merge request when `SDD_PR_URL`/`{url}` is set instead of creating a second one; the built-in GitHub path already updates in place.
 
 GitLab can also create the merge request without any extra CLI: `--gitlab-push` attaches `merge_request.create`, `target`, `title`, and `description` as git push options, and the URL is read from the `remote:` lines that GitLab prints back. The server must advertise push-options support (GitLab does by default; Gitea and Forgejo do not). Pick it when `glab` is not installed on the air-gapped machine:
 
@@ -191,7 +191,7 @@ Both tabs run a guided interview as a conversation. Describe the change, and the
 
 A session may read the repository to ground its questions. A feature session may write exactly one file, its spec. An enhancement may not create, modify, or delete anything before the plan is approved; after approval it changes only what the plan names and never commits, pushes, or opens a merge request.
 
-The **Create a branch, commit, and open a merge request** toggle lets the studio publish the session result when it finishes. It is on by default and follows the **Push branch** and **Open merge request** settings; the agent itself still never commits.
+The **Create a branch, commit, and open a merge request** toggle lets the studio publish the session result when it finishes. It is on by default and follows the **Publish** choice; the agent itself still never commits.
 
 **Stop** ends a session early. The conversation stays readable, and the composer then starts a new one. Reloading the page reconnects to a running session.
 
@@ -232,14 +232,12 @@ The Jira token is stored locally but never returned to the browser. The API only
 | Bug source, Jira project, GitHub repository, GitLab project | Where the queue loads bugs and issues |
 | Base branch | Blank uses the detected branch |
 | Agent, custom agent command | Which coding agent runs the workflow |
-| Isolated worktree, Fetch base | Sweep isolation and remote refresh |
-| Push branch, Open merge request | Where publishing stops |
-| Retry failed bugs | Retries bugs a previous sweep could not fix |
+| Publish | Commit only, push branch, or push + merge request |
 | Merge request preset, custom command | Which forge creates the merge request |
 | Jira deployment type, URL, email, token, auth mode, API version, CA, skip TLS | Jira connection |
 | Enhancement/Feature issue source | Per-tab tracker choice, saved separately for each |
 
-**Resume last run** is a per-run choice and is not saved. Everything else a human decides is remembered.
+The sweep always uses an isolated worktree, fetches the base branch, resumes the single per-user bug-fix branch, and retries failed bugs. These are automatic and are not stored as choices.
 
 Settings opens automatically on the first visit, while the project is still empty.
 
@@ -311,7 +309,7 @@ The dashboard is also usable as a small local API. All routes are JSON unless no
 - The server listens on localhost only by default. Do not expose it to a network.
 - The token lives in `.sdd/studio.settings.json`, which is git-ignored and never sent back to the browser.
 - Sweeps never force-push and never modify the issue tracker.
-- The isolated worktree is on by default, so your own checkout — including uncommitted changes — is never touched.
+- The isolated worktree is on by default, so your own checkout — including uncommitted changes — is never touched. Its checkout and branch are kept until the branch is merged.
 - Merge landing never pushes and never creates a merge commit.
 
 ---

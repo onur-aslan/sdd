@@ -1,7 +1,9 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { assertNativeSkillAvailable, buildNativeSkillCall, resolveNativeSkillAgent } from './native-skills.js';
 import { fetchGitLabIssues, normalizeGitLabProject, parseGitLabIssueKeys } from './gitlab-issues.js';
@@ -34,6 +36,7 @@ const VALUE_FLAGS = new Set([
   '--date',
   '--base',
   '--branch',
+  '--branch-owner',
   '--tag',
   '--agent-cmd',
   '--verify-cmd',
@@ -62,6 +65,7 @@ const VALUE_FLAGS = new Set([
 const BOOLEAN_FLAGS = new Set([
   '--resume',
   '--retry-failed',
+  '--reset-branch',
   '--dry-run',
   '--no-push',
   '--no-pr',
@@ -87,7 +91,7 @@ export function formatBugSweepHelp() {
   sdd bug-sweep --project <KEY> [options]
 
 Fetch Jira, GitHub, or GitLab bugs in order, fix them one at a time through the bug-sweep skill,
-commit each successful fix, create one branch and one tag, then open a pull request.
+commit each successful fix to one persistent branch, and open or update its pull request.
 
 Required (one of):
   --project <KEY>          Jira project key, e.g. ABC
@@ -114,10 +118,13 @@ GitLab:
 Sweep options:
   --date <YYYY-MM-DD>      Sweep date (default: today)
   --base <ref>             Base branch (default: auto-detect origin/HEAD, main, or master)
+  --branch <name>          Branch to reuse (default: bug-fix/<owner>/sdd-studio)
+  --branch-owner <name>    Override the owner used in the default branch name
+                           (default: git user name plus a short e-mail hash)
+  --tag <name>             Optional per-run tag; by default no tag is created
+                           and a merge tag is left when the branch is merged
   --fetch-base             Fetch the base branch from --remote first, so the sweep
                            starts from the up-to-date remote-tracking ref (origin/<base>)
-  --branch <name>          Default: bug-fix/<date>
-  --tag <name>             Default: bug-fix-<date>
   --limit <n>              Maximum bugs to fix in this run (default: ${DEFAULT_LIMIT});
                            the branch, tag, and PR wait until nothing is pending
   --max-turns <n>          Attempt limit passed to the bug-fix subagent (default: ${DEFAULT_MAX_TURNS})
@@ -129,8 +136,10 @@ Sweep options:
 Isolation:
   --worktree               Create a separate git worktree under <work-dir>/worktrees/
                            and fix bugs there, so your own checkout is never touched
-                           and may stay dirty. The worktree is removed once the sweep
-                           publishes; on --resume it is reattached. Without this flag
+                           and may stay dirty. The worktree is tied to the sweep
+                           branch and kept while that branch is unmerged, so the next
+                           run (and the same user on another computer) continues the
+                           same branch. It is removed when the branch is merged. Without this flag
                            the sweep runs directly in your working tree and refuses
                            a dirty one.
 
@@ -151,8 +160,11 @@ Scheduling:
                            "sdd bug-sweep --project ABC" at 00:00 instead.
 
 Recovery:
-  --resume                 Continue an existing sweep instead of starting over
+  --resume                 Continue an existing sweep; the persistent branch resumes
+                           automatically, so this is mainly a compatibility flag
   --retry-failed           Retry bugs a previous run reported as not fixed
+  --reset-branch           Archive and delete the current sweep branch, even when
+                           git cannot see the merge (for example after a squash merge)
 
 Publishing:
   --remote <name>          Git remote (default: origin)
@@ -160,10 +172,12 @@ Publishing:
   --no-pr                  Do not open or update a pull request
   --pr-cmd <command>       Replace the GitHub CLI. A plain command runs through the
                            shell and reads SDD_PR_TITLE, SDD_PR_BODY, SDD_PR_BODY_FILE,
-                           SDD_PR_BASE, SDD_PR_HEAD, SDD_PR_REMOTE, SDD_PR_PROJECT, and
-                           SDD_PR_DATE. A JSON array runs without a shell and supports
+                           SDD_PR_BASE, SDD_PR_HEAD, SDD_PR_REMOTE, SDD_PR_PROJECT,
+                           SDD_PR_DATE, and SDD_PR_URL (the previous MR URL, empty on
+                           the first run). A JSON array runs without a shell and supports
                            {title}, {body}, {bodyFile}, {base}, {head}, {remote},
-                           {project}, and {date}. Either form must print the MR URL.
+                           {project}, {date}, and {url}. Either form must print the MR URL;
+                           reuse {url}/SDD_PR_URL to update instead of creating a duplicate.
                            Example: "glab mr create --title \\"$SDD_PR_TITLE\\" ..."
   --gitlab-push            Create the merge request with git push options instead of a
                            CLI: merge_request.create, target, title, and description.
@@ -835,11 +849,16 @@ export function parseBugSweepArgs(argv) {
     throw new Error('Either --project, --jql, or --issues is required.');
   }
 
-  const branch = raw['--branch'] ?? `bug-fix/${date}`;
-  const tag = raw['--tag'] ?? `bug-fix-${date}`;
+  const branch = raw['--branch'] ?? null;
+  const tag = raw['--tag'] ?? null;
 
-  validateGitName(branch, '--branch');
-  validateGitName(tag, '--tag');
+  if (branch) {
+    validateGitName(branch, '--branch');
+  }
+
+  if (tag) {
+    validateGitName(tag, '--tag');
+  }
 
   return {
     help: false,
@@ -860,6 +879,8 @@ export function parseBugSweepArgs(argv) {
     date,
     base: raw['--base'] ?? null,
     branch,
+    branchOwner: raw['--branch-owner'] ?? process.env.SDD_BRANCH_OWNER ?? null,
+    branchExplicit: raw['--branch'] !== undefined,
     tag,
     agentCommand: normalizeAgentCommand(raw['--agent-cmd'] ?? DEFAULT_AGENT_COMMAND),
     verifyCommand: raw['--verify-cmd'] ?? null,
@@ -879,6 +900,7 @@ export function parseBugSweepArgs(argv) {
     extraFields: source === 'jira' ? parseCsv(raw['--extra-fields']) : [],
     resume: Boolean(raw['--resume']),
     retryFailed: Boolean(raw['--retry-failed']),
+    resetBranch: Boolean(raw['--reset-branch']),
     worktree: Boolean(raw['--worktree']),
     fetchBase: Boolean(raw['--fetch-base']),
     gitlabPush: Boolean(raw['--gitlab-push']),
@@ -1347,15 +1369,40 @@ export function buildSpawnSpec(invocation, platform = process.platform) {
 
 function terminateProcess(child) {
   if (!child || child.killed) {
-    return;
+    return Promise.resolve();
   }
 
   if (process.platform === 'win32' && child.pid) {
-    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true
+    // taskkill kills the whole tree; await it so a descendant cannot keep the
+    // worktree directory locked after the sweep moves on.
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(guard);
+          resolve();
+        }
+      };
+
+      let killer;
+
+      try {
+        killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true
+        });
+      } catch {
+        resolve();
+        return;
+      }
+
+      // Never stall the sweep if taskkill itself misbehaves.
+      const guard = setTimeout(finish, 5000);
+
+      killer.once('close', finish);
+      killer.once('error', finish);
     });
-    return;
   }
 
   try {
@@ -1363,6 +1410,8 @@ function terminateProcess(child) {
   } catch {
     // The process may already be gone.
   }
+
+  return Promise.resolve();
 }
 
 export function runProcess(command, args, options = {}) {
@@ -1386,15 +1435,23 @@ export function runProcess(command, args, options = {}) {
     let stderr = '';
     let timedOut = false;
     let aborted = options.signal?.aborted === true;
+    let terminating = null;
+    const stopChild = () => {
+      if (!terminating) {
+        terminating = terminateProcess(child);
+      }
+
+      return terminating;
+    };
     const timer = options.timeoutMs
       ? setTimeout(() => {
         timedOut = true;
-        terminateProcess(child);
+        stopChild();
       }, options.timeoutMs)
       : null;
     const onAbort = () => {
       aborted = true;
-      terminateProcess(child);
+      stopChild();
     };
 
     if (options.signal) {
@@ -1414,7 +1471,10 @@ export function runProcess(command, args, options = {}) {
 
     const onClose = (code) => {
       cleanup();
-      resolve({ code: code ?? 1, stdout, stderr, timedOut, aborted });
+      // Let taskkill finish before the caller can remove the working directory.
+      Promise.resolve(terminating).then(() => {
+        resolve({ code: code ?? 1, stdout, stderr, timedOut, aborted });
+      });
     };
 
     child.stdout?.on('data', (chunk) => {
@@ -1511,7 +1571,21 @@ function stripRemotePrefix(base, remote = 'origin') {
 export async function resolveRemoteBase(cwd, base, { remote = 'origin', fetchBase = false, logger = () => {} } = {}) {
   const name = stripRemotePrefix(base, remote);
 
-  if (!name || name === 'HEAD') {
+  if (!name) {
+    return base;
+  }
+
+  if (name === 'HEAD') {
+    // A persistent branch outlives the checkout that created it. Resolve HEAD
+    // to the branch name while the caller is still on the base branch, so a
+    // later run can tell whether the sweep branch was merged.
+    const head = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true });
+    const headName = head.stdout.trim();
+
+    if (head.code === 0 && headName && headName !== 'HEAD') {
+      return resolveRemoteBase(cwd, headName, { remote, fetchBase, logger });
+    }
+
     return base;
   }
 
@@ -1526,6 +1600,64 @@ export async function resolveRemoteBase(cwd, base, { remote = 'origin', fetchBas
   const remoteRef = `${remote}/${name}`;
 
   return (await refExists(cwd, `refs/remotes/${remoteRef}`)) ? remoteRef : name;
+}
+
+async function gitConfigValue(cwd, key) {
+  const result = await git(cwd, ['config', '--get', key], { allowFailure: true });
+
+  return result.code === 0 ? result.stdout.trim() : '';
+}
+
+function slugifyOwner(value) {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .replace(/-{2,}/g, '-');
+}
+
+// Keep the branch readable but unique per git user without putting the full
+// e-mail address into a public ref. The short hash prevents two "Onur" users
+// from sharing a branch.
+export async function resolveBranchOwner(cwd, override = null) {
+  if (override) {
+    return slugifyOwner(override) || 'local';
+  }
+
+  const [name, email] = await Promise.all([
+    gitConfigValue(cwd, 'user.name'),
+    gitConfigValue(cwd, 'user.email')
+  ]);
+  let fallback = '';
+
+  if (!name && !email) {
+    try {
+      fallback = os.userInfo().username;
+    } catch {
+      fallback = '';
+    }
+  }
+
+  const base = slugifyOwner(name || email.split('@')[0] || fallback) || 'local';
+  const hash = email
+    ? createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 4)
+    : '';
+
+  return hash ? `${base}-${hash}` : base;
+}
+
+export async function resolveSweepBranch(cwd, options = {}) {
+  const owner = await resolveBranchOwner(cwd, options.branchOwner);
+
+  return `bug-fix/${owner}/sdd-studio`;
+}
+
+export function mergeTagName(branch, date) {
+  const slug = branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+
+  return `${slug || 'bug-fix'}-merged-${date}`;
 }
 
 async function changedFiles(cwd) {
@@ -1567,51 +1699,122 @@ async function registeredWorktrees(cwd) {
     return [];
   }
 
-  return result.stdout
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => path.resolve(line.slice('worktree '.length).trim()));
+  const entries = [];
+  let current = null;
+
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) {
+      current = { path: path.resolve(line.slice('worktree '.length).trim()), branch: null };
+      entries.push(current);
+    } else if (line.startsWith('branch ') && current) {
+      current.branch = line.slice('branch '.length).trim();
+    } else if (line === '') {
+      current = null;
+    }
+  }
+
+  return entries;
+}
+
+// A run-specific suffix is only a fallback: the normal path is stable per
+// branch so the next run and the same user on another machine reuse the same
+// checkout (and the agent keeps its path-based trust).
+function worktreeRunSuffix() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+
+  return `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${randomUUID().slice(0, 4)}`;
+}
+
+function uniqueWorktreePath(workDir, branch) {
+  return path.join(workDir, 'worktrees', `${worktreeSlug(branch)}-${worktreeRunSuffix()}`);
+}
+
+function managedWorktreePath(workDir, branch) {
+  return path.join(workDir, 'worktrees', worktreeSlug(branch));
+}
+
+function isManagedWorktree(workDir, target) {
+  const root = path.resolve(workDir, 'worktrees');
+  const resolved = path.resolve(target);
+  const normalize = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+
+  return normalize(resolved).startsWith(`${normalize(root)}${path.sep}`);
+}
+
+// Windows may keep a directory locked briefly after the agent exits. Retry
+// before giving up; the caller can fall back to a one-off path.
+function removePathBestEffort(target, logger) {
+  if (!target || !fs.existsSync(target)) {
+    return true;
+  }
+
+  try {
+    fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  } catch (error) {
+    logger(`Could not remove the worktree at ${target}: ${error.message}`);
+  }
+
+  return !fs.existsSync(target);
 }
 
 // Fix bugs in a separate checkout so the user's own working tree is never touched.
 // The branch is created in the new worktree and shared through the same .git store,
 // so commits, tags, and pushes work exactly as they do in place.
-async function prepareGitWorktree({ repoRoot, workDir, options, baseRef, logger }) {
-  const target = path.join(workDir, 'worktrees', worktreeSlug(options.branch));
+async function prepareGitWorktree({ repoRoot, workDir, options, baseRef, state, logger }) {
+  // Drop registrations whose directories disappeared outside of Git.
+  await git(repoRoot, ['worktree', 'prune'], { allowFailure: true });
+
   const known = await registeredWorktrees(repoRoot);
+  const existing = known.find((entry) => entry.branch === `refs/heads/${options.branch}`);
   const branchExists = await refExists(repoRoot, `refs/heads/${options.branch}`);
+
+  if (existing) {
+    if (!isManagedWorktree(workDir, existing.path)) {
+      throw new Error(`Branch ${options.branch} is checked out outside the sweep worktree at ${existing.path}. Switch that checkout to another branch, choose another --branch, or remove the old worktree.`);
+    }
+
+    state.worktree = existing.path;
+    logger(`Reusing the isolated worktree at ${existing.path}.`);
+
+    return existing.path;
+  }
+
+  if (branchExists && !options.resume) {
+    throw new Error(`Branch ${options.branch} already exists. Use --resume, choose another --branch, or remove the old worktree.`);
+  }
+
+  if (!branchExists && !(await refExists(repoRoot, baseRef))) {
+    throw new Error(`Base ref ${baseRef} does not exist.`);
+  }
+
+  if (!branchExists && options.resume) {
+    logger(`Branch ${options.branch} does not exist yet; creating it from ${baseRef}.`);
+  }
+
+  let target = managedWorktreePath(workDir, options.branch);
+
+  if (fs.existsSync(target)) {
+    // A stale directory without a Git registration. Try to remove it, but fall
+    // back to a one-off path if Windows still holds it.
+    if (!removePathBestEffort(target, logger)) {
+      target = uniqueWorktreePath(workDir, options.branch);
+      while (fs.existsSync(target)) {
+        target = uniqueWorktreePath(workDir, options.branch);
+      }
+      logger(`Using a fallback worktree at ${target}.`);
+    }
+  }
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
 
   if (branchExists) {
-    if (!options.resume) {
-      throw new Error(`Branch ${options.branch} already exists. Use --resume, choose another --branch, or remove the old worktree.`);
-    }
-
-    if (!known.includes(path.resolve(target))) {
-      if (fs.existsSync(target)) {
-        fs.rmSync(target, { recursive: true, force: true });
-      }
-      await git(repoRoot, ['worktree', 'add', target, options.branch]);
-    }
+    await git(repoRoot, ['worktree', 'add', target, options.branch]);
   } else {
-    if (options.resume) {
-      throw new Error(`--resume was requested but branch ${options.branch} does not exist.`);
-    }
-
-    if (!(await refExists(repoRoot, baseRef))) {
-      throw new Error(`Base ref ${baseRef} does not exist.`);
-    }
-
-    if (known.includes(path.resolve(target))) {
-      await git(repoRoot, ['worktree', 'remove', '--force', target], { allowFailure: true });
-    } else if (fs.existsSync(target)) {
-      fs.rmSync(target, { recursive: true, force: true });
-    }
-
     await git(repoRoot, ['worktree', 'add', '-b', options.branch, target, baseRef]);
   }
 
+  state.worktree = target;
   logger(`Using an isolated worktree at ${target}.`);
 
   return target;
@@ -1626,9 +1829,233 @@ async function removeGitWorktree(repoRoot, target, logger) {
 
   if (result.code === 0) {
     logger(`Removed the worktree at ${target}.`);
+  } else if (fs.existsSync(target)) {
+    // Git could not delete the directory (usually a Windows handle). Fall back
+    // to a retrying Node removal; never fail a finished sweep over cleanup.
+    if (removePathBestEffort(target, logger)) {
+      logger(`Removed the worktree at ${target}.`);
+    }
   }
 
   await git(repoRoot, ['worktree', 'prune'], { allowFailure: true });
+}
+
+function issueKeyFromSubject(subject) {
+  const match = /^fix\(([A-Z][A-Z0-9_]*-\d+)\)/.exec(String(subject).trim());
+
+  return match ? match[1] : null;
+}
+
+async function readBranchFixEntries(cwd, baseRef, branch) {
+  const result = await git(cwd, ['log', '--format=%H%x09%s', `${baseRef}..refs/heads/${branch}`], { allowFailure: true });
+
+  if (result.code !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const [commit, ...rest] = line.split('\t');
+      const subject = rest.join('\t');
+      const key = issueKeyFromSubject(subject);
+
+      if (!key) {
+        return null;
+      }
+
+      return {
+        key,
+        summary: subject.replace(/^fix\([^)]+\):\s*/, '') || key,
+        commit
+      };
+    })
+    .filter(Boolean);
+}
+
+// The state file is local and git-ignored. On another computer the branch
+// commits are the only record of what was already fixed, so fold the issue keys
+// from the commit subjects into the state.
+function reconcileBranchFixes(state, entries) {
+  const known = new Set(state.bugs.map((bug) => bug.key));
+
+  for (const entry of entries) {
+    if (known.has(entry.key)) {
+      continue;
+    }
+
+    state.bugs.push({
+      key: entry.key,
+      summary: entry.summary,
+      description: '',
+      priority: null,
+      jiraStatus: null,
+      statusLabel: null,
+      labels: [],
+      url: null,
+      source: state.source,
+      tracker: state.source === 'github' ? 'GitHub' : state.source === 'gitlab' ? 'GitLab' : 'Jira',
+      status: 'fixed',
+      fixSummary: entry.summary,
+      how: '',
+      critical: false,
+      criticalReason: '',
+      evidence: [],
+      commit: entry.commit
+    });
+    known.add(entry.key);
+  }
+}
+
+async function isAncestor(cwd, ancestor, descendant) {
+  const result = await git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant], { allowFailure: true });
+
+  return result.code === 0;
+}
+
+// A squash merge rewrites history, so the branch is not an ancestor of the base
+// even though its pull request is merged. Ask the forge when the default GitHub
+// CLI is in use; ignore failures so an offline or unauthenticated run still works.
+export async function detectMergedPullRequest({ cwd, options, run = runProcess }) {
+  if (!options.pr || options.prCommand || options.gitlabPush) {
+    return false;
+  }
+
+  let result;
+
+  try {
+    result = await run('gh', ['pr', 'view', options.branch, '--json', 'state,mergedAt'], {
+      cwd,
+      timeoutMs: 60000
+    });
+  } catch {
+    return false;
+  }
+
+  if (!result || result.code !== 0) {
+    return false;
+  }
+
+  try {
+    return JSON.parse(result.stdout).state === 'MERGED';
+  } catch {
+    return false;
+  }
+}
+
+// A merged branch is a finished queue. Leave an immutable tag, remove the
+// checkout and the branch, and delete the state so the next run starts clean.
+async function resetMergedBranch({ cwd, workDir, options, baseRef, state, statePath, logger, force = false, prMerged = false }) {
+  const localRef = `refs/heads/${options.branch}`;
+  const remoteRef = `refs/remotes/${options.remote}/${options.branch}`;
+  const localExists = await refExists(cwd, localRef);
+  const remoteExists = await refExists(cwd, remoteRef);
+
+  if (!localExists && !remoteExists) {
+    return false;
+  }
+
+  if (!(await refExists(cwd, baseRef))) {
+    return false;
+  }
+
+  // A detached HEAD is a fixed commit, not a branch that can advance; comparing
+  // against it would either miss the merge or produce a false positive.
+  if (baseRef === 'HEAD') {
+    return false;
+  }
+
+  const localMerged = localExists && await isAncestor(cwd, localRef, baseRef);
+  const remoteMerged = remoteExists && await isAncestor(cwd, remoteRef, baseRef);
+  const merged = force || prMerged || (localExists && remoteExists
+    ? localMerged && remoteMerged
+    : localExists
+      ? localMerged
+      : remoteMerged);
+
+  if (!merged) {
+    return false;
+  }
+
+  // A brand-new branch is an ancestor of its base because they point at the
+  // same commit. Only call that a merge when the state proves the branch had a
+  // sweep in progress; otherwise it is just an empty branch. A forced reset or
+  // a merged pull request is explicit, so it skips this guard.
+  if (!state && !force && !prMerged) {
+    const tipRef = localExists ? localRef : remoteRef;
+    const tip = await git(cwd, ['rev-parse', '--verify', '--quiet', tipRef], { allowFailure: true });
+    const baseTip = await git(cwd, ['rev-parse', '--verify', '--quiet', baseRef], { allowFailure: true });
+
+    if (tip.code === 0 && baseTip.code === 0 && tip.stdout.trim() === baseTip.stdout.trim()) {
+      return false;
+    }
+  }
+
+  const known = await registeredWorktrees(cwd);
+  const existing = known.find((entry) => entry.branch === localRef);
+
+  if (existing && !isManagedWorktree(workDir, existing.path)) {
+    throw new Error(`Branch ${options.branch} is ${force ? 'being reset' : 'merged'} but checked out at ${existing.path}. Switch that checkout to another branch so the sweep can reset it.`);
+  }
+
+  const tipRef = localExists ? localRef : remoteRef;
+  const tip = await git(cwd, ['rev-parse', '--verify', '--quiet', tipRef], { allowFailure: true });
+
+  if (tip.code === 0 && tip.stdout.trim()) {
+    const tag = mergeTagName(options.branch, options.date);
+
+    if (!(await refExists(cwd, `refs/tags/${tag}`))) {
+      const created = await git(cwd, ['tag', '-a', tag, '-m', `Bug fix branch ${options.branch} merged`, tip.stdout.trim()], { allowFailure: true });
+
+      if (created.code !== 0) {
+        logger(`Could not create merge tag ${tag}; leaving ${options.branch} in place.`);
+        return false;
+      }
+
+      logger(`Created merge tag ${tag}.`);
+    }
+
+    const pushed = await git(cwd, ['push', options.remote, tag], { allowFailure: true });
+
+    if (pushed.code !== 0) {
+      logger(`Could not push merge tag ${tag}; it remains local.`);
+    }
+  }
+
+  if (existing && isManagedWorktree(workDir, existing.path)) {
+    await removeGitWorktree(cwd, existing.path, logger);
+  }
+
+  await git(cwd, ['branch', '-D', options.branch], { allowFailure: true });
+
+  if (remoteExists) {
+    const deletedRemote = await git(cwd, ['push', options.remote, '--delete', options.branch], { allowFailure: true });
+
+    if (deletedRemote.code !== 0) {
+      logger(`Could not delete ${options.remote}/${options.branch}; it may need a manual push --delete.`);
+    }
+  }
+
+  // The push deletes the branch on the server but not the local tracking ref.
+  await git(cwd, ['update-ref', '-d', remoteRef], { allowFailure: true });
+
+  if (await refExists(cwd, localRef)) {
+    logger(`Could not delete ${options.branch}; leaving its state in place for the next run.`);
+    return false;
+  }
+
+  try {
+    fs.rmSync(statePath, { force: true });
+  } catch {
+    // The state is ignored; a locked file will be replaced by the next run.
+  }
+
+  logger(force
+    ? `Archived and reset the sweep branch ${options.branch}.`
+    : `Branch ${options.branch} was merged into ${baseRef}; starting a fresh sweep branch.`);
+
+  return true;
 }
 
 let activeLockPath = null;
@@ -1800,7 +2227,7 @@ export function renderPrBody({ project, date, branch, tag, bugs }) {
     }
   }
 
-  lines.push('', `Branch: \`${branch}\` · Tag: \`${tag}\``);
+  lines.push('', tag ? `Branch: \`${branch}\` · Tag: \`${tag}\`` : `Branch: \`${branch}\``);
 
   return `${lines.join('\n')}\n`;
 }
@@ -1811,7 +2238,7 @@ export function formatSweepSummary(state, { prUrl = null, pushed = false } = {})
   const lines = [
     `Bug sweep ${state.date} — ${state.project}`,
     `Branch: ${state.branch}`,
-    `Tag: ${state.tag}`,
+    `Tag: ${state.tag ?? '—'}`,
     `Fixed: ${fixed.length}/${state.bugs.length}`
   ];
 
@@ -1826,8 +2253,10 @@ export function formatSweepSummary(state, { prUrl = null, pushed = false } = {})
     }
   }
 
-  if (prUrl) {
-    lines.push(`PR: ${prUrl}`);
+  const knownPrUrl = prUrl ?? state.prUrl ?? null;
+
+  if (knownPrUrl) {
+    lines.push(`PR: ${knownPrUrl}`);
   } else if (!pushed) {
     lines.push('Not pushed; no pull request was created.');
   }
@@ -1843,7 +2272,7 @@ function formatDryRun({ project, date, jql, branch, tag, bugs, source = 'jira', 
     `Bug sweep plan — ${project} (${date})`,
     `${source === 'github' ? 'GitHub' : source === 'gitlab' ? 'GitLab' : 'JQL'}: ${query}`,
     `Branch: ${branch}`,
-    `Tag: ${tag}`,
+    `Tag: ${tag ?? '—'}`,
     `Bugs: ${bugs.length}`
   ];
 
@@ -2132,7 +2561,7 @@ async function ensureGhCli(cwd) {
   }
 }
 
-const PR_PLACEHOLDER = /\{(title|body|bodyFile|base|head|remote|project|date)\}/g;
+const PR_PLACEHOLDER = /\{(title|body|bodyFile|base|head|remote|project|date|url)\}/g;
 
 function fillPrPlaceholders(value, context) {
   return value.replace(PR_PLACEHOLDER, (_, key) => context[key] ?? '');
@@ -2152,7 +2581,8 @@ export async function openMergeRequest({ cwd, options, state, title, bodyFile, l
     SDD_PR_HEAD: options.branch,
     SDD_PR_REMOTE: options.remote,
     SDD_PR_PROJECT: state.project,
-    SDD_PR_DATE: state.date
+    SDD_PR_DATE: state.date,
+    SDD_PR_URL: state.prUrl ?? ''
   };
   const command = options.prCommand.trim();
   let result;
@@ -2178,7 +2608,8 @@ export async function openMergeRequest({ cwd, options, state, title, bodyFile, l
       head: options.branch,
       remote: options.remote,
       project: state.project,
-      date: state.date
+      date: state.date,
+      url: state.prUrl ?? ''
     };
     const [file, ...args] = argv.map((entry) => fillPrPlaceholders(entry, context));
 
@@ -2413,7 +2844,7 @@ async function publish({ cwd, options, state, workDir, logger }) {
     return { pushed: false, prUrl: null };
   }
 
-  if (!(await refExists(cwd, `refs/tags/${options.tag}`))) {
+  if (options.tag && !(await refExists(cwd, `refs/tags/${options.tag}`))) {
     await git(cwd, ['tag', '-a', options.tag, '-m', `Bug fix sweep ${state.date}`]);
     logger(`Created tag ${options.tag}.`);
   }
@@ -2423,7 +2854,8 @@ async function publish({ cwd, options, state, workDir, logger }) {
   }
 
   const bodyFile = path.join(workDir, `pr-${options.date}.md`);
-  const title = `fix: Jira bug sweep ${state.project} ${state.date} (${fixed.length} fixed)`;
+  const tracker = state.source === 'github' ? 'GitHub' : state.source === 'gitlab' ? 'GitLab' : 'Jira';
+  const title = `fix: ${tracker} bug sweep ${state.project} (${fixed.length} fixed)`;
   let body = null;
 
   if (options.pr) {
@@ -2439,8 +2871,12 @@ async function publish({ cwd, options, state, workDir, logger }) {
 
   const branchPush = await git(cwd, buildBranchPushArgs({ options, state, title, body }));
 
-  await git(cwd, ['push', options.remote, options.tag]);
-  logger(`Pushed ${options.branch} and ${options.tag}.`);
+  if (options.tag) {
+    await git(cwd, ['push', options.remote, options.tag]);
+    logger(`Pushed ${options.branch} and ${options.tag}.`);
+  } else {
+    logger(`Pushed ${options.branch}.`);
+  }
 
   if (!options.pr) {
     return { pushed: true, prUrl: null };
@@ -2475,7 +2911,7 @@ async function publish({ cwd, options, state, workDir, logger }) {
 
   if (existing.code === 0 && existing.stdout.trim()) {
     const prUrl = existing.stdout.trim();
-    const edited = await runProcess('gh', ['pr', 'edit', options.branch, '--body-file', bodyFile], {
+    const edited = await runProcess('gh', ['pr', 'edit', options.branch, '--title', title, '--body-file', bodyFile], {
       cwd,
       timeoutMs: 60000
     });
@@ -2572,6 +3008,10 @@ export async function runBugSweep(argv, dependencies = {}) {
       return formatBugSweepHelp();
     }
 
+    if (preflight.resetBranch) {
+      throw new Error('--reset-branch cannot be combined with --at or --every. Run it once, then resume the schedule.');
+    }
+
     if (!preflight.dryRun) {
       const cwd = dependencies.cwd ?? process.cwd();
       const agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, preflight.agentCommand);
@@ -2598,6 +3038,9 @@ async function runSingleSweep(argv, dependencies = {}) {
   const cwd = dependencies.cwd ?? process.cwd();
   options.agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, options.agentCommand);
   if (!options.dryRun) assertNativeSkillAvailable(cwd, options.agentPreset, 'bug-sweep');
+  if (!options.branch) {
+    options.branch = await resolveSweepBranch(cwd, options);
+  }
   const logger = dependencies.logger ?? ((line) => process.stderr.write(`${line}\n`));
   const spawnImpl = dependencies.spawnImpl ?? runProcess;
   const now = dependencies.now ?? (() => new Date());
@@ -2620,8 +3063,10 @@ async function runSingleSweep(argv, dependencies = {}) {
     : null;
   const gitlabQuery = options.source === 'gitlab' ? `${options.project} · open issues` : null;
   const workDir = path.resolve(cwd, options.workDir);
-  const statePath = path.join(workDir, `state-${options.date}.json`);
+  const statePath = path.join(workDir, `state-${worktreeSlug(options.branch)}.json`);
   let state = null;
+  let baseRef = options.base ?? 'HEAD';
+  let branchFixEntries = [];
 
   emit({
     type: 'sweep-started',
@@ -2645,22 +3090,92 @@ async function runSingleSweep(argv, dependencies = {}) {
     prepareWorkDir(workDir);
     acquireLock(workDir, now);
 
-    if (options.resume) {
-      state = readState(statePath);
+    // The sweep branch is shared through the remote, so a run on another
+    // computer can continue the same work. Fetch it before reading the state.
+    const remoteBranch = `${options.remote}/${options.branch}`;
 
-      if (!state) {
-        throw new Error(`--resume was requested but ${statePath} does not exist.`);
+    await git(cwd, ['fetch', options.remote, options.branch], { allowFailure: true });
+
+    let localBranchExists = await refExists(cwd, `refs/heads/${options.branch}`);
+    let remoteBranchExists = await refExists(cwd, `refs/remotes/${remoteBranch}`);
+
+    if (!localBranchExists && remoteBranchExists) {
+      await git(cwd, ['branch', options.branch, remoteBranch]);
+      localBranchExists = true;
+      logger(`Checked out ${options.branch} from ${remoteBranch}.`);
+    }
+
+    state = readState(statePath);
+
+    if (state && !localBranchExists && !remoteBranchExists) {
+      // The branch is gone; its previous fixes cannot be continued, so the
+      // saved queue would only skip bugs that are no longer on the branch.
+      logger(`The sweep branch ${options.branch} no longer exists; starting a new sweep.`);
+      fs.rmSync(statePath, { force: true });
+      state = null;
+    } else if (state) {
+      logger(`Continuing the sweep on ${options.branch}.`);
+    } else if (options.resume) {
+      logger(`No saved sweep for ${options.branch}; starting a new one.`);
+    }
+
+    const detectedBase = (options.base && options.base !== 'HEAD' ? options.base : state?.base)
+      ?? options.base
+      ?? await detectBaseBranch(cwd);
+
+    baseRef = await resolveRemoteBase(cwd, detectedBase, {
+      remote: options.remote,
+      fetchBase: options.fetchBase,
+      logger
+    });
+
+    if (localBranchExists || remoteBranchExists) {
+      const prMerged = options.resetBranch
+        ? false
+        : await detectMergedPullRequest({ cwd, options, run: spawnImpl });
+      const reset = await resetMergedBranch({
+        cwd,
+        workDir,
+        options,
+        baseRef,
+        state,
+        statePath,
+        logger,
+        force: options.resetBranch,
+        prMerged
+      });
+
+      if (reset) {
+        state = null;
+        localBranchExists = await refExists(cwd, `refs/heads/${options.branch}`);
+        remoteBranchExists = await refExists(cwd, `refs/remotes/${options.remote}/${options.branch}`);
       }
+    }
+
+    if (state || localBranchExists) {
+      options.resume = true;
+    }
+
+    if (localBranchExists) {
+      branchFixEntries = await readBranchFixEntries(cwd, baseRef, options.branch);
     }
   }
 
   // On resume, bugs that are already actioned are left out of the query so the next run
-  // can reach bugs that an earlier --limit cut off.
+  // can reach bugs that an earlier --limit cut off. Commit subjects are a second
+  // source of truth, so a fresh checkout on another computer does not re-fix them.
   const excludedKeys = state
     ? state.bugs
       .filter((bug) => bug.status === 'fixed' || (bug.status === 'not-fixed' && !options.retryFailed))
       .map((bug) => bug.key)
     : [];
+
+  for (const entry of branchFixEntries) {
+    if (!excludedKeys.includes(entry.key)) {
+      excludedKeys.push(entry.key);
+    }
+  }
+
   const effectiveJql = options.source === 'jira' ? buildResumeJql(jql, excludedKeys) : null;
 
   logger(options.source === 'github'
@@ -2759,8 +3274,6 @@ async function runSingleSweep(argv, dependencies = {}) {
   }
 
   if (!state) {
-    const detectedBase = options.base ?? await detectBaseBranch(cwd);
-
     state = {
       version: 1,
       source: options.source,
@@ -2769,24 +3282,21 @@ async function runSingleSweep(argv, dependencies = {}) {
       date: options.date,
       branch: options.branch,
       tag: options.tag,
-      base: stripRemotePrefix(await resolveBaseRef(cwd, detectedBase), options.remote),
+      base: stripRemotePrefix(baseRef, options.remote),
       startedAt: now().toISOString(),
       updatedAt: now().toISOString(),
       phase: 'running',
       bugs: []
     };
-  } else if (state.base === 'HEAD') {
-    state.base = stripRemotePrefix(await resolveBaseRef(cwd, state.base), options.remote);
+  } else {
+    state.date = options.date;
+    state.branch = options.branch;
+    state.tag = options.tag;
+    state.base = stripRemotePrefix(baseRef, options.remote);
+    state.phase = 'running';
   }
 
-  // state.base stays the plain branch name for the PR; the checkout starts from
-  // the remote-tracking ref when one exists (`--fetch-base` refreshes it first).
-  const baseRef = await resolveRemoteBase(cwd, state.base, {
-    remote: options.remote,
-    fetchBase: options.fetchBase,
-    logger
-  });
-
+  reconcileBranchFixes(state, branchFixEntries);
   mergeBugs(state, fetchedBugs, { retryFailed: options.retryFailed });
 
   // Everything below runs in `activeDir`: the repository itself, or an isolated
@@ -2800,6 +3310,7 @@ async function runSingleSweep(argv, dependencies = {}) {
       workDir,
       options,
       baseRef,
+      state,
       logger
     });
     activeDir = worktreePath;
@@ -2811,7 +3322,7 @@ async function runSingleSweep(argv, dependencies = {}) {
     await git(cwd, ['checkout', options.branch]);
   } else {
     if (options.resume) {
-      throw new Error(`--resume was requested but branch ${options.branch} does not exist.`);
+      logger(`Branch ${options.branch} does not exist yet; creating it from ${baseRef}.`);
     }
 
     if (!(await refExists(cwd, baseRef))) {
@@ -2821,14 +3332,16 @@ async function runSingleSweep(argv, dependencies = {}) {
     await git(cwd, ['checkout', '-b', options.branch, baseRef]);
   }
 
-  const tagExists = await refExists(activeDir, `refs/tags/${options.tag}`);
+  if (options.tag) {
+    const tagExists = await refExists(activeDir, `refs/tags/${options.tag}`);
 
-  if (tagExists && !options.resume) {
-    throw new Error(`Tag ${options.tag} already exists. Use --resume or choose another --tag.`);
-  }
+    if (tagExists && !options.resume) {
+      throw new Error(`Tag ${options.tag} already exists. Use --resume or choose another --tag.`);
+    }
 
-  if (tagExists) {
-    logger(`Tag ${options.tag} already exists and will not be moved.`);
+    if (tagExists) {
+      logger(`Tag ${options.tag} already exists and will not be moved.`);
+    }
   }
 
   writeState(statePath, state, now);
@@ -2915,7 +3428,7 @@ async function runSingleSweep(argv, dependencies = {}) {
 
     fs.writeFileSync(path.join(workDir, `report-${options.date}.md`), summary, 'utf8');
 
-    return `${summary}\nReached --limit ${options.limit} with ${pendingCount} bug(s) still pending. Run again with --resume to continue; the tag and pull request wait until the sweep finishes.\n`;
+    return `${summary}\nReached --limit ${options.limit} with ${pendingCount} bug(s) still pending. Run again with --resume to continue; the worktree and tag/PR wait until the sweep finishes.\n`;
   }
 
   if (fixedCount === 0) {
@@ -2925,7 +3438,6 @@ async function runSingleSweep(argv, dependencies = {}) {
     const summary = formatSweepSummary(state);
 
     fs.writeFileSync(path.join(workDir, `report-${options.date}.md`), summary, 'utf8');
-    await removeGitWorktree(cwd, worktreePath, logger);
 
     return `${summary}\nNo commits were created, so the tag and pull request were skipped.\n`;
   }
@@ -2943,6 +3455,7 @@ async function runSingleSweep(argv, dependencies = {}) {
     state.phase = 'publish-failed';
     throw error;
   } finally {
+    state.prUrl = publication.prUrl ?? state.prUrl ?? null;
     writeState(statePath, state, now);
   }
 
@@ -2957,7 +3470,6 @@ async function runSingleSweep(argv, dependencies = {}) {
   const summary = formatSweepSummary(state, publication);
 
   fs.writeFileSync(path.join(workDir, `report-${options.date}.md`), summary, 'utf8');
-  await removeGitWorktree(cwd, worktreePath, logger);
 
   return summary;
 }

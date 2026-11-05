@@ -24,6 +24,7 @@ import {
   normalizeGitHubRepo,
   probeGitHub,
   probeJira,
+  resolveSweepBranch,
   runBugSweep,
   runProcess
 } from './bug-sweep.js';
@@ -273,6 +274,24 @@ export function parseStudioArgs(argv = []) {
   return { help: false, port, host, open };
 }
 
+// One publish choice replaces the old push/pr toggles. Existing clients that
+// still send the booleans keep working, and an explicit publish always wins.
+export function normalizePublish(publish, request = {}) {
+  if (publish === 'commit' || publish === 'push' || publish === 'pr') {
+    return publish;
+  }
+
+  if (request.push === false) {
+    return 'commit';
+  }
+
+  if (request.pr === false) {
+    return 'push';
+  }
+
+  return 'pr';
+}
+
 // Turn a dashboard request into the exact argv "sdd bug-sweep" understands.
 export function buildSweepArgs(request = {}) {
   const args = [];
@@ -358,12 +377,15 @@ export function buildSweepArgs(request = {}) {
   if (request.verbose) {
     args.push('--verbose');
   }
-  if (request.push === false) {
-    args.push('--no-push');
-  }
-  if (request.pr === false) {
+
+  const publish = normalizePublish(request.publish, request);
+
+  if (publish === 'commit') {
+    args.push('--no-push', '--no-pr');
+  } else if (publish === 'push') {
     args.push('--no-pr');
   }
+
   if (request.jiraInsecure) {
     args.push('--jira-insecure');
   }
@@ -676,13 +698,19 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     }
 
     const id = randomUUID();
+    const publishChoice = normalizePublish(saved.publish, saved);
     const publish = config.id === 'merge'
       ? null
       : createSessionPublishPlan({
         flow: config.id,
         brief,
         id,
-        request: { publish: request.publish, base: request.base, push: request.push, pr: request.pr },
+        request: {
+          publish: request.publish,
+          base: request.base,
+          push: request.push ?? (publishChoice !== 'commit'),
+          pr: request.pr ?? (publishChoice === 'pr')
+        },
         saved
       });
     const job = {
@@ -1435,11 +1463,11 @@ const SETTINGS_KEYS = [
   'base',
   'agentPreset',
   'agentCmd',
+  // One publishing choice replaced the push/pr toggles. The old booleans stay
+  // readable so an existing settings file keeps its behaviour on upgrade.
+  'publish',
   'push',
   'pr',
-  'retryFailed',
-  'worktree',
-  'fetchBase',
   'jiraType',
   'jiraUrl',
   'jiraEmail',
@@ -1997,7 +2025,7 @@ export async function checkJiraHealth(input = {}, saved = {}) {
 
 async function buildConfig({ cwd, version }) {
   const git = await describeGit(cwd);
-  const date = todayLocal();
+  const branch = await resolveSweepBranch(cwd);
   let detectedGitHubRepo = '';
 
   try {
@@ -2039,8 +2067,8 @@ async function buildConfig({ cwd, version }) {
       verifyCommand: detectVerifyCommand(cwd),
       base: git.base ?? '',
       fetchBase: true,
-      branch: `bug-fix/${date}`,
-      tag: `bug-fix-${date}`
+      branch,
+      tag: null
     }
   };
 }

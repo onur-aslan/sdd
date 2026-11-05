@@ -328,7 +328,7 @@ function handleEvent(event) {
       break;
     case 'sweep-started':
       el.runTitle.textContent = event.dryRun ? 'Dry run' : `Fixing bugs in ${event.project}`;
-      el.runMeta.textContent = `${event.branch} · tag ${event.tag} · ${event.date}`;
+      el.runMeta.textContent = [event.branch, event.tag ? `tag ${event.tag}` : null, event.date].filter(Boolean).join(' · ');
       break;
     case 'bugs-found':
       renderBugs(event.bugs ?? []);
@@ -345,7 +345,7 @@ function handleEvent(event) {
       updateProgress();
       break;
     case 'publishing':
-      el.runMeta.textContent = 'Publishing branch, tag, and pull request…';
+      el.runMeta.textContent = 'Publishing branch and pull request…';
       break;
     case 'sweep-finished':
       if (event.prUrl) {
@@ -391,13 +391,6 @@ function attach(jobId) {
   source.onmessage = (message) => handleEvent(JSON.parse(message.data));
   source.onopen = () => setConnection('live', 'live');
   source.onerror = () => setConnection('down', 'reconnecting');
-}
-
-function localDate() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 function agentPresets() {
@@ -460,6 +453,7 @@ function formRequest({ dryRun = false } = {}) {
   const jiraAuth = jiraType === 'cloud' ? 'basic' : 'bearer';
   const jiraApiVersion = jiraType === 'cloud' ? '3' : '2';
   const source = ['github', 'gitlab'].includes(text('source')) ? text('source') : 'jira';
+  const publish = ['commit', 'push', 'pr'].includes(text('publish')) ? text('publish') : 'pr';
   const project = text('project');
   const githubRepo = text('githubRepo');
   const gitlabProject = text('gitlabProject');
@@ -496,12 +490,15 @@ function formRequest({ dryRun = false } = {}) {
     prCommand,
     gitlabPush,
     dryRun,
-    resume: checked('resume'),
-    retryFailed: checked('retryFailed'),
-    worktree: checked('worktree'),
-    fetchBase: checked('fetchBase'),
-    push: checked('push'),
-    pr: checked('pr')
+    publish,
+    // The sweep is always isolated and always starts from a fresh base. The
+    // single per-user branch resumes when possible, and failed bugs are retried.
+    resume: true,
+    retryFailed: true,
+    worktree: true,
+    fetchBase: true,
+    push: publish !== 'commit',
+    pr: publish === 'pr'
   };
 }
 
@@ -731,7 +728,7 @@ function updateScope() {
   const bits = [
     project ? `${source === 'github' ? 'repository' : 'project'} ${project}` : (source === 'github' ? 'no repository' : 'no project'),
     `base ${base || 'detected'}`,
-    el.form.worktree.checked ? 'isolated worktree' : 'working tree'
+    'isolated worktree'
   ];
 
   el.scopeMeta.textContent = bits.join('  ·  ');
@@ -769,12 +766,10 @@ function updatePlan() {
   }
 
   const defaults = state.config?.defaults ?? {};
-  const date = localDate();
-  const branch = defaults.branch || `bug-fix/${date}`;
-  const tag = defaults.tag || `bug-fix-${date}`;
+  const branch = defaults.branch || 'bug-fix/<git-user>/sdd-studio';
+  const tag = defaults.tag || '';
   const verify = defaults.verifyCommand || '';
-  const push = el.form.push.checked;
-  const pr = el.form.pr.checked;
+  const publish = el.form.publish?.value || 'pr';
   const loaded = state.loadedSource === source && state.loadedTarget === project;
   const total = loaded ? state.issueKeys.length : 0;
   const selected = loaded ? selectedIssueKeys().length : 0;
@@ -787,41 +782,33 @@ function updatePlan() {
   }
 
   const base = el.form.base.value.trim() || defaults.base || 'detected';
-  const baseBits = [base];
+  const baseBits = [base, 'fetch first', 'isolated worktree'];
+  let publishLabel = 'commit only';
 
-  if (el.form.fetchBase.checked) {
-    baseBits.push('fetch first');
-  }
-  if (el.form.worktree.checked) {
-    baseBits.push('isolated worktree');
-  }
-
-  let publish = 'no push';
-
-  if (push && pr) {
+  if (publish === 'push') {
+    publishLabel = 'push branch only';
+  } else if (publish === 'pr') {
     const prPreset = el.form.prPreset?.value || 'github';
 
     if (prPreset === 'gitlab-push') {
-      publish = 'push + merge request (git push options)';
+      publishLabel = 'push + merge request (git push options)';
     } else if (prPreset === 'custom') {
-      publish = 'push + merge request (custom command)';
+      publishLabel = 'push + merge request (custom command)';
     } else {
       const forge = prPresets().find((preset) => preset.id === prPreset);
 
-      publish = prPreset === 'github'
+      publishLabel = prPreset === 'github'
         ? 'push + pull request'
         : `push + merge request (${forge?.label || prPreset})`;
     }
-  } else if (push) {
-    publish = 'push branch only';
   }
 
   setPlan([
     ['scope', scope],
-    ['branch', `${branch}  ·  tag ${tag}`],
+    ['branch', tag ? `${branch}  ·  tag ${tag}` : `${branch}  ·  merge tag on merge`],
     ['base', baseBits.join('  ·  ')],
     ['verify', verify || 'not detected'],
-    ['publish', publish]
+    ['publish', publishLabel]
   ]);
 }
 
@@ -1000,11 +987,7 @@ function settingsPayload() {
     base: request.base,
     agentPreset: request.agentPreset,
     agentCmd: request.agentCmd,
-    push: request.push,
-    pr: request.pr,
-    retryFailed: request.retryFailed,
-    worktree: request.worktree,
-    fetchBase: request.fetchBase,
+    publish: request.publish,
     jiraType: request.jiraType,
     jiraUrl: request.jiraUrl,
     jiraEmail: request.jiraEmail,
@@ -1403,10 +1386,19 @@ function createSession(flow) {
       return;
     }
 
-    label.textContent = settings.push === false
-      ? 'Create a branch and commit (push is off in Settings)'
+    const legacyPublish = settings.push === false
+      ? 'commit'
       : settings.pr === false
-        ? 'Create a branch and push (merge request is off in Settings)'
+        ? 'push'
+        : 'pr';
+    const choice = ['commit', 'push', 'pr'].includes(settings.publish)
+      ? settings.publish
+      : legacyPublish;
+
+    label.textContent = choice === 'commit'
+      ? 'Create a branch and commit (publishing stops at commit)'
+      : choice === 'push'
+        ? 'Create a branch and push (no merge request)'
         : 'Create a branch, commit, and open a merge request';
   }
 
@@ -3237,11 +3229,16 @@ async function loadConfig() {
       : (defaults.prPreset || 'github');
     togglePrCustom();
 
-    el.form.push.checked = settings.push !== false;
-    el.form.pr.checked = settings.pr !== false;
-    el.form.retryFailed.checked = settings.retryFailed === true;
-    el.form.worktree.checked = settings.worktree !== false;
-    el.form.fetchBase.checked = settings.fetchBase !== false;
+    // Older settings stored push and pr as independent booleans. Map them once
+    // so an existing project keeps the same publishing choice.
+    const legacyPublish = settings.push === false
+      ? 'commit'
+      : settings.pr === false
+        ? 'push'
+        : 'pr';
+    el.form.publish.value = ['commit', 'push', 'pr'].includes(settings.publish)
+      ? settings.publish
+      : legacyPublish;
 
     updatePlan();
     sessionViews.enhancement?.syncPublish?.();
@@ -3397,24 +3394,10 @@ function init() {
     item.addEventListener('click', () => switchView(item.dataset.view));
   }
 
-  for (const name of ['project', 'base', 'worktree', 'fetchBase', 'push', 'pr']) {
+  for (const name of ['project', 'base', 'publish', 'prPreset']) {
     el.form[name].addEventListener('input', updatePlan);
     el.form[name].addEventListener('change', updatePlan);
   }
-
-  // A merge request needs a pushed branch; keep the two decisions consistent.
-  el.form.push.addEventListener('change', () => {
-    if (!el.form.push.checked) {
-      el.form.pr.checked = false;
-    }
-    updatePlan();
-  });
-  el.form.pr.addEventListener('change', () => {
-    if (el.form.pr.checked) {
-      el.form.push.checked = true;
-    }
-    updatePlan();
-  });
 
   loadConfig();
   loadLatestJob();

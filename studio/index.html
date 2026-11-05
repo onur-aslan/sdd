@@ -294,16 +294,16 @@
             <input form="sweep-form" name="agentCmd" placeholder='["claude","-p"]' autocomplete="off">
           </label>
 
-          <div class="check-grid">
-            <label class="toggle" title="Fix bugs in a separate checkout; your own working tree is never touched."><input form="sweep-form" type="checkbox" name="worktree" checked><span>Isolated worktree</span></label>
-            <label class="toggle" title="Fetch the base branch from the remote first."><input form="sweep-form" type="checkbox" name="fetchBase" checked><span>Fetch base</span></label>
-            <label class="toggle"><input form="sweep-form" type="checkbox" name="resume"><span>Resume last run</span></label>
-            <label class="toggle"><input form="sweep-form" type="checkbox" name="retryFailed"><span>Retry failed bugs</span></label>
-            <label class="toggle"><input form="sweep-form" type="checkbox" name="push" checked><span>Push branch</span></label>
-            <label class="toggle"><input form="sweep-form" type="checkbox" name="pr" checked><span>Open merge request</span></label>
-          </div>
+          <label class="field">
+            <span>Publish</span>
+            <select form="sweep-form" name="publish" id="publish-mode">
+              <option value="pr" selected>Push + pull request</option>
+              <option value="push">Push branch</option>
+              <option value="commit">Commit only</option>
+            </select>
+          </label>
 
-          <p class="hint">Dates, branch, tag, work directory, limits, and timeouts are computed at run time.</p>
+          <p class="hint">Every run uses an isolated worktree, fetches the base branch, resumes the single per-user bug-fix branch, and retries failed bugs automatically. Dates, the owner branch, work directory, limits, and timeouts are computed at run time; per-run tags are opt-in.</p>
         </section>
 
         <section class="settings-section">

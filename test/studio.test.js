@@ -257,8 +257,7 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     dryRun: true,
     worktree: true,
     fetchBase: true,
-    push: false,
-    pr: false
+    publish: 'commit'
   });
 
   assert.deepEqual(args, [
@@ -273,6 +272,14 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     '--no-push',
     '--no-pr'
   ]);
+
+  assert.deepEqual(buildSweepArgs({ publish: 'pr' }), []);
+  assert.deepEqual(buildSweepArgs({ publish: 'push' }), ['--no-pr']);
+  assert.deepEqual(buildSweepArgs({ publish: 'commit' }), ['--no-push', '--no-pr']);
+
+  // Settings written before the single Publish choice keep working.
+  assert.deepEqual(buildSweepArgs({ pr: false }), ['--no-pr']);
+  assert.deepEqual(buildSweepArgs({ push: false }), ['--no-push', '--no-pr']);
 
   assert.deepEqual(buildSweepArgs({ jql: 'project = ABC' }).slice(0, 2), ['--jql', 'project = ABC']);
 });
@@ -617,6 +624,8 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   assert.ok(config.agents.some((agent) => agent.id === 'opencode'));
   assert.ok(config.agents.some((agent) => agent.id === 'cursor'));
   assert.equal(config.defaults.agentPreset, 'claude');
+  assert.match(config.defaults.branch, /^bug-fix\/.+\/sdd-studio$/);
+  assert.equal(config.defaults.tag, null);
   assert.ok(config.prPresets.some((preset) => preset.id === 'gitlab'));
   assert.equal(config.defaults.prPreset, 'github');
   assert.deepEqual(config.featurePipelines.map((pipeline) => pipeline.id), ['direct', 'tdd']);
@@ -625,19 +634,19 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   const saved = await fetch(`${base}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project: 'ABC', agentPreset: 'claude', verifyCmd: 'npm test', base: 'develop', fetchBase: false, prPreset: 'gitlab', jiraToken: 'secret' })
+    body: JSON.stringify({ project: 'ABC', agentPreset: 'claude', verifyCmd: 'npm test', base: 'develop', publish: 'commit', prPreset: 'gitlab', jiraToken: 'secret' })
   });
 
   // verifyCmd is no longer a studio setting; the verify command is auto-detected.
   assert.deepEqual(
     (await saved.json()).settings,
-    { project: 'ABC', agentPreset: 'claude', base: 'develop', fetchBase: false, prPreset: 'gitlab' }
+    { project: 'ABC', agentPreset: 'claude', base: 'develop', publish: 'commit', prPreset: 'gitlab' }
   );
 
   const settings = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(settings.settings.project, 'ABC');
   assert.equal(settings.settings.base, 'develop');
-  assert.equal(settings.settings.fetchBase, false);
+  assert.equal(settings.settings.publish, 'commit');
 
   const configAfter = await (await fetch(`${base}/api/config`)).json();
   assert.equal(configAfter.settings.project, 'ABC');
@@ -700,6 +709,7 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
       date: '2026-10-19',
       base: 'HEAD',
       agentCmd: JSON.stringify([agentPath]),
+      agentPreset: 'cursor',
       push: false,
       pr: false,
       jiraUrl: 'https://jira.example.com',

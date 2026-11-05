@@ -18,6 +18,7 @@ import {
   createJiraFetch,
   describeJiraError,
   describeJiraStatus,
+  detectMergedPullRequest,
   extractMergeRequestUrl,
   fetchJiraBugs,
   fetchJiraProjects,
@@ -35,6 +36,9 @@ import {
   probeJira,
   renderBugPrompt,
   renderPrBody,
+  mergeTagName,
+  resolveBranchOwner,
+  resolveSweepBranch,
   runBugSweep,
   tokenizeCommand,
   validateBugResult
@@ -80,6 +84,13 @@ const fakeFetch = async () => ({
     ],
     isLast: true
   }),
+  text: async () => ''
+});
+
+const emptyFetch = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ issues: [], isLast: true }),
   text: async () => ''
 });
 
@@ -146,13 +157,15 @@ function createFakeAgent(root, argsFile = null) {
   return scriptPath;
 }
 
-test('bug-sweep defaults to a dated branch, tag, and the Claude Code agent', () => {
+test('bug-sweep defers the persistent branch and tag until the repository is known', () => {
   const options = parseBugSweepArgs(['--project', 'ABC']);
 
   assert.equal(options.project, 'ABC');
   assert.match(options.date, /^\d{4}-\d{2}-\d{2}$/);
-  assert.equal(options.branch, `bug-fix/${options.date}`);
-  assert.equal(options.tag, `bug-fix-${options.date}`);
+  assert.equal(options.branch, null);
+  assert.equal(options.tag, null);
+  assert.equal(options.branchOwner, null);
+  assert.equal(options.branchExplicit, false);
   assert.equal(options.limit, 50);
   assert.equal(options.maxTurns, 5);
   assert.equal(options.timeoutSeconds, 1800);
@@ -160,6 +173,8 @@ test('bug-sweep defaults to a dated branch, tag, and the Claude Code agent', () 
   assert.equal(options.push, true);
   assert.equal(options.pr, true);
   assert.equal(options.resume, false);
+  assert.equal(options.retryFailed, false);
+  assert.equal(options.resetBranch, false);
   assert.equal(options.worktree, false);
   assert.equal(options.fetchBase, false);
   assert.equal(options.gitlabPush, false);
@@ -167,11 +182,37 @@ test('bug-sweep defaults to a dated branch, tag, and the Claude Code agent', () 
   assert.deepEqual(options.agentCommand, { kind: 'argv', argv: JSON.parse(DEFAULT_AGENT_COMMAND) });
 });
 
+test('the persistent branch is scoped to the git user and the merge tag is derived from it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-owner-'));
+
+  try {
+    git(root, ['init', '-q']);
+    git(root, ['config', 'user.name', 'Onur Arslan']);
+    git(root, ['config', 'user.email', 'Onur@Example.com']);
+
+    const owner = await resolveBranchOwner(root);
+    const branch = await resolveSweepBranch(root);
+
+    assert.match(owner, /^onur-arslan-[0-9a-f]{4}$/);
+    assert.equal(branch, `bug-fix/${owner}/sdd-studio`);
+    assert.equal(await resolveBranchOwner(root, 'CI Bot'), 'ci-bot');
+    assert.equal(mergeTagName(branch, '2026-11-04'), `${branch.replace(/\//g, '-')}-merged-2026-11-04`);
+
+    // The same display name on another computer gets a different branch because
+    // the e-mail hash is part of the owner.
+    git(root, ['config', 'user.email', 'other@example.com']);
+    assert.notEqual(await resolveSweepBranch(root), branch);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('bug-sweep derives the project from a custom JQL and accepts overrides', () => {
   const options = parseBugSweepArgs([
     '--jql', 'project = "WEB" AND labels = regression',
     '--date', '2026-10-19',
     '--branch', 'sweep/2026-10-19',
+    '--branch-owner', 'CI Runner',
     '--tag', 'sweep-2026-10-19',
     '--max-turns', '3',
     '--worktree',
@@ -184,6 +225,8 @@ test('bug-sweep derives the project from a custom JQL and accepts overrides', ()
   assert.equal(options.project, 'WEB');
   assert.equal(options.date, '2026-10-19');
   assert.equal(options.branch, 'sweep/2026-10-19');
+  assert.equal(options.branchOwner, 'CI Runner');
+  assert.equal(options.branchExplicit, true);
   assert.equal(options.tag, 'sweep-2026-10-19');
   assert.equal(options.maxTurns, 3);
   assert.equal(options.worktree, true);
@@ -272,6 +315,18 @@ test('a scheduled sweep validates the sweep arguments before waiting', async () 
       output: () => {}
     }),
     /Either --project, --jql, or --issues/
+  );
+});
+
+test('a scheduled sweep refuses --reset-branch', async () => {
+  await assert.rejects(
+    () => runBugSweep(['--project', 'ABC', '--at', '00:00', '--reset-branch', ...jiraFlags], {
+      logger: () => {},
+      now: () => new Date(2026, 9, 19, 23, 0, 0),
+      sleep: async () => {},
+      output: () => {}
+    }),
+    /cannot be combined/
   );
 });
 
@@ -609,6 +664,8 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
       '--project', 'ABC',
       '--date', '2026-10-19',
       '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
       '--limit', '1',
       '--agent-cmd', JSON.stringify([agentPath]),
       '--no-push',
@@ -629,9 +686,46 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
     assert.equal(git(root, ['status', '--porcelain']), '');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-2').status, 'not-fixed');
     assert.equal(state.phase, 'complete');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('--resume starts a fresh sweep when there is nothing to resume', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-fresh-resume-'));
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-fresh-resume-agent-'));
+
+  try {
+    installSweepFixtureSkills(root);
+    git(root, ['init', '-q']);
+    git(root, ['config', 'user.email', 'sweep@example.com']);
+    git(root, ['config', 'user.name', 'Sweep Bot']);
+    git(root, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'init']);
+
+    const agentPath = createFakeAgent(agentDir);
+    const output = await runBugSweep([
+      '--project', 'ABC',
+      '--date', '2026-10-19',
+      '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
+      '--agent-cmd', JSON.stringify([agentPath]),
+      '--no-push',
+      '--no-pr',
+      '--resume',
+      ...jiraFlags
+    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
+
+    assert.match(output, /Fixed: 1\/2/);
+    assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
+    assert.equal(git(root, ['status', '--porcelain']), '');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(agentDir, { recursive: true, force: true });
@@ -658,6 +752,8 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
       '--project', 'ABC',
       '--date', '2026-10-19',
       '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
       '--agent-cmd', JSON.stringify([agentPath]),
       '--no-push',
       '--no-pr',
@@ -683,7 +779,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
     assert.ok(fs.existsSync(path.join(root, '.bug-fix', 'report-2026-10-19.md')));
     assert.ok(!fs.existsSync(path.join(root, '.bug-fix', '.lock')), 'the lock is released after the sweep');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-1').status, 'fixed');
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-2').status, 'not-fixed');
     assert.equal(state.phase, 'complete');
@@ -716,6 +812,8 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
       '--project', 'ABC',
       '--date', '2026-10-19',
       '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
       '--agent-cmd', JSON.stringify([agentPath]),
       '--worktree',
       '--no-push',
@@ -733,14 +831,16 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
     assert.equal(git(root, ['log', '-1', '--pretty=%s', 'bug-fix/2026-10-19']), 'fix(ABC-1): Null guard');
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
 
-    // The temporary worktree was removed after publishing.
-    assert.equal(fs.existsSync(path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19')), false);
+    // The worktree is kept while the branch is unmerged, so the next run can
+    // continue in the same checkout.
+    const worktreePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    assert.equal(fs.existsSync(worktreePath), true);
     const remaining = git(root, ['worktree', 'list', '--porcelain'])
       .split(/\r?\n/)
       .filter((line) => line.startsWith('worktree '));
-    assert.equal(remaining.length, 1, 'only the main worktree remains');
+    assert.equal(remaining.length, 2, 'the main and sweep worktrees remain');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.phase, 'complete');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -791,6 +891,8 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
       '--project', 'ABC',
       '--date', '2026-10-19',
       '--base', 'main',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
       '--fetch-base',
       '--agent-cmd', JSON.stringify([agentPath]),
       '--worktree',
@@ -811,7 +913,7 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
 });
 
 
-test('--worktree keeps the checkout for --resume and removes it on completion', async () => {
+test('--worktree reuses one branch checkout until the branch is merged', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-resume-'));
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-worktree-resume-agent-'));
 
@@ -826,12 +928,17 @@ test('--worktree keeps the checkout for --resume and removes it on completion', 
     git(root, ['commit', '-q', '-m', 'init']);
 
     const originalBranch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    const worktreePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    // A stale, unregistered directory from an interrupted run must not block
+    // the next sweep. It is removed and the stable per-branch path is reused.
+    const stablePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    fs.mkdirSync(stablePath, { recursive: true });
     const agentPath = createFakeAgent(agentDir);
     const baseArgs = [
       '--project', 'ABC',
       '--date', '2026-10-19',
       '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--tag', 'bug-fix-2026-10-19',
       '--limit', '1',
       '--agent-cmd', JSON.stringify([agentPath]),
       '--worktree',
@@ -844,15 +951,177 @@ test('--worktree keeps the checkout for --resume and removes it on completion', 
     const first = await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(first, /1 bug\(s\) still pending/);
+
+    const statePath = path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const worktreePath = state.worktree;
+
+    assert.ok(worktreePath, 'state records the active worktree');
+    assert.equal(path.resolve(worktreePath), path.resolve(stablePath), 'the stale directory was replaced by the stable worktree');
     assert.equal(fs.existsSync(worktreePath), true, 'the worktree is kept while bugs are pending');
     assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), originalBranch);
 
     const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(second, /Fixed: 1\/2/);
-    assert.equal(fs.existsSync(worktreePath), false, 'the worktree is removed after the sweep completes');
+    assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).worktree, worktreePath, '--resume reuses the recorded worktree');
+    assert.equal(fs.existsSync(worktreePath), true, 'the worktree is kept after the sweep finishes');
     assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), originalBranch);
     assert.equal(git(root, ['rev-list', '--count', 'bug-fix/2026-10-19']), '2');
+
+    // Merge the finished branch into the main checkout. The next sweep should
+    // archive it with a merge tag, remove the checkout, and delete the branch
+    // and its state before starting fresh.
+    git(root, ['merge', '-q', '--ff-only', 'bug-fix/2026-10-19']);
+    const third = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: emptyFetch, logger: () => {} });
+
+    assert.match(third, /No bugs matched/);
+    assert.equal(fs.existsSync(worktreePath), false, 'the worktree is removed after the branch is merged');
+    assert.equal(git(root, ['branch', '--list', 'bug-fix/2026-10-19']), '');
+    assert.equal(fs.existsSync(statePath), false, 'the merged sweep state is deleted');
+    assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19-merged-2026-10-19']), 'bug-fix-2026-10-19-merged-2026-10-19');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('--reset-branch archives an unmerged branch after a squash merge', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-force-reset-'));
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-force-reset-agent-'));
+
+  try {
+    installSweepFixtureSkills(root);
+    git(root, ['init', '-q']);
+    git(root, ['config', 'user.email', 'sweep@example.com']);
+    git(root, ['config', 'user.name', 'Sweep Bot']);
+    git(root, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'init']);
+
+    const agentPath = createFakeAgent(agentDir);
+    const baseArgs = [
+      '--project', 'ABC',
+      '--date', '2026-10-19',
+      '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--limit', '1',
+      '--agent-cmd', JSON.stringify([agentPath]),
+      '--worktree',
+      '--no-push',
+      '--no-pr',
+      ...jiraFlags
+    ];
+
+    await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
+
+    const tip = git(root, ['rev-parse', 'bug-fix/2026-10-19']);
+    const stablePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    const statePath = path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json');
+
+    assert.equal(fs.existsSync(stablePath), true);
+
+    const output = await runBugSweep([...baseArgs, '--reset-branch'], { cwd: root, agentPreset: 'claude', fetchImpl: emptyFetch, logger: () => {} });
+
+    assert.match(output, /No bugs matched/);
+    assert.equal(git(root, ['branch', '--list', 'bug-fix/2026-10-19']), '');
+    assert.equal(git(root, ['rev-list', '-n', '1', 'bug-fix-2026-10-19-merged-2026-10-19']), tip);
+    assert.equal(fs.existsSync(stablePath), false);
+    assert.equal(fs.existsSync(statePath), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('a sweep continues fixes committed on its branch by another checkout', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-continue-'));
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-continue-agent-'));
+
+  try {
+    installSweepFixtureSkills(root);
+    git(root, ['init', '-q']);
+    git(root, ['config', 'user.email', 'sweep@example.com']);
+    git(root, ['config', 'user.name', 'Sweep Bot']);
+    git(root, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'init']);
+
+    const baseBranch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    // Simulate a checkout on another computer: the branch has a fix but there
+    // is no local state file.
+    git(root, ['checkout', '-q', '-b', 'bug-fix/2026-10-19']);
+    fs.writeFileSync(path.join(root, 'elsewhere.txt'), 'done\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'fix(ABC-2): Already fixed on another computer']);
+    const existingTip = git(root, ['rev-parse', 'HEAD']);
+    git(root, ['checkout', '-q', baseBranch]);
+
+    const agentPath = createFakeAgent(agentDir);
+    const output = await runBugSweep([
+      '--project', 'ABC',
+      '--date', '2026-10-19',
+      '--base', 'HEAD',
+      '--branch', 'bug-fix/2026-10-19',
+      '--agent-cmd', JSON.stringify([agentPath]),
+      '--worktree',
+      '--no-push',
+      '--no-pr',
+      ...jiraFlags
+    ], { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
+
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
+    const carried = state.bugs.find((bug) => bug.key === 'ABC-2');
+
+    assert.match(output, /Fixed: 2\/2/);
+    assert.equal(carried.status, 'fixed');
+    assert.equal(carried.commit, existingTip, 'the existing branch commit is adopted into the state');
+    assert.equal(state.bugs.find((bug) => bug.key === 'ABC-1').status, 'fixed');
+    assert.equal(git(root, ['show', 'bug-fix/2026-10-19:elsewhere.txt']), 'done');
+    assert.equal(git(root, ['rev-list', '--count', `${existingTip}..bug-fix/2026-10-19`]), '1', 'the new fix lands on top of the existing branch');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('--worktree refuses a sweep branch checked out in the main worktree', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-main-checkout-'));
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-bug-sweep-main-checkout-agent-'));
+
+  try {
+    installSweepFixtureSkills(root);
+    git(root, ['init', '-q']);
+    git(root, ['config', 'user.email', 'sweep@example.com']);
+    git(root, ['config', 'user.name', 'Sweep Bot']);
+    git(root, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'init']);
+
+    const baseBranch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    git(root, ['checkout', '-q', '-b', 'bug-fix/2026-10-19']);
+    const agentPath = createFakeAgent(agentDir);
+
+    await assert.rejects(
+      runBugSweep([
+        '--project', 'ABC',
+        '--date', '2026-10-19',
+        '--base', baseBranch,
+        '--branch', 'bug-fix/2026-10-19',
+        '--agent-cmd', JSON.stringify([agentPath]),
+        '--worktree',
+        '--no-push',
+        '--no-pr',
+        ...jiraFlags
+      ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} }),
+      /checked out outside the sweep worktree/
+    );
+
+    assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), 'bug-fix/2026-10-19');
+    assert.equal(fs.existsSync(path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19')), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(agentDir, { recursive: true, force: true });
@@ -992,6 +1261,27 @@ test('createJiraFetch explains a bad CA path', () => {
   );
 });
 
+test('detectMergedPullRequest only treats a merged pull request as merged', async () => {
+  const run = (stdout, code = 0) => async () => ({ code, stdout, stderr: '' });
+
+  assert.equal(
+    await detectMergedPullRequest({ cwd: '.', options: { pr: true, branch: 'b' }, run: run('{"state":"MERGED"}') }),
+    true
+  );
+  assert.equal(
+    await detectMergedPullRequest({ cwd: '.', options: { pr: true, branch: 'b' }, run: run('{"state":"OPEN"}') }),
+    false
+  );
+  assert.equal(
+    await detectMergedPullRequest({ cwd: '.', options: { pr: true, branch: 'b' }, run: run('', 1) }),
+    false
+  );
+  assert.equal(
+    await detectMergedPullRequest({ cwd: '.', options: { pr: true, prCommand: 'glab', branch: 'b' }, run: run('{"state":"MERGED"}') }),
+    false
+  );
+});
+
 test('openMergeRequest runs a JSON argv command with placeholders', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-pr-json-'));
   const bodyFile = path.join(dir, 'body.md');
@@ -1005,7 +1295,8 @@ test('openMergeRequest runs a JSON argv command with placeholders', async () => 
       'fs.writeFileSync(process.argv[2], JSON.stringify({',
       '  args: process.argv.slice(3),',
       '  body: process.env.SDD_PR_BODY,',
-      '  title: process.env.SDD_PR_TITLE',
+      '  title: process.env.SDD_PR_TITLE,',
+      '  url: process.env.SDD_PR_URL',
       '}));',
       "console.log('https://forge.example.com/mr/7');",
       ''
@@ -1014,11 +1305,11 @@ test('openMergeRequest runs a JSON argv command with placeholders', async () => 
     const url = await openMergeRequest({
       cwd: dir,
       options: {
-        prCommand: JSON.stringify([process.execPath, script, outFile, '{title}', '{bodyFile}', '{base}', '{head}']),
+        prCommand: JSON.stringify([process.execPath, script, outFile, '{title}', '{bodyFile}', '{base}', '{head}', '{url}']),
         branch: 'bug-fix/2026-10-19',
         remote: 'origin'
       },
-      state: { base: 'main', project: 'ABC', date: '2026-10-19' },
+      state: { base: 'main', project: 'ABC', date: '2026-10-19', prUrl: 'https://forge.example.com/mr/6' },
       title: 'Fix 1 bug',
       bodyFile,
       logger: () => {}
@@ -1028,9 +1319,10 @@ test('openMergeRequest runs a JSON argv command with placeholders', async () => 
 
     const received = JSON.parse(fs.readFileSync(outFile, 'utf8'));
 
-    assert.deepEqual(received.args, ['Fix 1 bug', bodyFile, 'main', 'bug-fix/2026-10-19']);
+    assert.deepEqual(received.args, ['Fix 1 bug', bodyFile, 'main', 'bug-fix/2026-10-19', 'https://forge.example.com/mr/6']);
     assert.equal(received.body, 'Body line\n');
     assert.equal(received.title, 'Fix 1 bug');
+    assert.equal(received.url, 'https://forge.example.com/mr/6');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

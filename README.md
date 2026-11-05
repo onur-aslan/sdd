@@ -172,7 +172,7 @@ enhancement
 
 ### Batch Bug Sweeps
 
-`sdd bug-sweep` fixes a tracker's open bugs unattended — one at a time, each success committed — then publishes one dated branch, tag, and pull request. Jira is the default source; GitHub and GitLab issues work too. Each bug is handled by the `bug-sweep` skill: it runs `bug-fix` in a fresh subagent for the fix, then prepares the sweep result as JSON.
+`sdd bug-sweep` fixes a tracker's open bugs unattended — one at a time, each success committed — then publishes a pull request from one persistent per-user branch. Jira is the default source; GitHub and GitLab issues work too. Each bug is handled by the `bug-sweep` skill: it runs `bug-fix` in a fresh subagent for the fix, then prepares the sweep result as JSON.
 
 The command reference, nightly scheduling, air-gapped Jira, and internal Git setup live in [studio/README.md](studio/README.md#from-the-cli).
 
