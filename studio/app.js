@@ -1655,7 +1655,10 @@ function createSession(flow) {
       lastAgent.dataset.stamp = copy.finalLabel;
     }
 
-    if (view.running) {
+    // The dots mean "the agent is working on the next reply". While the
+    // session is waiting for the user's answer they must not show — the
+    // user has to see that a reply is owed, not a still-running agent.
+    if (view.running && !view.awaiting) {
       const thinking = document.createElement('span');
 
       thinking.className = 'session-thinking';
