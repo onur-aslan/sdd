@@ -299,7 +299,6 @@
             <select form="sweep-form" name="publish" id="publish-mode">
               <option value="pr" selected>Push + pull request</option>
               <option value="push">Push branch</option>
-              <option value="commit">Commit only</option>
             </select>
           </label>
 
@@ -316,6 +315,11 @@
             <span>Custom merge request command <em>(shell; SDD_PR_* available)</em></span>
             <input form="sweep-form" name="prCommand" placeholder='glab mr create --title "$SDD_PR_TITLE" ...' autocomplete="off">
           </label>
+          <label class="toggle">
+            <input form="sweep-form" type="checkbox" name="closeIssues">
+            <span>Close the source issue when the work succeeds <em class="muted">(bug fix, enhancement, feature build)</em></span>
+          </label>
+          <p class="hint">Off by default. Every workflow closes the source issue only after the branch is pushed, with or without a merge request: bug fix after its sweep push, enhancement after its implementation push, and feature after its build push.</p>
         </section>
 
         <section class="settings-section">

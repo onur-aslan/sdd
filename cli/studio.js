@@ -29,6 +29,7 @@ import {
   runProcess
 } from './bug-sweep.js';
 import { fetchGitLabIssues, normalizeGitLabProject } from './gitlab-issues.js';
+import { closeTrackerIssue, normalizeSourceIssue } from './issue-tracker.js';
 import { runInterviewSession, resolveSessionFlow, validateBrief, validateSessionSkillArguments } from './agent-session.js';
 import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
 import {
@@ -274,18 +275,20 @@ export function parseStudioArgs(argv = []) {
   return { help: false, port, host, open };
 }
 
-// One publish choice replaces the old push/pr toggles. Existing clients that
-// still send the booleans keep working, and an explicit publish always wins.
+// One publish choice replaces the old push/pr toggles. The dashboard never
+// commits without pushing, so an explicit commit-only choice is retired: it
+// becomes a plain push. Legacy push/pr booleans resolve to push as well, and an
+// explicit publish choice always wins.
 export function normalizePublish(publish, request = {}) {
-  if (publish === 'commit' || publish === 'push' || publish === 'pr') {
+  if (publish === 'push' || publish === 'pr') {
     return publish;
   }
 
-  if (request.push === false) {
-    return 'commit';
+  if (publish === 'commit') {
+    return 'push';
   }
 
-  if (request.pr === false) {
+  if (request.push === false || request.pr === false) {
     return 'push';
   }
 
@@ -374,15 +377,16 @@ export function buildSweepArgs(request = {}) {
   if (request.fetchBase) {
     args.push('--fetch-base');
   }
+  if (request.closeIssues) {
+    args.push('--close-issues');
+  }
   if (request.verbose) {
     args.push('--verbose');
   }
 
   const publish = normalizePublish(request.publish, request);
 
-  if (publish === 'commit') {
-    args.push('--no-push', '--no-pr');
-  } else if (publish === 'push') {
+  if (publish === 'push') {
     args.push('--no-pr');
   }
 
@@ -528,6 +532,80 @@ function featureNameFromSpec(specPath) {
   return path.basename(path.dirname(String(specPath ?? ''))) || 'feature';
 }
 
+// Closing is a best-effort step after a successful run. The issue key and its
+// tracker target were captured when the session started; credentials stay in
+// the local settings store.
+async function closeSourceIssueForJob({
+  cwd,
+  issue,
+  settings = {},
+  fetchImpl,
+  run = runProcess
+} = {}) {
+  const source = normalizeSourceIssue(issue);
+
+  if (!source) {
+    throw new Error('The source issue has no supported tracker key.');
+  }
+
+  if (source.source === 'jira') {
+    const jira = resolveStudioJira(settings, settings);
+
+    if (!jira.url || !jira.token) {
+      throw new Error('Jira credentials are not configured.');
+    }
+
+    return closeTrackerIssue({
+      issue: source,
+      jira: {
+        baseUrl: jira.url,
+        headers: {
+          Authorization: buildJiraAuthHeader({ auth: jira.auth, email: jira.email, token: jira.token }),
+          Accept: 'application/json'
+        },
+        apiVersion: jira.apiVersion,
+        fetchImpl: fetchImpl ?? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure })
+      }
+    });
+  }
+
+  if (source.source === 'github') {
+    const github = resolveStudioGitHub(settings, settings);
+    const repo = source.target || github.repo;
+
+    if (!repo) {
+      throw new Error('A GitHub repository is not configured.');
+    }
+
+    return closeTrackerIssue({
+      issue: source,
+      github: {
+        repo,
+        token: await githubCliToken(cwd),
+        apiUrl: github.apiUrl,
+        fetchImpl: fetchImpl ?? globalThis.fetch
+      }
+    });
+  }
+
+  const project = source.target || settings.gitlabProject;
+
+  if (!project) {
+    throw new Error('A GitLab project is not configured.');
+  }
+
+  return closeTrackerIssue({
+    issue: source,
+    gitlab: { project, cwd, run }
+  });
+}
+
+// A run closes its source issue only after the branch was pushed, with or
+// without a merge request. That is the same rule for every workflow.
+function publishCompleted(publish) {
+  return Boolean(publish?.enabled) && ['pushed', 'published'].includes(publish.status);
+}
+
 export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, terminate, now } = {}) {
   const jobs = new Map();
   const pendingInputs = new Map();
@@ -573,6 +651,36 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       } catch {
         // A disconnected client must not break the run.
       }
+    }
+  }
+
+  // A tracker rejection is reported on the job, but a finished run stays done.
+  async function closeJobIssue(job) {
+    if (!job.closeIssues || !job.issue) {
+      return;
+    }
+
+    try {
+      const result = await closeSourceIssueForJob({
+        cwd,
+        issue: job.issue,
+        settings: readStore(cwd),
+        fetchImpl,
+        run: spawnImpl ?? runProcess
+      });
+
+      emit(job, {
+        type: 'issue-closed',
+        key: job.issue.key,
+        status: result.status,
+        url: job.issue.url ?? ''
+      });
+    } catch (error) {
+      emit(job, {
+        type: 'issue-close-failed',
+        key: job.issue.key,
+        error: error.message
+      });
     }
   }
 
@@ -679,6 +787,9 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     const saved = readStore(cwd);
     const agentPreset = request.agentPreset ?? saved.agentPreset;
     const agentCmd = request.agentCmd ?? saved.agentCmd;
+    const sourceIssue = config.id === 'merge' ? null : normalizeSourceIssue(request.issue);
+    const closeIssues = config.id !== 'merge'
+      && (request.closeIssues === undefined ? saved.closeIssues === true : request.closeIssues === true);
 
     // Validate before the job exists, so a bad agent command is a 400 instead of
     // a session that fails with no useful output.
@@ -708,7 +819,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         request: {
           publish: request.publish,
           base: request.base,
-          push: request.push ?? (publishChoice !== 'commit'),
+          push: request.push ?? true,
           pr: request.pr ?? (publishChoice === 'pr')
         },
         saved
@@ -725,9 +836,13 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         agentPreset,
         agentCmd,
         skillArguments,
+        ...(sourceIssue ? { issue: sourceIssue } : {}),
+        closeIssues,
         ...(publish ? { publish: publish.enabled } : {}),
         ...(merge ? { merge } : {})
       },
+      issue: sourceIssue,
+      closeIssues,
       publish,
       events: [],
       listeners: new Set(),
@@ -838,6 +953,13 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
             emit: (event) => emit(job, event),
             cleanupWhenEmpty: false
           });
+        }
+
+        // Every workflow uses the same closing rule: push (or push + merge
+        // request) must succeed first. A feature session only commits the spec;
+        // its issue closes after the build publishes the implementation.
+        if (config.id === 'enhancement' && publishCompleted(publish)) {
+          await closeJobIssue(job);
         }
 
         job.status = 'done';
@@ -1049,7 +1171,14 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       status: 'running',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      request: { pipeline: pipeline.id, verify, specPath: session.result.artifact },
+      request: {
+        pipeline: pipeline.id,
+        verify,
+        specPath: session.result.artifact,
+        ...(session.issue ? { issue: session.issue } : {})
+      },
+      issue: session.issue ?? null,
+      closeIssues: session.closeIssues === true,
       publish: session.publish ?? null,
       events: [],
       listeners: new Set(),
@@ -1121,6 +1250,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
               emit: (event) => emit(job, event)
             });
           }
+        }
+
+        // The feature issue closes after the build pushed the branch, exactly
+        // like bug fix and enhancement. The spec session itself never closes it.
+        if (publishCompleted(publish)) {
+          await closeJobIssue(job);
         }
 
         job.status = 'done';
@@ -1468,6 +1603,7 @@ const SETTINGS_KEYS = [
   'publish',
   'push',
   'pr',
+  'closeIssues',
   'jiraType',
   'jiraUrl',
   'jiraEmail',
@@ -1508,8 +1644,12 @@ function cleanKeys(raw, keys) {
   const clean = {};
 
   for (const key of keys) {
-    if (raw[key] !== undefined && raw[key] !== null && raw[key] !== '') {
-      clean[key] = raw[key];
+    const value = raw[key];
+
+    if (value !== undefined && value !== null && value !== '') {
+      // Commit-only publishing is retired; keep old settings files valid by
+      // reading and writing them as a plain push.
+      clean[key] = key === 'publish' && value === 'commit' ? 'push' : value;
     }
   }
 

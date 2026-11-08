@@ -257,6 +257,7 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     dryRun: true,
     worktree: true,
     fetchBase: true,
+    closeIssues: true,
     publish: 'commit'
   });
 
@@ -269,17 +270,18 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     '--dry-run',
     '--worktree',
     '--fetch-base',
-    '--no-push',
+    '--close-issues',
     '--no-pr'
   ]);
 
   assert.deepEqual(buildSweepArgs({ publish: 'pr' }), []);
   assert.deepEqual(buildSweepArgs({ publish: 'push' }), ['--no-pr']);
-  assert.deepEqual(buildSweepArgs({ publish: 'commit' }), ['--no-push', '--no-pr']);
+  // Commit-only is retired: the studio always pushes the branch.
+  assert.deepEqual(buildSweepArgs({ publish: 'commit' }), ['--no-pr']);
 
-  // Settings written before the single Publish choice keep working.
+  // Settings written before the single Publish choice also always push.
   assert.deepEqual(buildSweepArgs({ pr: false }), ['--no-pr']);
-  assert.deepEqual(buildSweepArgs({ push: false }), ['--no-push', '--no-pr']);
+  assert.deepEqual(buildSweepArgs({ push: false }), ['--no-pr']);
 
   assert.deepEqual(buildSweepArgs({ jql: 'project = ABC' }).slice(0, 2), ['--jql', 'project = ABC']);
 });
@@ -367,6 +369,7 @@ test('settings remember the Jira connection locally but keep the token off the A
       project: 'ABC',
       push: false,
       pr: true,
+      closeIssues: true,
       jiraAuth: 'bearer',
       jiraCa: '/etc/ssl/jira-ca.pem',
       prCommand: 'glab mr create',
@@ -385,6 +388,7 @@ test('settings remember the Jira connection locally but keep the token off the A
       project: 'ABC',
       push: false,
       pr: true,
+      closeIssues: true,
       jiraAuth: 'bearer',
       jiraCa: '/etc/ssl/jira-ca.pem',
       prCommand: 'glab mr create',
@@ -640,13 +644,13 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   // verifyCmd is no longer a studio setting; the verify command is auto-detected.
   assert.deepEqual(
     (await saved.json()).settings,
-    { project: 'ABC', agentPreset: 'claude', base: 'develop', publish: 'commit', prPreset: 'gitlab' }
+    { project: 'ABC', agentPreset: 'claude', base: 'develop', publish: 'push', prPreset: 'gitlab' }
   );
 
   const settings = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(settings.settings.project, 'ABC');
   assert.equal(settings.settings.base, 'develop');
-  assert.equal(settings.settings.publish, 'commit');
+  assert.equal(settings.settings.publish, 'push');
 
   const configAfter = await (await fetch(`${base}/api/config`)).json();
   assert.equal(configAfter.settings.project, 'ABC');
@@ -686,10 +690,15 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
 test('studio runs a sweep and streams structured progress events', async (t) => {
   const root = createRepo();
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-agent-'));
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-remote-'));
+
+  git(remote, ['init', '--bare', '-q']);
+  git(root, ['remote', 'add', 'origin', remote]);
 
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(agentDir, { recursive: true, force: true });
+    fs.rmSync(remote, { recursive: true, force: true });
   });
 
   const agentPath = createFakeAgent(agentDir);
@@ -710,8 +719,7 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
       base: 'HEAD',
       agentCmd: JSON.stringify([agentPath]),
       agentPreset: 'cursor',
-      push: false,
-      pr: false,
+      publish: 'push',
       jiraUrl: 'https://jira.example.com',
       jiraEmail: 'bot@example.com',
       jiraToken: 'secret'
@@ -755,16 +763,22 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
 
   assert.equal(settings.project, 'ABC');
   assert.equal(settings.jiraToken, undefined);
-  assert.equal(settings.push, false);
+  assert.equal(settings.publish, 'push');
+  assert.equal(settings.push, undefined);
 });
 
 test('the job manager refuses a second sweep while one is running', async (t) => {
   const root = createRepo();
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-agent-'));
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-remote-'));
+
+  git(remote, ['init', '--bare', '-q']);
+  git(root, ['remote', 'add', 'origin', remote]);
 
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(agentDir, { recursive: true, force: true });
+    fs.rmSync(remote, { recursive: true, force: true });
   });
 
   const agentPath = createFakeAgent(agentDir);
@@ -775,8 +789,7 @@ test('the job manager refuses a second sweep while one is running', async (t) =>
     date: '2026-10-19',
     base: 'HEAD',
     agentCmd: JSON.stringify([agentPath]),
-    push: false,
-    pr: false,
+    publish: 'push',
     jiraUrl: 'https://jira.example.com',
     jiraEmail: 'bot@example.com',
     jiraToken: 'secret'
@@ -883,6 +896,110 @@ test('an enhancement session interviews, implements after plan approval, then re
   assert.equal(readStore(root).jiraToken, 'secret');
 });
 
+test('an enhancement closes its source issue after the work succeeds', async (t) => {
+  const root = createRepo();
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-close-remote-'));
+  const calls = [];
+
+  git(remote, ['init', '--bare', '-q']);
+  git(root, ['remote', 'add', 'origin', remote]);
+  git(root, ['push', '-q', '-u', 'origin', 'HEAD']);
+
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(remote, { recursive: true, force: true });
+  });
+
+  const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+
+  writeSettings(root, {
+    project: 'ABC',
+    jiraUrl: 'https://jira.internal',
+    jiraAuth: 'bearer',
+    jiraApiVersion: '2',
+    jiraToken: 'secret',
+    closeIssues: true
+  });
+
+  const response = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => data,
+    text: async () => JSON.stringify(data)
+  });
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+
+    if (url.includes('?fields=status')) {
+      return response({ fields: { status: { name: 'In Progress', statusCategory: { key: 'indeterminate' } } } });
+    }
+
+    if (url.endsWith('/transitions') && !options.method) {
+      return response({ transitions: [{ id: '31', to: { name: 'Done', statusCategory: { key: 'done' } } }] });
+    }
+
+    if (url.endsWith('/transitions') && options.method === 'POST') {
+      return response({}, 204);
+    }
+
+    throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
+  };
+  let turns = 0;
+  const manager = createJobManager({
+    cwd: root,
+    fetchImpl,
+    spawnImpl: async (command, args, options) => {
+      turns += 1;
+
+      let text;
+
+      if (turns === 1) {
+        text = '```interview\nWhat should change?\n```\n';
+      } else if (turns === 2) {
+        text = '# Plan\n\nChange it.\n';
+      } else {
+        fs.writeFileSync(path.join(root, 'change.js'), 'export const changed = true;\n', 'utf8');
+        text = '# Report\n\nChanged it.\n';
+      }
+
+      options.onStdout(text);
+
+      return { code: 0, stdout: text, stderr: '' };
+    }
+  });
+  const job = manager.startEnhancement({
+    brief: 'ABC-1: Fix the thing.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]',
+    base,
+    publish: true,
+    pr: false,
+    issue: { source: 'jira', key: 'ABC-1', url: 'https://jira.internal/browse/ABC-1', target: 'ABC' },
+    closeIssues: true
+  });
+
+  const questions = () => manager.snapshot(job).events.filter((event) => event.type === 'question');
+
+  await waitFor(() => questions().length === 1);
+  manager.submitInput(job.id, { answer: 'Fix it.' });
+  await waitFor(() => questions().length === 2);
+  manager.submitInput(job.id, { answer: 'Approved.' });
+  await waitFor(() => questions().length === 3);
+  manager.submitInput(job.id, { done: true });
+  await waitFor(() => job.status === 'done');
+
+  const closed = manager.snapshot(job).events.find((event) => event.type === 'issue-closed');
+  const transition = calls.find((call) => call.options.method === 'POST');
+
+  assert.equal(closed.key, 'ABC-1');
+  assert.equal(closed.status, 'Done');
+  assert.ok(transition);
+  assert.equal(
+    transition.url,
+    'https://jira.internal/rest/api/2/issue/ABC-1/transitions'
+  );
+});
+
 test('an enhancement session branches up front and commits when the human finishes', async (t) => {
   const root = createRepo();
   const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -947,14 +1064,56 @@ test('an enhancement session branches up front and commits when the human finish
 
 test('a feature build runs the chosen pipeline after the spec exists', async (t) => {
   const root = createRepo();
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-feature-remote-'));
   const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
   const featurePath = path.join(path.dirname(specPath), 'feature.md');
   const prompts = [];
+  const trackerCalls = [];
 
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(remote, ['init', '--bare', '-q']);
+  git(root, ['remote', 'add', 'origin', remote]);
+  git(root, ['push', '-q', '-u', 'origin', 'HEAD']);
 
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(remote, { recursive: true, force: true });
+  });
+
+  const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+
+  writeSettings(root, {
+    jiraUrl: 'https://jira.internal',
+    jiraAuth: 'bearer',
+    jiraApiVersion: '2',
+    jiraToken: 'secret',
+    closeIssues: true
+  });
+
+  const trackerResponse = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => data,
+    text: async () => JSON.stringify(data)
+  });
   const manager = createJobManager({
     cwd: root,
+    fetchImpl: async (url, options = {}) => {
+      trackerCalls.push({ url, options });
+
+      if (url.includes('?fields=status')) {
+        return trackerResponse({ fields: { status: { name: 'Open', statusCategory: { key: 'new' } } } });
+      }
+
+      if (url.endsWith('/transitions') && !options.method) {
+        return trackerResponse({ transitions: [{ id: '41', to: { name: 'Closed', statusCategory: { key: 'done' } } }] });
+      }
+
+      if (url.endsWith('/transitions') && options.method === 'POST') {
+        return trackerResponse({}, 204);
+      }
+
+      throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
+    },
     spawnImpl: async (command, args) => {
       const prompt = args.at(-1) ?? '';
 
@@ -979,11 +1138,19 @@ test('a feature build runs the chosen pipeline after the spec exists', async (t)
   const session = manager.startFeature({
     brief: 'Add saved searches.',
     agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]'
+    agentCmd: '["cursor-agent","-p"]',
+    base,
+    publish: true,
+    pr: false,
+    issue: { source: 'jira', key: 'ABC-7', url: 'https://jira.internal/browse/ABC-7', target: 'ABC' }
   });
 
   await waitFor(() => session.status === 'done');
   assert.match(session.result.artifact, /spec\.md$/);
+  // A spec session does not close its issue; only the build does.
+  assert.equal(session.publish.status, 'committed');
+  assert.equal(manager.snapshot(session).events.some((event) => event.type === 'issue-closed'), false);
+  assert.equal(trackerCalls.length, 0);
 
   const build = manager.startFeatureBuild(session.id, { pipeline: 'tdd', verify: false });
 
@@ -1002,6 +1169,9 @@ test('a feature build runs the chosen pipeline after the spec exists', async (t)
   assert.match(prompts.at(-1), /feature-tdd/);
   // The session stays finished; the build is its own job.
   assert.equal(manager.snapshot(session).status, 'done');
+  assert.equal(build.publish.status, 'pushed');
+  assert.equal(events.find((event) => event.type === 'issue-closed').key, 'ABC-7');
+  assert.ok(trackerCalls.some((call) => call.options.method === 'POST'));
 });
 
 function createMergeFixture() {
@@ -1399,8 +1569,7 @@ test('cancelling a sweep stops it and reports a cancelled job', async (t) => {
     date: '2026-10-19',
     base: 'HEAD',
     agentCmd: JSON.stringify(['fake-agent']),
-    push: false,
-    pr: false,
+    publish: 'push',
     jiraUrl: 'https://jira.example.com',
     jiraEmail: 'bot@example.com',
     jiraToken: 'secret'
@@ -1575,13 +1744,15 @@ test('POST /api/settings saves the Jira token locally and reuses it', async (t) 
     body: JSON.stringify({
       jiraUrl: 'https://jira.internal',
       jiraToken: 'pat',
-      jiraApiVersion: '2'
+      jiraApiVersion: '2',
+      closeIssues: true
     })
   })).json();
 
   assert.equal(saved.hasSavedToken, true);
   assert.equal(saved.settings.jiraToken, undefined);
   assert.equal(saved.settings.jiraUrl, 'https://jira.internal');
+  assert.equal(saved.settings.closeIssues, true);
 
   const config = await (await fetch(`${base}/api/config`)).json();
 

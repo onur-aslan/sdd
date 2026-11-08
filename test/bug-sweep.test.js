@@ -218,6 +218,7 @@ test('bug-sweep derives the project from a custom JQL and accepts overrides', ()
     '--worktree',
     '--fetch-base',
     '--gitlab-push',
+    '--close-issues',
     '--no-push',
     '--no-pr'
   ]);
@@ -232,6 +233,7 @@ test('bug-sweep derives the project from a custom JQL and accepts overrides', ()
   assert.equal(options.worktree, true);
   assert.equal(options.fetchBase, true);
   assert.equal(options.gitlabPush, true);
+  assert.equal(options.closeIssues, true);
   assert.equal(options.push, false);
   assert.equal(options.pr, false);
 });

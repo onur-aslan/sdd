@@ -51,13 +51,14 @@ The plan under the queue spells out the scope, branch, base, verify command, and
 | Base | Detected from `origin/HEAD`, then `main` or `master` |
 | Agent | Claude Code (`claude -p`) |
 | Verify command | Detected from `package.json` |
+| Close source issue | Off |
 | Per-bug timeout | 1800 seconds |
 
 The date, branch owner, work directory, turn limit, and timeout are computed at run time and are not shown as fields. The owner is the git `user.name` plus a short hash of `user.email`, so the same name on two computers does not collide; `--branch-owner` overrides it.
 
 ### The run
 
-Each bug gets a fresh agent session, so a previous fix cannot leak into the next one. The agent edits the working tree; the command owns git, the optional tag, and the pull request. A fix that fails verification or the result contract is reset and recorded as not fixed, and the issue tracker is never modified.
+Each bug gets a fresh agent session, so a previous fix cannot leak into the next one. The agent edits the working tree; the command owns git, the optional tag, and the pull request. A fix that fails verification or the result contract is reset and recorded as not fixed. The issue tracker is read-only unless **Close the source issue** is enabled.
 
 The run view shows each bug moving from pending to running to fixed, not fixed, or flagged for human review, with a progress ruler, the live agent log, **Stop run**, and the merge request link when the run finishes. Changes to authentication, payments, migrations, infrastructure, or CI/CD are force-flagged for review.
 
@@ -65,7 +66,9 @@ Only one run of any kind can execute at a time. A running sweep also holds the s
 
 ### Publishing
 
-The **Publish** choice decides where the run stops: **Commit only** keeps the fixes on the local branch, **Push branch** pushes without a merge request, and **Push + pull request** does both. Invalid combinations cannot happen because push is implied by the merge request.
+Every run pushes its branch. The **Publish** choice decides whether it also opens a merge request: **Push branch** pushes without one, and **Push + pull request** pushes and opens one. Push is implied by the merge request, so an invalid combination cannot happen, and the old commit-only option is no longer offered.
+
+**Close the source issue when the work succeeds** is off by default and is shared by every workflow. The rule is the same everywhere: the issue closes only after the branch was pushed, with or without a merge request. A bug-sweep issue closes after its sweep push, an enhancement after its implementation push, and a feature after its build push — never when the spec session ends. Jira uses an available transition into the **Done** status category. GitHub and GitLab receive a normal close request. A tracker rejection is shown in the run log but never turns a successful fix, session, or build into a failure.
 
 The **Merge request** setting chooses the forge:
 
@@ -100,7 +103,7 @@ sdd bug-sweep --project ABC \
   --limit 20
 ```
 
-`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. The persistent branch resumes automatically; `--resume` remains a compatibility flag. Pass `--tag <name>` only when you also want a per-run tag, and `--reset-branch` to archive and delete the branch after a squash merge. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
+`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. Pass `--close-issues` to close each fixed issue after the branch is pushed; it is off by default and is skipped when `--no-push` is used. The persistent branch resumes automatically; `--resume` remains a compatibility flag. Pass `--tag <name>` only when you also want a per-run tag, and `--reset-branch` to archive and delete the branch after a squash merge. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
 
 Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The checkout path is stable per branch and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. A directory left behind by an interrupted run is removed, or replaced with a one-off fallback path if Windows still holds it; the next run reuses the registered checkout for the branch. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. It is kept while the branch is unmerged, so the next run — and the same user on another computer — continues in the same branch. When the branch is merged into the base, the next run leaves a merge tag, removes the checkout, deletes the branch and its state, and starts a fresh one. The default GitHub path also reads the pull request state, so a squash merge is detected even though git no longer sees the branch as an ancestor; on another forge, pass `--reset-branch` after a squash merge. The CLI runs in place unless you pass `--worktree`; the dashboard always uses an isolated worktree.
 
@@ -191,7 +194,7 @@ Both tabs run a guided interview as a conversation. Describe the change, and the
 
 A session may read the repository to ground its questions. A feature session may write exactly one file, its spec. An enhancement may not create, modify, or delete anything before the plan is approved; after approval it changes only what the plan names and never commits, pushes, or opens a merge request.
 
-The **Create a branch, commit, and open a merge request** toggle lets the studio publish the session result when it finishes. It is on by default and follows the **Publish** choice; the agent itself still never commits.
+The **Create a branch, commit, and push** toggle lets the studio publish the session result when it finishes. It is on by default; whether a merge request also opens follows the **Publish** choice, and the agent itself still never commits.
 
 **Stop** ends a session early. The conversation stays readable, and the composer then starts a new one. Reloading the page reconnects to a running session.
 
@@ -232,7 +235,7 @@ The Jira token is stored locally but never returned to the browser. The API only
 | Bug source, Jira project, GitHub repository, GitLab project | Where the queue loads bugs and issues |
 | Base branch | Blank uses the detected branch |
 | Agent, custom agent command | Which coding agent runs the workflow |
-| Publish | Commit only, push branch, or push + merge request |
+| Publish | Push branch or push + merge request |
 | Merge request preset, custom command | Which forge creates the merge request |
 | Jira deployment type, URL, email, token, auth mode, API version, CA, skip TLS | Jira connection |
 | Enhancement/Feature issue source | Per-tab tracker choice, saved separately for each |
@@ -308,7 +311,7 @@ The dashboard is also usable as a small local API. All routes are JSON unless no
 
 - The server listens on localhost only by default. Do not expose it to a network.
 - The token lives in `.sdd/studio.settings.json`, which is git-ignored and never sent back to the browser.
-- Sweeps never force-push and never modify the issue tracker.
+- Sweeps never force-push. With **Close the source issue** off (the default), the issue tracker is read-only.
 - The isolated worktree is on by default, so your own checkout — including uncommitted changes — is never touched. Its checkout and branch are kept until the branch is merged.
 - Merge landing never pushes and never creates a merge commit.
 

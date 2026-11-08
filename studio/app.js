@@ -347,6 +347,12 @@ function handleEvent(event) {
     case 'publishing':
       el.runMeta.textContent = 'Publishing branch and pull request…';
       break;
+    case 'issue-closed':
+      appendLog(`Closed ${event.key}${event.status ? ` as ${event.status}` : ''}.`);
+      break;
+    case 'issue-close-failed':
+      appendLog(`Could not close ${event.key}: ${event.error}`);
+      break;
     case 'sweep-finished':
       if (event.prUrl) {
         showPr(event.prUrl);
@@ -440,6 +446,20 @@ function togglePrCustom() {
   el.prCustomField.classList.toggle('hidden', el.form.prPreset.value !== 'custom');
 }
 
+// Publishing always pushes the branch. The only remaining choice is whether a
+// merge request opens too, so an old commit-only setting maps to a plain push.
+function publishChoice(settings = {}) {
+  if (settings.publish === 'pr') {
+    return 'pr';
+  }
+
+  if (settings.publish === 'push' || settings.publish === 'commit') {
+    return 'push';
+  }
+
+  return settings.push === false || settings.pr === false ? 'push' : 'pr';
+}
+
 function formRequest({ dryRun = false } = {}) {
   const data = new FormData(el.form);
   const text = (name) => (data.get(name) ?? '').toString().trim();
@@ -453,7 +473,7 @@ function formRequest({ dryRun = false } = {}) {
   const jiraAuth = jiraType === 'cloud' ? 'basic' : 'bearer';
   const jiraApiVersion = jiraType === 'cloud' ? '3' : '2';
   const source = ['github', 'gitlab'].includes(text('source')) ? text('source') : 'jira';
-  const publish = ['commit', 'push', 'pr'].includes(text('publish')) ? text('publish') : 'pr';
+  const publish = text('publish') === 'push' ? 'push' : 'pr';
   const project = text('project');
   const githubRepo = text('githubRepo');
   const gitlabProject = text('gitlabProject');
@@ -497,7 +517,8 @@ function formRequest({ dryRun = false } = {}) {
     retryFailed: true,
     worktree: true,
     fetchBase: true,
-    push: publish !== 'commit',
+    closeIssues: checked('closeIssues'),
+    push: true,
     pr: publish === 'pr'
   };
 }
@@ -769,7 +790,6 @@ function updatePlan() {
   const branch = defaults.branch || 'bug-fix/<git-user>/sdd-studio';
   const tag = defaults.tag || '';
   const verify = defaults.verifyCommand || '';
-  const publish = el.form.publish?.value || 'pr';
   const loaded = state.loadedSource === source && state.loadedTarget === project;
   const total = loaded ? state.issueKeys.length : 0;
   const selected = loaded ? selectedIssueKeys().length : 0;
@@ -783,11 +803,11 @@ function updatePlan() {
 
   const base = el.form.base.value.trim() || defaults.base || 'detected';
   const baseBits = [base, 'fetch first', 'isolated worktree'];
-  let publishLabel = 'commit only';
+  const publish = el.form.publish?.value === 'push' ? 'push' : 'pr';
+  const closeIssues = Boolean(el.form.closeIssues?.checked);
+  let publishLabel = 'push branch only';
 
-  if (publish === 'push') {
-    publishLabel = 'push branch only';
-  } else if (publish === 'pr') {
+  if (publish === 'pr') {
     const prPreset = el.form.prPreset?.value || 'github';
 
     if (prPreset === 'gitlab-push') {
@@ -801,6 +821,10 @@ function updatePlan() {
         ? 'push + pull request'
         : `push + merge request (${forge?.label || prPreset})`;
     }
+  }
+
+  if (closeIssues) {
+    publishLabel = `${publishLabel}  ·  close source issue`;
   }
 
   setPlan([
@@ -988,6 +1012,7 @@ function settingsPayload() {
     agentPreset: request.agentPreset,
     agentCmd: request.agentCmd,
     publish: request.publish,
+    closeIssues: request.closeIssues,
     jiraType: request.jiraType,
     jiraUrl: request.jiraUrl,
     jiraEmail: request.jiraEmail,
@@ -1325,7 +1350,9 @@ function createSession(flow) {
     // Merge only: the source/target/ref from the job request, and whether the
     // setup plate (rather than the transcript) is the current surface.
     mergeMeta: null,
-    setup: false
+    setup: false,
+    // The issue imported into the composer, so a successful session can close it.
+    sourceIssue: null
   };
   view.issueChoices = [];
 
@@ -1386,20 +1413,11 @@ function createSession(flow) {
       return;
     }
 
-    const legacyPublish = settings.push === false
-      ? 'commit'
-      : settings.pr === false
-        ? 'push'
-        : 'pr';
-    const choice = ['commit', 'push', 'pr'].includes(settings.publish)
-      ? settings.publish
-      : legacyPublish;
+    const choice = publishChoice(settings);
 
-    label.textContent = choice === 'commit'
-      ? 'Create a branch and commit (publishing stops at commit)'
-      : choice === 'push'
-        ? 'Create a branch and push (no merge request)'
-        : 'Create a branch, commit, and open a merge request';
+    label.textContent = choice === 'push'
+      ? 'Create a branch, commit, and push (no merge request)'
+      : 'Create a branch, commit, and open a merge request';
   }
 
   function issueBrief(issue) {
@@ -1495,6 +1513,7 @@ function createSession(flow) {
     }
 
     const source = dom.issueSource.value;
+    const settings = state.config?.settings ?? {};
     dom.issueSelect.disabled = true;
     dom.issueLoad.disabled = true;
     dom.issueStatus.textContent = `Loading ${key}…`;
@@ -1520,10 +1539,24 @@ function createSession(flow) {
         dom.issueStatus.textContent = `Issue ${key} is no longer in the loaded list. Reload issues.`;
         return;
       }
+      const target = source === 'github'
+        ? settings.githubRepo
+        : source === 'gitlab'
+          ? settings.gitlabProject
+          : settings.project;
+      view.sourceIssue = {
+        source,
+        key: issue.key,
+        url: issue.url ?? '',
+        target: target ?? ''
+      };
       dom.input.value = issueBrief(issue);
       autoGrow();
       dom.input.focus();
-      dom.issueStatus.textContent = `Imported ${issue.key}. Edit it below and press Send.`;
+      const closeNote = el.form.closeIssues?.checked
+        ? ' It is closed when the work succeeds.'
+        : '';
+      dom.issueStatus.textContent = `Imported ${issue.key}. Edit it below and press Send.${closeNote}`;
     } catch (error) {
       dom.issueStatus.textContent = error.message;
     } finally {
@@ -1866,6 +1899,15 @@ function createSession(flow) {
         }
         break;
       }
+      case 'issue-closed': {
+        const suffix = event.status ? ` as ${event.status}` : '';
+
+        addEntry('publish', `Closed ${event.key}${suffix}.`, { url: event.url ?? '' });
+        break;
+      }
+      case 'issue-close-failed':
+        addEntry('publish', `Could not close ${event.key}: ${event.error}`);
+        break;
       case 'job-done':
         if (flow === 'merge' && event.summary?.ref) {
           view.mergeMeta = { ...(view.mergeMeta ?? {}), ref: event.summary.ref };
@@ -2678,6 +2720,7 @@ function createSession(flow) {
     view.mergeMeta = null;
     view.setup = false;
     view.setupError = '';
+    view.sourceIssue = null;
     hideHandoff();
     dom.richView.innerHTML = '';
     dom.rawView.textContent = '';
@@ -2724,6 +2767,7 @@ function createSession(flow) {
   async function start(brief) {
     const { agentPreset, agentCmd } = selectedAgent();
     const publishRequested = flow === 'merge' ? false : Boolean(dom.publish?.checked);
+    const sourceIssue = flow === 'merge' ? null : view.sourceIssue;
     if (agentPreset === 'custom' && !agentCmd) {
       addEntry('session', 'Add an agent command in Settings, or pick a preset.');
       return;
@@ -2744,7 +2788,13 @@ function createSession(flow) {
           brief,
           agentPreset,
           agentCmd,
-          ...(flow === 'merge' ? {} : { publish: publishRequested })
+          ...(sourceIssue ? { issue: sourceIssue } : {}),
+          ...(flow === 'merge'
+            ? {}
+            : {
+              publish: publishRequested,
+              closeIssues: Boolean(el.form.closeIssues?.checked)
+            })
         })
       });
 
@@ -2752,6 +2802,7 @@ function createSession(flow) {
       announceStatus('Session started.');
     } catch (error) {
       view.running = false;
+      view.sourceIssue = sourceIssue;
       dom.stop.disabled = true;
       setStatus('failed', false);
       setScope('session failed');
@@ -2910,6 +2961,7 @@ function createSession(flow) {
   dom.issueSelect?.addEventListener('change', importSelectedIssue);
   dom.issueSource?.addEventListener('change', () => {
     view.issueChoices = [];
+    view.sourceIssue = null;
     dom.issueSelect.replaceChildren(new Option('Load open issues…', ''));
     dom.issueSelect.disabled = true;
     dom.issueStatus.textContent = '';
@@ -3232,16 +3284,12 @@ async function loadConfig() {
       : (defaults.prPreset || 'github');
     togglePrCustom();
 
-    // Older settings stored push and pr as independent booleans. Map them once
-    // so an existing project keeps the same publishing choice.
-    const legacyPublish = settings.push === false
-      ? 'commit'
-      : settings.pr === false
-        ? 'push'
-        : 'pr';
-    el.form.publish.value = ['commit', 'push', 'pr'].includes(settings.publish)
-      ? settings.publish
-      : legacyPublish;
+    // Publishing always pushes now, so a legacy commit-only setting becomes a
+    // plain push and an independent push/pr pair still resolves to one choice.
+    el.form.publish.value = publishChoice(settings);
+    if (el.form.closeIssues) {
+      el.form.closeIssues.checked = settings.closeIssues === true;
+    }
 
     updatePlan();
     sessionViews.enhancement?.syncPublish?.();

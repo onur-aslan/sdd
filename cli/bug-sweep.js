@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { assertNativeSkillAvailable, buildNativeSkillCall, resolveNativeSkillAgent } from './native-skills.js';
 import { fetchGitLabIssues, normalizeGitLabProject, parseGitLabIssueKeys } from './gitlab-issues.js';
+import { closeTrackerIssue } from './issue-tracker.js';
 
 export const DEFAULT_AGENT_COMMAND = '["claude","-p"]';
 export const DEFAULT_MAX_TURNS = 5;
@@ -69,6 +70,7 @@ const BOOLEAN_FLAGS = new Set([
   '--dry-run',
   '--no-push',
   '--no-pr',
+  '--close-issues',
   '--worktree',
   '--fetch-base',
   '--gitlab-push',
@@ -170,6 +172,9 @@ Publishing:
   --remote <name>          Git remote (default: origin)
   --no-push                Do not push the branch or tag
   --no-pr                  Do not open or update a pull request
+  --close-issues           Close each fixed source issue after the branch is pushed.
+                           Jira uses a transition into the Done category; GitHub and
+                           GitLab receive a close request. Off by default.
   --pr-cmd <command>       Replace the GitHub CLI. A plain command runs through the
                            shell and reads SDD_PR_TITLE, SDD_PR_BODY, SDD_PR_BODY_FILE,
                            SDD_PR_BASE, SDD_PR_HEAD, SDD_PR_REMOTE, SDD_PR_PROJECT,
@@ -907,6 +912,7 @@ export function parseBugSweepArgs(argv) {
     dryRun: Boolean(raw['--dry-run']),
     push: !raw['--no-push'],
     pr: !raw['--no-pr'],
+    closeIssues: Boolean(raw['--close-issues']),
     verbose: Boolean(raw['--verbose'])
   };
 }
@@ -3457,6 +3463,59 @@ async function runSingleSweep(argv, dependencies = {}) {
   } finally {
     state.prUrl = publication.prUrl ?? state.prUrl ?? null;
     writeState(statePath, state, now);
+  }
+
+  if (options.closeIssues) {
+    if (!publication.pushed) {
+      logger('Source issues were left open because the branch was not pushed.');
+    } else {
+      const jiraHeaders = jira
+        ? {
+          Authorization: buildJiraAuthHeader({ auth: jira.auth, email: jira.email, token: jira.token }),
+          Accept: 'application/json'
+        }
+        : null;
+
+      for (const bug of state.bugs.filter((item) => item.status === 'fixed')) {
+        try {
+          const result = await closeTrackerIssue({
+            issue: bug,
+            jira: jira
+              ? {
+                baseUrl: jira.baseUrl,
+                headers: jiraHeaders,
+                apiVersion: jira.apiVersion,
+                fetchImpl
+              }
+              : null,
+            github: options.source === 'github'
+              ? {
+                repo: options.githubRepo,
+                token: options.githubToken,
+                apiUrl: options.githubApiUrl,
+                fetchImpl
+              }
+              : null,
+            gitlab: options.source === 'gitlab'
+              ? {
+                project: options.gitlabProject,
+                hostname: options.gitlabProject?.hostname,
+                cwd: activeDir,
+                run: spawnImpl
+              }
+              : null
+          });
+
+          logger(`Closed ${bug.key}${result.already ? ' (already done)' : ''}.`);
+          emit({ type: 'issue-closed', key: bug.key, status: result.status, url: bug.url ?? '' });
+        } catch (error) {
+          // Closing is a convenience on top of a completed sweep. A tracker
+          // rejection must not turn the fix into a failure.
+          logger(`Could not close ${bug.key}: ${error.message}`);
+          emit({ type: 'issue-close-failed', key: bug.key, error: error.message, url: bug.url ?? '' });
+        }
+      }
+    }
   }
 
   emit({
