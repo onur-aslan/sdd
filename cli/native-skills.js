@@ -19,16 +19,18 @@ export function resolveNativeSkillAgent(agentPreset, command) {
 }
 
 export function buildNativeSkillCall(skillName, agentPreset, skillArguments = {}) {
+  // `arguments` is the skill's own positional argument string. Other keys are
+  // Studio-level options the skill understands as `key=value`.
   const args = Object.entries(skillArguments)
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
-    .map(([key, value]) => `${key}=${value}`)
-    .join(', ');
+    .map(([key, value]) => (key === 'arguments' ? String(value) : `${key}=${value}`))
+    .join(' ');
   const agent = String(agentPreset ?? '').trim().toLowerCase();
-  const detail = args ? ` Studio arguments: ${args}.` : '';
+  const detail = args ? `\n\n${args}` : '';
 
   if (agent === 'codex') return `Use the $${skillName} skill.${detail}`;
   if (agent === 'opencode') return `Load the ${skillName} skill by exact name using OpenCode's native skill tool, then follow it.${detail}`;
-  if (agent === 'claude' || agent === 'cursor' || agent === 'antigravity') return `/${skillName}${detail ? `\n${detail.trim()}` : ''}`;
+  if (agent === 'claude' || agent === 'cursor' || agent === 'antigravity') return `/${skillName}${args ? ` ${args}` : ''}`;
 
   const error = new Error('A supported native skill-capable agent must be selected; skill text is never embedded as a fallback.');
   error.statusCode = 400;

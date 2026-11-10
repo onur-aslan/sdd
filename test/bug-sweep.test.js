@@ -169,7 +169,7 @@ test('bug-sweep defers the persistent branch and tag until the repository is kno
   assert.equal(options.limit, 50);
   assert.equal(options.maxTurns, 5);
   assert.equal(options.timeoutSeconds, 1800);
-  assert.equal(options.workDir, '.bug-fix');
+  assert.equal(options.workDir, '.sdd');
   assert.equal(options.push, true);
   assert.equal(options.pr, true);
   assert.equal(options.resume, false);
@@ -688,7 +688,7 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
     assert.equal(git(root, ['status', '--porcelain']), '');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-2').status, 'not-fixed');
     assert.equal(state.phase, 'complete');
   } finally {
@@ -765,7 +765,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
     assert.match(output, /Fixed: 1\/2/);
     const agentArgs = fs.readFileSync(argsFile, 'utf8');
     assert.match(agentArgs, /\/bug-sweep/);
-    const taskPrompt = fs.readFileSync(path.join(root, '.bug-fix', 'ABC-1.prompt.md'), 'utf8');
+    const taskPrompt = fs.readFileSync(path.join(root, '.sdd', 'ABC-1.prompt.md'), 'utf8');
     assert.match(taskPrompt, /Pass max_turns=5 to the bug-fix skill/);
     assert.match(output, /✅ ABC-1/);
     assert.match(output, /❌ ABC-2  Not fixed — Could not reproduce/);
@@ -776,12 +776,12 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
     assert.equal(git(root, ['status', '--porcelain']), '');
     assert.match(git(root, ['show', '--name-only', '--pretty=format:', 'HEAD']), /app\.txt/);
 
-    assert.ok(fs.existsSync(path.join(root, '.bug-fix', 'ABC-1.result.json')));
-    assert.ok(fs.existsSync(path.join(root, '.bug-fix', 'ABC-2.result.json')));
-    assert.ok(fs.existsSync(path.join(root, '.bug-fix', 'report-2026-10-19.md')));
-    assert.ok(!fs.existsSync(path.join(root, '.bug-fix', '.lock')), 'the lock is released after the sweep');
+    assert.ok(fs.existsSync(path.join(root, '.sdd', 'ABC-1.result.json')));
+    assert.ok(fs.existsSync(path.join(root, '.sdd', 'ABC-2.result.json')));
+    assert.ok(fs.existsSync(path.join(root, '.sdd', 'report-2026-10-19.md')));
+    assert.ok(!fs.existsSync(path.join(root, '.sdd', '.lock')), 'the lock is released after the sweep');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-1').status, 'fixed');
     assert.equal(state.bugs.find((bug) => bug.key === 'ABC-2').status, 'not-fixed');
     assert.equal(state.phase, 'complete');
@@ -835,14 +835,14 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
 
     // The worktree is kept while the branch is unmerged, so the next run can
     // continue in the same checkout.
-    const worktreePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    const worktreePath = path.join(root, '.sdd', 'worktrees', 'bug-fix-2026-10-19');
     assert.equal(fs.existsSync(worktreePath), true);
     const remaining = git(root, ['worktree', 'list', '--porcelain'])
       .split(/\r?\n/)
       .filter((line) => line.startsWith('worktree '));
     assert.equal(remaining.length, 2, 'the main and sweep worktrees remain');
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     assert.equal(state.phase, 'complete');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -932,7 +932,7 @@ test('--worktree reuses one branch checkout until the branch is merged', async (
     const originalBranch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
     // A stale, unregistered directory from an interrupted run must not block
     // the next sweep. It is removed and the stable per-branch path is reused.
-    const stablePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
+    const stablePath = path.join(root, '.sdd', 'worktrees', 'bug-fix-2026-10-19');
     fs.mkdirSync(stablePath, { recursive: true });
     const agentPath = createFakeAgent(agentDir);
     const baseArgs = [
@@ -954,7 +954,7 @@ test('--worktree reuses one branch checkout until the branch is merged', async (
 
     assert.match(first, /1 bug\(s\) still pending/);
 
-    const statePath = path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json');
+    const statePath = path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json');
     const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
     const worktreePath = state.worktree;
 
@@ -1019,8 +1019,8 @@ test('--reset-branch archives an unmerged branch after a squash merge', async ()
     await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
 
     const tip = git(root, ['rev-parse', 'bug-fix/2026-10-19']);
-    const stablePath = path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19');
-    const statePath = path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json');
+    const stablePath = path.join(root, '.sdd', 'worktrees', 'bug-fix-2026-10-19');
+    const statePath = path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json');
 
     assert.equal(fs.existsSync(stablePath), true);
 
@@ -1074,7 +1074,7 @@ test('a sweep continues fixes committed on its branch by another checkout', asyn
       ...jiraFlags
     ], { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
 
-    const state = JSON.parse(fs.readFileSync(path.join(root, '.bug-fix', 'state-bug-fix-2026-10-19.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     const carried = state.bugs.find((bug) => bug.key === 'ABC-2');
 
     assert.match(output, /Fixed: 2\/2/);
@@ -1123,7 +1123,7 @@ test('--worktree refuses a sweep branch checked out in the main worktree', async
     );
 
     assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), 'bug-fix/2026-10-19');
-    assert.equal(fs.existsSync(path.join(root, '.bug-fix', 'worktrees', 'bug-fix-2026-10-19')), false);
+    assert.equal(fs.existsSync(path.join(root, '.sdd', 'worktrees', 'bug-fix-2026-10-19')), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(agentDir, { recursive: true, force: true });

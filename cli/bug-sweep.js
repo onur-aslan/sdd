@@ -14,7 +14,9 @@ export const DEFAULT_MAX_TURNS = 5;
 export const DEFAULT_LIMIT = 50;
 export const DEFAULT_FETCH_LIMIT = 500;
 export const DEFAULT_TIMEOUT_SECONDS = 1800;
-export const DEFAULT_WORK_DIR = '.bug-fix';
+export const DEFAULT_WORK_DIR = '.sdd';
+// The pre-4.3 state directory. Only the settings migration still reads it.
+export const LEGACY_WORK_DIR = '.bug-fix';
 export const DEFAULT_GITHUB_API_URL = 'https://api.github.com';
 export const DEFAULT_GITHUB_STATE = 'open';
 
@@ -2660,8 +2662,10 @@ async function processBug({
   fs.rmSync(resultFile, { force: true });
   fs.writeFileSync(promptFile, renderBugPrompt({ bug, maxTurns: options.maxTurns, resultFile }), 'utf8');
 
-  const skillCall = buildNativeSkillCall('bug-sweep', options.agentPreset, { max_turns: options.maxTurns });
-  const shortPrompt = `${skillCall} Read the task file at \`${promptFile}\` and complete it. Write the result JSON to \`${resultFile}\`. Do not commit, push, or ask questions.`;
+  // The skill reads the task file named in the invocation; the task file holds
+  // the bug, the attempt limit, and the result path.
+  const skillCall = buildNativeSkillCall('bug-sweep', options.agentPreset);
+  const shortPrompt = `${skillCall}\n\n${promptFile}`;
   const invocation = buildAgentInvocation(options.agentCommand, { prompt: shortPrompt, promptFile });
   const spec = buildSpawnSpec(invocation);
   const logStream = fs.createWriteStream(logFile, { flags: 'w' });

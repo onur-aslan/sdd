@@ -81,28 +81,10 @@ export function buildFeatureSteps({ pipeline, specRelative, featureRelative, ver
   return [{ skill: 'sdd-developer', args: [specRelative, ...verifyFlag] }];
 }
 
-export function buildStepPrompt(step, { verify = true, agentPreset } = {}) {
-  const argument = step.args.join(' ');
-  const tail = verify
-    ? 'Run the E2E verification phase it describes.'
-    : 'Skip the E2E verification phase; it is not wanted for this build.';
-  const skillCall = buildNativeSkillCall(step.skill, agentPreset, { arguments: argument });
-
-  if (step.skill === 'spec-to-task') {
-    return [
-      skillCall,
-      '',
-      `Write \`${step.produces}\` next to the spec, following the skill exactly.`,
-      'Do not commit, push, or open a pull request. Print the task breakdown when it is done.'
-    ].join('\n');
-  }
-
-  return [
-    skillCall,
-    '',
-    `Follow that skill exactly in this repository. ${tail}`,
-    'Do not commit, push, or open a pull request. Print the final report when the pipeline is done.'
-  ].join('\n');
+// The step prompt is the skill call with the same arguments the CLI build
+// passes. The skill owns the work and the report; the studio owns publishing.
+export function buildStepPrompt(step, { agentPreset } = {}) {
+  return buildNativeSkillCall(step.skill, agentPreset, { arguments: step.args.join(' ') });
 }
 
 async function changedFiles(cwd) {

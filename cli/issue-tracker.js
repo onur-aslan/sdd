@@ -232,6 +232,280 @@ export async function closeGitLabIssue({
   return { closed: true, status };
 }
 
+// The spec starts with "# Feature: <name>" (deep-spec format). Fall back to the
+// first heading, then to the feature directory name the caller passes.
+export function specIssueTitle(markdown, fallback = 'Feature spec') {
+  const content = String(markdown ?? '');
+  const feature = /^#\s+Feature:\s*(.+?)\s*$/im.exec(content)?.[1]?.trim();
+
+  if (feature) {
+    return feature.slice(0, 240);
+  }
+
+  const heading = /^#\s+(.+?)\s*$/m.exec(content)?.[1]?.trim();
+
+  return (heading || fallback || 'Feature spec').slice(0, 240);
+}
+
+// Jira Cloud v3 takes Atlassian Document Format, Data Center v2 takes plain
+// text. Each non-empty line becomes a paragraph so the spec keeps its shape.
+function jiraAdf(text) {
+  const paragraphs = String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .map((line) => (line
+      ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
+      : { type: 'paragraph' }));
+
+  return {
+    type: 'doc',
+    version: 1,
+    content: paragraphs.length > 0 ? paragraphs : [{ type: 'paragraph' }]
+  };
+}
+
+export async function createJiraIssue({
+  project,
+  summary,
+  description,
+  issueType = 'Task',
+  baseUrl,
+  headers = {},
+  apiVersion = 'auto',
+  fetchImpl = globalThis.fetch
+} = {}) {
+  const base = text(baseUrl).replace(/\/+$/, '');
+  const projectKey = text(project);
+
+  if (!base) {
+    throw new Error('Jira base URL is required to create an issue.');
+  }
+
+  if (!projectKey) {
+    throw new Error('A Jira project key is required to create an issue.');
+  }
+
+  let lastError = null;
+
+  for (const version of jiraVersions(apiVersion)) {
+    const response = await fetchImpl(`${base}/rest/api/${version}/issue`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...headers
+      },
+      body: JSON.stringify({
+        fields: {
+          project: { key: projectKey },
+          summary,
+          description: version === '3' ? jiraAdf(description) : String(description ?? ''),
+          issuetype: { name: issueType }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      lastError = new Error(`Jira issue create failed (${response.status}): ${await readError(response)}`);
+      continue;
+    }
+
+    const data = await response.json().catch(() => ({}));
+
+    return {
+      created: true,
+      source: 'jira',
+      key: text(data.key),
+      id: data.id == null ? null : String(data.id),
+      url: data.key ? `${base}/browse/${data.key}` : ''
+    };
+  }
+
+  throw lastError ?? new Error('Could not create the Jira issue.');
+}
+
+export async function createGitHubIssue({
+  repo,
+  title,
+  body,
+  labels = [],
+  token = '',
+  apiUrl = 'https://api.github.com',
+  fetchImpl = globalThis.fetch
+} = {}) {
+  const target = text(repo);
+
+  if (!GITHUB_REPO.test(target)) {
+    throw new Error(`Invalid GitHub repository "${repo}". Use owner/repo.`);
+  }
+
+  const base = text(apiUrl).replace(/\/+$/, '') || 'https://api.github.com';
+  const response = await fetchImpl(`${base}/repos/${target}/issues`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'sdd-issue-tracker',
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify({
+      title,
+      body,
+      ...(Array.isArray(labels) && labels.length > 0 ? { labels } : {})
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub issue create failed (${response.status}): ${await readError(response)}`);
+  }
+
+  const data = await response.json();
+
+  return {
+    created: true,
+    source: 'github',
+    key: `GH-${data.number}`,
+    number: data.number,
+    url: text(data.html_url)
+  };
+}
+
+export async function createGitLabIssue({
+  project,
+  title,
+  description,
+  labels = [],
+  hostname = null,
+  cwd = process.cwd(),
+  run
+} = {}) {
+  if (typeof run !== 'function') {
+    throw new Error('A process runner is required to create a GitLab issue.');
+  }
+
+  const target = typeof project === 'string' ? normalizeGitLabProject(project) : project;
+
+  if (!target?.project) {
+    throw new Error('A GitLab project is required to create an issue.');
+  }
+
+  const host = target.hostname ?? hostname;
+  const args = [
+    'api',
+    ...(host ? ['--hostname', host] : []),
+    '--method', 'POST',
+    `projects/${encodeURIComponent(target.project)}/issues`,
+    '-f', `title=${title}`,
+    '-f', `description=${description}`
+  ];
+
+  for (const label of labels) {
+    args.push('-f', `labels[]=${label}`);
+  }
+
+  let result;
+
+  try {
+    result = await run('glab', args, { cwd, timeoutMs: 30000 });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error('GitLab CLI (glab) is not installed or is not on PATH. Install it from https://docs.gitlab.com/cli/.');
+    }
+
+    throw error;
+  }
+
+  if (!result || result.code !== 0) {
+    const detail = text(result?.stderr) || text(result?.stdout);
+    throw new Error(detail || 'GitLab issue create failed. Run "glab auth login" and check project access.');
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(result.stdout);
+  } catch {
+    throw new Error('Could not read the JSON response from glab api. Update GitLab CLI and try again.');
+  }
+
+  return {
+    created: true,
+    source: 'gitlab',
+    key: `GL-${data.iid}`,
+    number: data.iid,
+    url: text(data.web_url)
+  };
+}
+
+// One issue is created per spec. The body is the spec file itself; the title
+// comes from its first heading. Missing credentials and tracker rejections are
+// the caller's problem to report, never a reason to lose the spec.
+export async function createTrackerIssue({
+  source,
+  target,
+  title,
+  body,
+  issueType = 'Task',
+  labels = [],
+  jira,
+  github,
+  gitlab
+} = {}) {
+  const tracker = text(source).toLowerCase();
+
+  if (tracker === 'jira') {
+    if (!jira) {
+      throw new Error('Jira is not configured.');
+    }
+
+    return createJiraIssue({
+      project: text(target) || text(jira.project),
+      summary: title,
+      description: body,
+      issueType,
+      baseUrl: jira.baseUrl,
+      headers: jira.headers,
+      apiVersion: jira.apiVersion,
+      fetchImpl: jira.fetchImpl
+    });
+  }
+
+  if (tracker === 'github') {
+    if (!github) {
+      throw new Error('GitHub is not configured.');
+    }
+
+    return createGitHubIssue({
+      repo: text(target) || text(github.repo),
+      title,
+      body,
+      labels,
+      token: github.token,
+      apiUrl: github.apiUrl,
+      fetchImpl: github.fetchImpl
+    });
+  }
+
+  if (tracker === 'gitlab') {
+    if (!gitlab) {
+      throw new Error('GitLab is not configured.');
+    }
+
+    return createGitLabIssue({
+      project: target || gitlab.project,
+      title,
+      description: body,
+      labels,
+      hostname: gitlab.hostname,
+      cwd: gitlab.cwd,
+      run: gitlab.run
+    });
+  }
+
+  throw new Error(`Unsupported issue source "${source}".`);
+}
+
 // Dispatch one source issue to its tracker. Callers keep closure best-effort:
 // a tracker failure is reported, never allowed to undo a finished run.
 export async function closeTrackerIssue({ issue, jira, github, gitlab } = {}) {

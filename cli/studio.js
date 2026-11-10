@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_TURNS,
   DEFAULT_TIMEOUT_SECONDS,
   DEFAULT_WORK_DIR,
+  LEGACY_WORK_DIR,
   buildJiraAuthHeader,
   buildJql,
   createJiraFetch,
@@ -29,7 +30,7 @@ import {
   runProcess
 } from './bug-sweep.js';
 import { fetchGitLabIssues, normalizeGitLabProject } from './gitlab-issues.js';
-import { closeTrackerIssue, normalizeSourceIssue } from './issue-tracker.js';
+import { closeTrackerIssue, createTrackerIssue, normalizeSourceIssue, specIssueTitle } from './issue-tracker.js';
 import { runInterviewSession, resolveSessionFlow, validateBrief, validateSessionSkillArguments } from './agent-session.js';
 import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
 import {
@@ -180,6 +181,7 @@ const assetsDir = fileURLToPath(new URL('../studio/', import.meta.url));
 const SESSION_ROUTE_PREFIXES = [
   { prefix: '/api/enhancements', flow: 'enhancement' },
   { prefix: '/api/features', flow: 'feature' },
+  { prefix: '/api/spec-issues', flow: 'specIssue' },
   { prefix: '/api/merges', flow: 'merge' }
 ];
 
@@ -600,6 +602,104 @@ async function closeSourceIssueForJob({
   });
 }
 
+// The spec issue flow files the spec itself as one tracker issue. The tracker
+// source follows the tab's "Start from" choice first, then the saved setting.
+export function resolveSpecIssueTarget({ request = {}, saved = {} } = {}) {
+  const imported = normalizeSourceIssue(request.issue);
+  const requested = String(request.specIssueSource ?? '').toLowerCase();
+  const source = imported?.source
+    || (['github', 'gitlab', 'jira'].includes(requested) ? requested : '')
+    || (['github', 'gitlab', 'jira'].includes(saved.specIssueSource) ? saved.specIssueSource : 'jira');
+  const savedTarget = source === 'github'
+    ? saved.githubRepo
+    : source === 'gitlab'
+      ? saved.gitlabProject
+      : saved.project;
+
+  return {
+    source,
+    target: String(imported?.target || savedTarget || '').trim()
+  };
+}
+
+async function createIssueForJob({
+  cwd,
+  target,
+  artifact,
+  settings = {},
+  fetchImpl,
+  run = runProcess
+} = {}) {
+  const spec = fs.readFileSync(artifact, 'utf8');
+  const source = String(target?.source ?? '').toLowerCase();
+  const destination = String(target?.target ?? '').trim();
+  const title = specIssueTitle(spec, featureNameFromSpec(artifact));
+
+  if (source === 'jira') {
+    const jira = resolveStudioJira(settings, settings);
+
+    if (!jira.url || !jira.token) {
+      throw new Error('Jira credentials are not configured.');
+    }
+
+    return createTrackerIssue({
+      source,
+      target: destination,
+      title,
+      body: spec,
+      jira: {
+        baseUrl: jira.url,
+        headers: {
+          Authorization: buildJiraAuthHeader({ auth: jira.auth, email: jira.email, token: jira.token }),
+          Accept: 'application/json'
+        },
+        apiVersion: jira.apiVersion,
+        fetchImpl: fetchImpl ?? createJiraFetch({ caPath: jira.ca, insecure: jira.insecure })
+      }
+    });
+  }
+
+  if (source === 'github') {
+    const github = resolveStudioGitHub(settings, settings);
+    const repo = destination || github.repo;
+
+    if (!repo) {
+      throw new Error('A GitHub repository is not configured.');
+    }
+
+    return createTrackerIssue({
+      source,
+      target: repo,
+      title,
+      body: spec,
+      github: {
+        repo,
+        token: await githubCliToken(cwd),
+        apiUrl: github.apiUrl,
+        fetchImpl: fetchImpl ?? globalThis.fetch
+      }
+    });
+  }
+
+  if (source === 'gitlab') {
+    const project = destination || settings.gitlabProject;
+
+    if (!project) {
+      throw new Error('A GitLab project is not configured.');
+    }
+
+    return createTrackerIssue({
+      source,
+      target: project,
+      title,
+      body: spec,
+      gitlab: { project, cwd, run }
+    });
+  }
+
+  throw new Error(`Unsupported issue source "${source}".`);
+}
+
 // A run closes its source issue only after the branch was pushed, with or
 // without a merge request. That is the same rule for every workflow.
 function publishCompleted(publish) {
@@ -631,6 +731,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       updatedAt: job.updatedAt,
       request,
       publish: job.publish ?? null,
+      specIssue: job.specIssue ?? null,
       result: job.result,
       error: job.error,
       events: job.events
@@ -679,6 +780,52 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       emit(job, {
         type: 'issue-close-failed',
         key: job.issue.key,
+        error: error.message
+      });
+    }
+  }
+
+  // The spec is the artifact; the tracker issue is the handoff. A missing
+  // target or a tracker rejection is reported on the job but never turns a
+  // finished interview into a failure.
+  async function publishSpecIssue(job, artifact) {
+    const target = job.specIssueTarget ?? { source: '', target: '' };
+
+    if (!target.target) {
+      const reason = target.source === 'github'
+        ? 'Set a GitHub repository in Settings to create the spec issue.'
+        : target.source === 'gitlab'
+          ? 'Set a GitLab project in Settings to create the spec issue.'
+          : 'Pick a Jira project in Settings to create the spec issue.';
+
+      job.specIssue = { status: 'skipped', source: target.source, reason };
+      emit(job, { type: 'issue-skipped', source: target.source, reason });
+
+      return;
+    }
+
+    try {
+      const result = await createIssueForJob({
+        cwd,
+        target,
+        artifact,
+        settings: readStore(cwd),
+        fetchImpl,
+        run: spawnImpl ?? runProcess
+      });
+
+      job.specIssue = { status: 'created', ...result };
+      emit(job, {
+        type: 'issue-created',
+        source: result.source,
+        key: result.key,
+        url: result.url
+      });
+    } catch (error) {
+      job.specIssue = { status: 'failed', source: target.source, error: error.message };
+      emit(job, {
+        type: 'issue-create-failed',
+        source: target.source,
         error: error.message
       });
     }
@@ -774,8 +921,9 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
   }
 
   // An interview session with the agent: one question at a time, then a plan
-  // that the enhancement flow implements after approval, or a spec (feature).
-  // The skill files stay untouched on disk.
+  // that the enhancement flow implements after approval, a spec (feature), or a
+  // spec that the studio files as a tracker issue (specIssue). The skill files
+  // stay untouched on disk.
   function startSession(flow, request = {}) {
     const config = resolveSessionFlow(flow);
 
@@ -787,9 +935,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     const saved = readStore(cwd);
     const agentPreset = request.agentPreset ?? saved.agentPreset;
     const agentCmd = request.agentCmd ?? saved.agentCmd;
+    const isSpecIssue = config.id === 'specIssue';
     const sourceIssue = config.id === 'merge' ? null : normalizeSourceIssue(request.issue);
     const closeIssues = config.id !== 'merge'
+      && !isSpecIssue
       && (request.closeIssues === undefined ? saved.closeIssues === true : request.closeIssues === true);
+    const specIssueTarget = isSpecIssue ? resolveSpecIssueTarget({ request, saved }) : null;
 
     // Validate before the job exists, so a bad agent command is a 400 instead of
     // a session that fails with no useful output.
@@ -810,7 +961,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
     const id = randomUUID();
     const publishChoice = normalizePublish(saved.publish, saved);
-    const publish = config.id === 'merge'
+    const publish = config.id === 'merge' || isSpecIssue
       ? null
       : createSessionPublishPlan({
         flow: config.id,
@@ -839,10 +990,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         ...(sourceIssue ? { issue: sourceIssue } : {}),
         closeIssues,
         ...(publish ? { publish: publish.enabled } : {}),
+        ...(specIssueTarget ? { specIssueTarget } : {}),
         ...(merge ? { merge } : {})
       },
       issue: sourceIssue,
       closeIssues,
+      specIssueTarget,
       publish,
       events: [],
       listeners: new Set(),
@@ -955,6 +1108,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
           });
         }
 
+        // The spec issue flow has no branch and no build: once deep-spec writes
+        // the spec, the studio files it as one tracker issue.
+        if (config.id === 'specIssue' && summary.artifact) {
+          await publishSpecIssue(job, summary.artifact);
+        }
+
         // Every workflow uses the same closing rule: push (or push + merge
         // request) must succeed first. A feature session only commits the spec;
         // its issue closes after the build publishes the implementation.
@@ -970,7 +1129,8 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
             engine: summary.engine,
             flow: summary.flow,
             ...(summary.ref ? { ref: summary.ref } : {}),
-            ...(publish ? { publish } : {})
+            ...(publish ? { publish } : {}),
+            ...(job.specIssue ? { issue: job.specIssue } : {})
           }
         });
       })
@@ -1009,6 +1169,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
 
   function startFeature(request = {}) {
     return startSession('feature', request);
+  }
+
+  // The separate planning workflow: deep-spec writes the spec, then the studio
+  // files it as one tracker issue. It never branches, builds, or closes issues.
+  function startSpecIssue(request = {}) {
+    return startSession('specIssue', request);
   }
 
   // A merge session is the same interview engine with a branch-based end. The
@@ -1390,6 +1556,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     startSession,
     startEnhancement,
     startFeature,
+    startSpecIssue,
     startMerge,
     landMerge,
     startFeatureBuild,
@@ -1616,6 +1783,7 @@ const SETTINGS_KEYS = [
   'gitlabProject',
   'enhancementSource',
   'featureSource',
+  'specIssueSource',
   'prPreset',
   'prCommand',
   // Set once the Settings drawer has been seen, so it opens on the first visit
@@ -1637,7 +1805,7 @@ function settingsFile(cwd) {
 // Older versions wrote the same file under the bug-sweep work dir. It is moved
 // once so existing projects keep their project, agent, and tracker token.
 function legacySettingsFile(cwd) {
-  return path.join(path.resolve(cwd, DEFAULT_WORK_DIR), SETTINGS_FILE);
+  return path.join(path.resolve(cwd, LEGACY_WORK_DIR), SETTINGS_FILE);
 }
 
 function cleanKeys(raw, keys) {
@@ -1791,7 +1959,7 @@ export function resolveStudioGitHub(input = {}, saved = {}) {
   };
 }
 
-async function githubCliToken(cwd) {
+export async function githubCliToken(cwd) {
   let result;
 
   try {

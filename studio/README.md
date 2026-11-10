@@ -1,6 +1,6 @@
 # SDD Studio
 
-`sdd studio` is the local web dashboard for SDD's autonomous workflows. It drives the same `bug-sweep`, `enhancement`, `deep-spec`, and `merge` workflows as the CLI, but shows the queue, the conversation, and the run in one place so you do not have to remember flags or watch a terminal.
+`sdd studio` is the local web dashboard for SDD's autonomous workflows. It drives the same `bug-sweep`, `enhancement`, `deep-spec`, `spec-issue`, and `merge` workflows as the CLI, but shows the queue, the conversation, and the run in one place so you do not have to remember flags or watch a terminal.
 
 The server is dependency-free and binds to `127.0.0.1` by default. The dashboard is a static page served from this package; there is no build step.
 
@@ -103,9 +103,9 @@ sdd bug-sweep --project ABC \
   --limit 20
 ```
 
-`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. Pass `--close-issues` to close each fixed issue after the branch is pushed; it is off by default and is skipped when `--no-push` is used. The persistent branch resumes automatically; `--resume` remains a compatibility flag. Pass `--tag <name>` only when you also want a per-run tag, and `--reset-branch` to archive and delete the branch after a squash merge. State, prompts, agent logs, and the generated PR body live in `.bug-fix/`, which the command keeps out of git.
+`--agent-cmd` accepts a JSON array or a command line, so Claude Code, Cursor, OpenCode, and Codex all work. Use `--dry-run` to see the plan, `--retry-failed` to retry bugs a previous run could not fix, and `--no-push` or `--no-pr` to stop before publishing. Pass `--close-issues` to close each fixed issue after the branch is pushed; it is off by default and is skipped when `--no-push` is used. The persistent branch resumes automatically; `--resume` remains a compatibility flag. Pass `--tag <name>` only when you also want a per-run tag, and `--reset-branch` to archive and delete the branch after a squash merge. State, prompts, agent logs, and the generated PR body live in `.sdd/`, which the command keeps out of git.
 
-Use `--worktree` to fix bugs in a separate checkout under `.bug-fix/worktrees/`. The checkout path is stable per branch and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. A directory left behind by an interrupted run is removed, or replaced with a one-off fallback path if Windows still holds it; the next run reuses the registered checkout for the branch. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. It is kept while the branch is unmerged, so the next run — and the same user on another computer — continues in the same branch. When the branch is merged into the base, the next run leaves a merge tag, removes the checkout, deletes the branch and its state, and starts a fresh one. The default GitHub path also reads the pull request state, so a squash merge is detected even though git no longer sees the branch as an ancestor; on another forge, pass `--reset-branch` after a squash merge. The CLI runs in place unless you pass `--worktree`; the dashboard always uses an isolated worktree.
+Use `--worktree` to fix bugs in a separate checkout under `.sdd/worktrees/`. The checkout path is stable per branch and shares the same `.git` store, so commits, tags, and pushes behave normally, but your own working tree — including uncommitted changes — is never touched. A directory left behind by an interrupted run is removed, or replaced with a one-off fallback path if Windows still holds it; the next run reuses the registered checkout for the branch. The checkout starts from the remote-tracking base (`origin/<base>`) when one exists, and `--fetch-base` refreshes it from the remote first. It is kept while the branch is unmerged, so the next run — and the same user on another computer — continues in the same branch. When the branch is merged into the base, the next run leaves a merge tag, removes the checkout, deletes the branch and its state, and starts a fresh one. The default GitHub path also reads the pull request state, so a squash merge is detected even though git no longer sees the branch as an ancestor; on another forge, pass `--reset-branch` after a squash merge. The CLI runs in place unless you pass `--worktree`; the dashboard always uses an isolated worktree.
 
 The `bug-sweep` skill reports each outcome through a small JSON contract (`status`, `summary`, `how`, `critical`, `criticalReason`, `evidence`). The generated per-bug task file carries that contract. The skill runs `bug-fix` in a fresh subagent for the fix, then prepares the result as one JSON object. Both skills must be installed where the selected agent discovers skills; `sdd install` includes them.
 
@@ -125,7 +125,7 @@ sdd bug-sweep --project ABC --at 00:00 --every 1d
 
 ```bash
 # cron (Linux/macOS): every day at 00:00
-0 0 * * * cd /path/to/repo && sdd bug-sweep --project ABC >> .bug-fix/cron.log 2>&1
+0 0 * * * cd /path/to/repo && sdd bug-sweep --project ABC >> .sdd/cron.log 2>&1
 ```
 
 ```powershell
@@ -183,7 +183,7 @@ GitLab can also create the merge request without any extra CLI: `--gitlab-push` 
 sdd bug-sweep --project ABC --pr --gitlab-push --base main
 ```
 
-For a fully disconnected run, use `--no-push --no-pr`: the sweep still commits each fix locally and writes the report to `.bug-fix/`.
+For a fully disconnected run, use `--no-push --no-pr`: the sweep still commits each fix locally and writes the report to `.sdd/`.
 
 ## Enhancement and Feature
 
@@ -206,6 +206,18 @@ The **Spec ready** plate asks the two decisions the [feature workflow](../cli/wo
 2. **Run E2E verification?** Checked by default; unchecking adds `--no-verify`.
 
 **Start build** runs the chosen skills one step at a time in the current checkout. Each step is listed with its state, a dark log inset shows the output, and **Stop build** aborts the running step and the chain. A failed step names itself and stops the rest. The build never commits, pushes, or opens a merge request; it stops so you can review the diff. Build state survives a refresh.
+
+## Spec issue
+
+The **Spec issue** tab is a separate planning workflow. It runs the same `deep-spec` interview as **Feature**, but stops at the spec and files it as one tracker issue instead of offering a build.
+
+1. Pick the tracker under **File in**: Jira, GitHub, or GitLab. The choice is remembered as its own setting.
+2. Describe the feature and answer the interview one question at a time.
+3. When the agent writes `docs/sdd/features/<feature>/spec.md`, the studio creates one issue automatically. The title comes from the spec's `# Feature: <name>` heading and the body is the full file.
+
+The result plate links to the created issue. A missing target or a tracker rejection is reported in the conversation but does not turn the finished spec into a failure; the spec stays on disk. The tab never creates a branch, commits, pushes, opens a merge request, or closes anything.
+
+The same thing is available without the dashboard as `sdd spec-issue [spec.md]`; see [File a spec as an issue](../README.md#file-a-spec-as-an-issue).
 
 ## Merge
 
@@ -238,7 +250,7 @@ The Jira token is stored locally but never returned to the browser. The API only
 | Publish | Push branch or push + merge request |
 | Merge request preset, custom command | Which forge creates the merge request |
 | Jira deployment type, URL, email, token, auth mode, API version, CA, skip TLS | Jira connection |
-| Enhancement/Feature issue source | Per-tab tracker choice, saved separately for each |
+| Enhancement/Feature/Spec issue source | Per-tab tracker choice, saved separately for each |
 
 The sweep always uses an isolated worktree, fetches the base branch, resumes the single per-user bug-fix branch, and retries failed bugs. These are automatic and are not stored as choices.
 
@@ -267,7 +279,7 @@ Every other agent uses a replay-per-turn fallback: each turn re-invokes the agen
 
 The session reader shows your prompts and the agent's replies; tool calls, read results, and stderr stay out of the conversation. **Rich** renders Markdown — headings, lists, tables, quotes, links, code — and Mermaid diagrams inline. **Raw** shows the reply text for copying. Mermaid 12.2.0 is vendored under `studio/vendor/mermaid/` (MIT), so diagrams work without a CDN or network access.
 
-Transcripts are written to `.bug-fix/enhancements/<session>/`, `.bug-fix/features/<session>/`, and `.bug-fix/merges/<session>/`. A finished session is read back on load.
+Transcripts are written to `.sdd/enhancements/<session>/`, `.sdd/features/<session>/`, and `.sdd/merges/<session>/`. A finished session is read back on load.
 
 ## Local API
 
@@ -294,6 +306,7 @@ The dashboard is also usable as a small local API. All routes are JSON unless no
 | `POST /api/sweeps/:id/cancel` | Abort a running sweep |
 | `GET /api/enhancements` / `POST /api/enhancements` | List or start an enhancement session |
 | `GET /api/features` / `POST /api/features` | List or start a feature interview |
+| `GET /api/spec-issues` / `POST /api/spec-issues` | List or start a spec-to-issue session |
 | `GET /api/merges` / `POST /api/merges` | List or start a merge session |
 | `GET /api/<flow>/:id` | Session snapshot, including events so far |
 | `GET /api/<flow>/:id/events` | Live SSE event stream for a session |
@@ -305,7 +318,7 @@ The dashboard is also usable as a small local API. All routes are JSON unless no
 | `POST /api/jobs/:id/input` | Answer the agent's current question |
 | `POST /api/jobs/:id/permission` | Allow or deny the agent's permission request |
 
-`<flow>` is `enhancements`, `features`, or `merges`.
+`<flow>` is `enhancements`, `features`, `spec-issues`, or `merges`.
 
 ## Safety notes
 
@@ -314,6 +327,7 @@ The dashboard is also usable as a small local API. All routes are JSON unless no
 - Sweeps never force-push. With **Close the source issue** off (the default), the issue tracker is read-only.
 - The isolated worktree is on by default, so your own checkout — including uncommitted changes — is never touched. Its checkout and branch are kept until the branch is merged.
 - Merge landing never pushes and never creates a merge commit.
+- The spec issue tab creates the one issue it was asked for and never commits, pushes, or builds.
 
 ---
 

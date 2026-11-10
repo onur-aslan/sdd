@@ -176,6 +176,18 @@ enhancement
 
 The command reference, nightly scheduling, air-gapped Jira, and internal Git setup live in [studio/README.md](studio/README.md#from-the-cli).
 
+### File a spec as an issue
+
+`sdd spec-issue` files the spec written by `deep-spec` as one Jira, GitHub, or GitLab issue. It adds no skill: the interview still uses `deep-spec`, and the command only takes the finished `spec.md`.
+
+```bash
+sdd spec-issue
+sdd spec-issue docs/sdd/features/saved-searches/spec.md --source github
+sdd spec-issue spec.md --source jira --target ABC --dry-run
+```
+
+Without a path, the newest `docs/sdd/features/<feature>/spec.md` is used. The issue title comes from the spec's `# Feature: <name>` heading, and the body is the full file. Use `--source`, `--target`, `--type` (Jira, default `Task`), and `--labels` (GitHub/GitLab); saved studio settings fill the gaps. The command does not commit, push, or build anything. `--dry-run` prints the plan, and `--json` returns the plan or result as JSON.
+
 ### Studio (web dashboard)
 
 `sdd studio` opens a local dashboard for the same automation, so you do not have to remember flags or watch a terminal.
@@ -186,7 +198,7 @@ sdd studio
 
 The browser opens by default; `--no-open` only prints the URL, and without a global install use `npx @onuraslan/sdd@latest studio`. On Windows, double-click **`start-studio.cmd`**; from a checkout, `npm run studio` works too. The server binds to `127.0.0.1:4321` by default.
 
-The dashboard covers bug sweeps, enhancement and feature interviews, feature builds, and branch merges from one screen. Choices that need a human live in **Settings**; everything else is detected or remembered. See **[studio/README.md](studio/README.md)** for the workflows, settings, agent permissions, and the local HTTP API.
+The dashboard covers bug sweeps, enhancement, feature, and spec-issue interviews, feature builds, and branch merges from one screen. Choices that need a human live in **Settings**; everything else is detected or remembered. See **[studio/README.md](studio/README.md)** for the workflows, settings, agent permissions, and the local HTTP API.
 
 ### Core Skills
 

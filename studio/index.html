@@ -68,6 +68,16 @@
         </span>
       </button>
 
+      <button class="nav-item" data-view="specIssue">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h6M10 16h6"/></svg>
+        </span>
+        <span class="nav-copy">
+          <span class="nav-title">Spec issue</span>
+          <span class="nav-sub">Spec → issue/task</span>
+        </span>
+      </button>
+
       <button class="nav-item" data-view="merge">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
@@ -211,6 +221,18 @@
         </header>
 
         <div class="session-wrap" data-session-flow="feature"></div>
+      </section>
+
+      <section class="view hidden" data-view="specIssue">
+        <header class="page-head">
+          <div class="page-title">
+            <h1>Spec to issue</h1>
+            <p>Run the design interview, approve the spec, and file it as one tracker issue.</p>
+          </div>
+          <p class="scope" id="spec-issue-scope">spec → issue</p>
+        </header>
+
+        <div class="session-wrap" data-session-flow="specIssue"></div>
       </section>
 
       <section class="view hidden" data-view="merge">

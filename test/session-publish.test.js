@@ -93,10 +93,35 @@ test('session publishing creates the branch up front and commits on finish', asy
     publish,
     title: 'feat: add a command palette',
     body: 'Body',
-    dir: path.join(root, '.bug-fix', 'sessions', publish.sessionId)
+    dir: path.join(root, '.sdd', 'sessions', publish.sessionId)
   });
 
   assert.equal(pushed.status, 'committed');
+});
+
+test('session publishing keeps a commit the agent made on its own branch', async (t) => {
+  const root = createRepo();
+  const publish = planFor(root);
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  await beginSessionPublish({ cwd: root, publish });
+  fs.writeFileSync(path.join(root, 'palette.txt'), 'Search everything.\n', 'utf8');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'agent: implement palette']);
+
+  await commitSessionWork({
+    cwd: root,
+    publish,
+    title: 'feat: add a command palette',
+    body: 'SDD studio enhancement session.'
+  });
+
+  assert.equal(publish.status, 'committed');
+  assert.equal(publish.commits.length, 1);
+  assert.equal(publish.commit, git(root, ['rev-parse', 'HEAD']));
+  assert.match(git(root, ['log', '-1', '--format=%s']), /agent: implement palette/);
+  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), publish.branch);
 });
 
 test('session publishing pushes the branch and runs the merge request command', async (t) => {
@@ -134,7 +159,7 @@ test('session publishing pushes the branch and runs the merge request command', 
     publish,
     title: 'feat: add a command palette',
     body: 'Body',
-    dir: path.join(root, '.bug-fix', 'sessions', publish.sessionId)
+    dir: path.join(root, '.sdd', 'sessions', publish.sessionId)
   });
 
   assert.equal(publish.status, 'published');

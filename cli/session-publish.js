@@ -264,6 +264,20 @@ export async function commitSessionWork({
 
   try {
     if (!(await workingTree(run, cwd))) {
+      // The agent may have committed its own work on the session branch. That
+      // commit belongs to the session, so publish it instead of deleting the
+      // branch as an empty one.
+      const head = (await git(run, cwd, ['rev-parse', 'HEAD'], { allowFailure: true })).stdout.trim();
+
+      if (publish.startedSha && head && head !== publish.startedSha) {
+        publish.commit = head;
+        publish.commits.push(head);
+        publish.status = 'committed';
+        event(publish, emit);
+
+        return publish;
+      }
+
       publish.status = 'no-changes';
       publish.reason = 'No changes were made, so there was nothing to commit.';
 

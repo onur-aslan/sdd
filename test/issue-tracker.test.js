@@ -6,7 +6,12 @@ import {
   closeGitLabIssue,
   closeJiraIssue,
   closeTrackerIssue,
-  normalizeSourceIssue
+  createGitHubIssue,
+  createGitLabIssue,
+  createJiraIssue,
+  createTrackerIssue,
+  normalizeSourceIssue,
+  specIssueTitle
 } from '../cli/issue-tracker.js';
 
 function jsonResponse(data, { ok = true, status = 200 } = {}) {
@@ -155,4 +160,141 @@ test('closeTrackerIssue prefers the issue target captured at import time', async
   });
 
   assert.equal(calls[0].url, 'https://api.github.com/repos/captured/repo/issues/4');
+});
+
+test('specIssueTitle reads the deep-spec heading, then the first heading', () => {
+  assert.equal(specIssueTitle('# Feature: Saved searches\n\n## Goal\n…'), 'Saved searches');
+  assert.equal(specIssueTitle('# Saved searches\n'), 'Saved searches');
+  assert.equal(specIssueTitle('No heading here', 'fallback-name'), 'fallback-name');
+  assert.equal(specIssueTitle('', ''), 'Feature spec');
+});
+
+test('createJiraIssue posts the spec as ADF on Cloud and plain text on Data Center', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+    return jsonResponse({ id: '10001', key: 'ABC-9' });
+  };
+  const body = '# Feature: Saved searches\n\nRemember filters.';
+
+  const cloud = await createJiraIssue({
+    project: 'ABC',
+    summary: 'Saved searches',
+    description: body,
+    baseUrl: 'https://jira.example.com/',
+    headers: { Authorization: 'Bearer token' },
+    apiVersion: '3',
+    fetchImpl
+  });
+
+  assert.deepEqual(cloud, {
+    created: true,
+    source: 'jira',
+    key: 'ABC-9',
+    id: '10001',
+    url: 'https://jira.example.com/browse/ABC-9'
+  });
+  assert.equal(calls[0].url, 'https://jira.example.com/rest/api/3/issue');
+  const fields = JSON.parse(calls[0].options.body).fields;
+  assert.equal(fields.project.key, 'ABC');
+  assert.equal(fields.issuetype.name, 'Task');
+  assert.equal(fields.description.type, 'doc');
+  assert.equal(fields.description.content[0].content[0].text, '# Feature: Saved searches');
+
+  await createJiraIssue({
+    project: 'ABC',
+    summary: 'Saved searches',
+    description: body,
+    baseUrl: 'https://jira.example.com',
+    apiVersion: '2',
+    fetchImpl
+  });
+
+  assert.equal(calls[1].url, 'https://jira.example.com/rest/api/2/issue');
+  assert.equal(JSON.parse(calls[1].options.body).fields.description, body);
+});
+
+test('createGitHubIssue posts the title, body, and labels', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+    return jsonResponse({ number: 21, html_url: 'https://github.com/owner/repo/issues/21' });
+  };
+
+  const result = await createGitHubIssue({
+    repo: 'owner/repo',
+    title: 'Saved searches',
+    body: '# Feature: Saved searches',
+    labels: ['spec', 'feature'],
+    token: 'secret',
+    fetchImpl
+  });
+
+  assert.deepEqual(result, {
+    created: true,
+    source: 'github',
+    key: 'GH-21',
+    number: 21,
+    url: 'https://github.com/owner/repo/issues/21'
+  });
+  assert.equal(calls[0].url, 'https://api.github.com/repos/owner/repo/issues');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer secret');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    title: 'Saved searches',
+    body: '# Feature: Saved searches',
+    labels: ['spec', 'feature']
+  });
+});
+
+test('createGitLabIssue posts through glab api and keeps the spec body', async () => {
+  const calls = [];
+  const run = async (command, args, options) => {
+    calls.push({ command, args, options });
+    return { code: 0, stdout: JSON.stringify({ iid: 7, web_url: 'https://gitlab.example.com/group/repo/-/issues/7' }), stderr: '' };
+  };
+
+  const result = await createGitLabIssue({
+    project: 'group/repo',
+    title: 'Saved searches',
+    description: '# Feature: Saved searches',
+    labels: ['spec'],
+    cwd: 'C:/work',
+    run
+  });
+
+  assert.deepEqual(result, {
+    created: true,
+    source: 'gitlab',
+    key: 'GL-7',
+    number: 7,
+    url: 'https://gitlab.example.com/group/repo/-/issues/7'
+  });
+  assert.deepEqual(calls[0].args, [
+    'api',
+    '--method', 'POST',
+    'projects/group%2Frepo/issues',
+    '-f', 'title=Saved searches',
+    '-f', 'description=# Feature: Saved searches',
+    '-f', 'labels[]=spec'
+  ]);
+  assert.equal(calls[0].options.cwd, 'C:/work');
+});
+
+test('createTrackerIssue dispatches to the requested tracker', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+    return jsonResponse({ number: 3, html_url: 'https://github.com/owner/repo/issues/3' });
+  };
+
+  const result = await createTrackerIssue({
+    source: 'github',
+    target: 'owner/repo',
+    title: 'Saved searches',
+    body: 'spec',
+    github: { token: 'secret', fetchImpl }
+  });
+
+  assert.equal(result.key, 'GH-3');
+  assert.equal(calls[0].url, 'https://api.github.com/repos/owner/repo/issues');
 });

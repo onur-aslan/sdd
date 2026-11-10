@@ -109,38 +109,51 @@ test('each flow resolves to its own skill and final artifact', () => {
   assert.ok(readSessionSkill('merge').length > 100);
 });
 
-test('the enhancement contract gates implementation on plan approval and invokes the native skill', () => {
-  const instructions = buildSessionInstructions('enhancement', { agentPreset: 'claude', skillText: '# Enhancement\n\nStep 1: interview.' });
+test('every flow sends its request straight to the native skill with no second contract', () => {
+  const calls = {
+    enhancement: '/enhancement',
+    feature: '/deep-spec',
+    specIssue: '/deep-spec',
+    merge: '/merge'
+  };
 
-  assert.match(instructions, /one question at a time/i);
-  // The plan is a checkpoint: nothing changes before the human approves it.
-  assert.match(instructions, /Do not modify, create, or delete any file before the human approves the plan/);
-  assert.match(instructions, /Phase 2: implement and verify/);
-  assert.match(instructions, /explicitly approves/);
-  assert.doesNotMatch(instructions, /Bound the implementation-and-verification loop to \d+ attempts/);
-  assert.match(instructions, /Do not commit\. Do not push/);
-  assert.doesNotMatch(instructions, /Stop at the plan/);
-  assert.match(instructions, /## What the plan must contain/);
-  assert.match(instructions, /## What the final report must contain/);
-  assert.match(instructions, /\/enhancement/);
-  assert.doesNotMatch(instructions, /Step 1: interview\./);
-  // The studio no longer turns prose into buttons, so the contract must not
-  // prescribe an option shape or a question fence.
-  assert.doesNotMatch(instructions, /one-click|interview` block|Recommended:/);
+  for (const [flow, call] of Object.entries(calls)) {
+    const instructions = buildSessionInstructions(flow, { agentPreset: 'claude' });
 
-  // Diagrams prefer Mermaid, with ASCII reserved for what Mermaid cannot draw.
-  assert.match(instructions, /## Diagrams/);
-  assert.match(instructions, /draw it with Mermaid in a fenced/);
-  assert.match(instructions, /Mermaid cannot draw a screen/);
-  assert.match(instructions, /Do not draw the same thing twice/);
+    assert.equal(instructions, call);
+    assert.equal(buildSessionOpening(flow, '  Do the thing.  ', { agentPreset: 'claude' }), `${call}\n\nDo the thing.`);
+    assert.doesNotMatch(
+      buildSessionOpening(flow, 'Do the thing.', { agentPreset: 'claude' }),
+      /What the final|## Rules for this session|## How this session works|## Diagrams|Open Questions|first single question/
+    );
+  }
 
-  const feature = buildSessionInstructions('feature', { agentPreset: 'cursor', skillText: 'x' });
+  // The skill files, not the studio wrapper, own the workflow and its rules.
+  assert.match(readSessionSkill('enhancement'), /Wait for the user's explicit confirmation of the plan/);
+  assert.match(readSessionSkill('merge'), /Never push and never touch the target branch/);
+  assert.match(readSessionSkill('feature'), /Read \[spec-format\.md\]/);
+});
 
-  assert.match(feature, /Stop at the spec/);
-  // The spec file is the structural end of a feature interview.
-  assert.match(feature, /docs\/sdd\/features\/<feature-name>\/spec\.md/);
-  assert.match(feature, /Do not create or\s+modify anything else/);
-  assert.doesNotMatch(feature, /Do not modify, create, or delete any file/);
+test('the spec-issue flow forwards the request to deep-spec without a second contract', () => {
+  // The skill owns the interview and its spec-format.md output rules, so the
+  // flow must not add a competing outline.
+  assert.equal(buildSessionInstructions('specIssue', { agentPreset: 'claude' }), '/deep-spec');
+  assert.equal(buildSessionOpening('specIssue', '  Add saved searches.  ', { agentPreset: 'claude' }), '/deep-spec\n\nAdd saved searches.');
+  assert.equal(
+    buildSessionOpening('specIssue', 'Add saved searches.', { agentPreset: 'opencode' }),
+    "Load the deep-spec skill by exact name using OpenCode's native skill tool, then follow it.\n\nAdd saved searches."
+  );
+
+  const firstTurn = buildTurnPrompt('specIssue', { brief: 'Add saved searches.', agentPreset: 'cursor' });
+  assert.equal(firstTurn, '/deep-spec\n\nAdd saved searches.');
+
+  const opening = buildSessionOpening('specIssue', 'Add saved searches.', { agentPreset: 'claude' });
+  assert.doesNotMatch(opening, /What the final spec must contain/);
+  assert.doesNotMatch(opening, /Markdown feature spec/);
+  assert.doesNotMatch(opening, /Open Questions/);
+
+  // The Feature tab now forwards to the same skill without a competing outline.
+  assert.equal(buildSessionInstructions('feature', { agentPreset: 'claude' }), '/deep-spec');
 });
 
 test('Codex session instructions explicitly invoke the native skill without overriding its limits', () => {
@@ -167,9 +180,10 @@ test('every supported preset uses its own native skill call, with no embedded-sk
 test('the opening message carries the request, and turn prompts replay the transcript', () => {
   const opening = buildSessionOpening('enhancement', '  Add a command palette.  ', { agentPreset: 'claude' });
 
-  assert.match(opening, /^\/enhancement/);
-  assert.match(opening, /Add a command palette\./);
-  assert.match(opening, /first single question/);
+  assert.equal(opening, '/enhancement\n\nAdd a command palette.');
+
+  const firstTurn = buildTurnPrompt('feature', { brief: 'Add saved searches.', agentPreset: 'cursor' });
+  assert.equal(firstTurn, '/deep-spec\n\nAdd saved searches.');
 
   const prompt = buildTurnPrompt('feature', {
     brief: 'Add saved searches.',
@@ -180,12 +194,14 @@ test('the opening message carries the request, and turn prompts replay the trans
     ]
   });
 
+  assert.match(prompt, /^\/deep-spec/);
   assert.match(prompt, /Add saved searches\./);
   assert.match(prompt, /Which storage\?/);
   assert.match(prompt, /Local disk\./);
-  assert.match(prompt, /Continue:/);
+  assert.match(prompt, /Continue the interview\./);
 
-  // After a plan is approved, the next replay prompt names the phase that starts.
+  // The skill decides when the plan is approved; the replay only carries the
+  // conversation forward.
   const enhancement = buildTurnPrompt('enhancement', {
     brief: 'Add a command palette.',
     agentPreset: 'cursor',
@@ -195,8 +211,9 @@ test('the opening message carries the request, and turn prompts replay the trans
     ]
   });
 
-  assert.match(enhancement, /If it approves the plan, implement and verify it now/);
-  assert.match(enhancement, /final report/);
+  assert.match(enhancement, /^\/enhancement/);
+  assert.match(enhancement, /Approved\. Implement it\./);
+  assert.match(enhancement, /Continue the interview\./);
 });
 
 test('the engine follows the executable, and the live command asks before writing', () => {
@@ -245,24 +262,23 @@ test('the permission hook settings point at the shipped hook script', () => {
 });
 
 test('the flows stay separate and cover every skill', () => {
-  assert.deepEqual(Object.keys(SESSION_FLOWS).sort(), ['enhancement', 'feature', 'merge']);
+  assert.deepEqual(Object.keys(SESSION_FLOWS).sort(), ['enhancement', 'feature', 'merge', 'specIssue']);
+  assert.equal(SESSION_FLOWS.specIssue.skillName, 'deep-spec');
+  assert.equal(SESSION_FLOWS.feature.skillName, 'deep-spec');
 });
 
-test('the merge contract protects the target and ends at the integration branch', () => {
-  const instructions = buildSessionInstructions('merge', { agentPreset: 'claude' });
+test('the merge skill owns the target protection and the integration branch', () => {
+  const skill = readSessionSkill('merge');
 
-  assert.match(instructions, /Never\s+check out, modify, or delete the target branch/);
-  assert.match(instructions, /Never push, force-push/);
-  assert.match(instructions, /session ends when that/);
-  assert.match(instructions, /## What the final merge report must contain/);
-  assert.match(instructions, /\/merge/);
-  assert.doesNotMatch(instructions, /## What the plan must contain/);
+  assert.match(skill, /target branch itself is never modified/i);
+  assert.match(skill, /Never push/);
+  assert.match(skill, /merge\/<source>-into-<target>/);
 
-  const opening = buildSessionOpening('merge', 'Merge "feat/x" into "main".', { agentPreset: 'claude' });
-
-  assert.match(opening, /^\/merge/);
-  assert.match(opening, /preflight checks/);
-  assert.doesNotMatch(opening, /first single question/);
+  assert.equal(buildSessionInstructions('merge', { agentPreset: 'claude' }), '/merge');
+  assert.equal(
+    buildSessionOpening('merge', 'Merge "feat/x" into "main".', { agentPreset: 'claude' }),
+    '/merge\n\nMerge "feat/x" into "main".'
+  );
 
   const turn = buildTurnPrompt('merge', {
     brief: 'Merge "feat/x" into "main".',
@@ -273,8 +289,9 @@ test('the merge contract protects the target and ends at the integration branch'
     ]
   });
 
-  assert.match(turn, /build the merge on the/);
-  assert.match(turn, /session ends when the integration branch exists/);
+  assert.match(turn, /Resolve auth\.ts by keeping both guards\?/);
+  assert.match(turn, /Yes, keep both\./);
+  assert.match(turn, /Continue the interview\./);
 });
 
 test('the merge guard allows edits and safe git but refuses the target and a push', () => {
@@ -447,7 +464,7 @@ test('a live session asks, waits, then finishes at the plan', async (t) => {
   assert.equal(summary.engine, 'live');
   assert.match(summary.output, /# Plan/);
   assert.match(outputs.join(''), /# Plan/);
-  assert.ok(fs.existsSync(path.join(root, '.bug-fix', '.gitignore')));
+  assert.ok(fs.existsSync(path.join(root, '.sdd', '.gitignore')));
 });
 
 test('a live session implements after the plan is approved and ends at the report', async (t) => {
@@ -499,7 +516,7 @@ test('a live session implements after the plan is approved and ends at the repor
 
 test('a live session answers a permission request through the studio', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-perm-'));
-  const dir = path.join(root, '.bug-fix', 'enhancements', 'perm-1');
+  const dir = path.join(root, '.sdd', 'enhancements', 'perm-1');
   const decisions = [];
   const spawnAgent = fakeLiveSpawn(() => '# Plan\n\nLocal disk.');
 
@@ -570,7 +587,7 @@ test('a turn-based session replays the transcript and ends at the written spec',
       cwd: root,
       id: 'turn-1',
       spawnImpl: async (command, args, options) => {
-        prompts.push(fs.readFileSync(path.join(root, '.bug-fix', 'features', 'turn-1', 'prompt.md'), 'utf8'));
+        prompts.push(fs.readFileSync(path.join(root, '.sdd', 'features', 'turn-1', 'prompt.md'), 'utf8'));
 
         let text;
 

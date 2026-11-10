@@ -69,6 +69,7 @@ const el = {
   interviewSubmit: $('#interview-submit'),
   enhancementScope: $('#enhancement-scope'),
   featureScope: $('#feature-scope'),
+  specIssueScope: $('#spec-issue-scope'),
   mergeScope: $('#merge-scope')
 };
 
@@ -1214,6 +1215,16 @@ const SESSION_COPY = {
     emptyTitle: 'Interview the agent.',
     emptyBody: 'Describe the feature below or start from a Jira, GitHub, or GitLab issue. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready you choose how to build it; the build commits to the session branch and opens a merge request.'
   },
+  specIssue: {
+    endpoint: '/api/spec-issues',
+    finalLabel: 'spec',
+    scope: 'spec → issue',
+    placeholder: 'Describe the feature to spec…',
+    restartPlaceholder: 'Start another spec…',
+    answerPlaceholder: 'Type your answer…',
+    emptyTitle: 'Interview the agent.',
+    emptyBody: 'Describe the feature below. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready the studio files it as one issue in the tracker you pick. Nothing is committed, pushed, or built.'
+  },
   merge: {
     endpoint: '/api/merges',
     finalLabel: 'merge report',
@@ -1241,6 +1252,7 @@ function createSession(flow) {
   const scopeEl = {
     enhancement: el.enhancementScope,
     feature: el.featureScope,
+    specIssue: el.specIssueScope,
     merge: el.mergeScope
   }[flow];
   // A merge ends when its integration branch exists, so it has no hand-finish.
@@ -1268,7 +1280,19 @@ function createSession(flow) {
         <div class="session-empty" data-role="empty">
           <p class="session-empty-title" data-role="empty-title">${copy.emptyTitle}</p>
           <p data-role="empty-body">${copy.emptyBody}</p>
-          ${flow === 'merge' ? '' : `
+          ${flow === 'merge' ? '' : flow === 'specIssue' ? `
+            <div class="session-import">
+              <div class="session-import-row">
+                <label class="session-import-label" for="source-${flow}">File in</label>
+                <select id="source-${flow}" data-role="issue-source" aria-label="Issue tracker">
+                  <option value="jira">Jira</option>
+                  <option value="github">GitHub</option>
+                  <option value="gitlab">GitLab</option>
+                </select>
+              </div>
+              <p class="session-import-status" data-role="issue-status" role="status"></p>
+            </div>
+          ` : `
             <div class="session-import">
               <div class="session-import-row">
                 <label class="session-import-label" for="source-${flow}">Start from</label>
@@ -1352,7 +1376,9 @@ function createSession(flow) {
     mergeMeta: null,
     setup: false,
     // The issue imported into the composer, so a successful session can close it.
-    sourceIssue: null
+    sourceIssue: null,
+    // Spec issue only: the create/skip/fail result reported by the job.
+    specIssue: null
   };
   view.issueChoices = [];
 
@@ -1418,6 +1444,10 @@ function createSession(flow) {
     label.textContent = choice === 'push'
       ? 'Create a branch, commit, and push (no merge request)'
       : 'Create a branch, commit, and open a merge request';
+  }
+
+  function trackerLabel(source) {
+    return { jira: 'Jira', github: 'GitHub', gitlab: 'GitLab' }[source] ?? 'the tracker';
   }
 
   function issueBrief(issue) {
@@ -1657,6 +1687,17 @@ function createSession(flow) {
 
       return `<article class="turn turn-publish" role="status">
         <p class="turn-who">Git</p>
+        <div class="turn-body"><p>${escapeText(entry.text)}${link}</p></div>
+      </article>`;
+    }
+
+    if (entry.role === 'issue') {
+      const link = entry.url
+        ? ` <a href="${escapeText(entry.url)}" target="_blank" rel="noreferrer">Open issue</a>`
+        : '';
+
+      return `<article class="turn turn-publish" role="status">
+        <p class="turn-who">Tracker</p>
         <div class="turn-body"><p>${escapeText(entry.text)}${link}</p></div>
       </article>`;
     }
@@ -1908,6 +1949,24 @@ function createSession(flow) {
       case 'issue-close-failed':
         addEntry('publish', `Could not close ${event.key}: ${event.error}`);
         break;
+      case 'issue-created':
+        view.specIssue = {
+          status: 'created',
+          source: event.source,
+          key: event.key,
+          url: event.url ?? ''
+        };
+        addEntry('issue', `Filed ${event.key} in ${trackerLabel(event.source)}.`, { url: event.url ?? '' });
+        announceStatus(`The spec was filed as ${event.key}.`);
+        break;
+      case 'issue-skipped':
+        view.specIssue = { status: 'skipped', source: event.source, reason: event.reason };
+        addEntry('issue', event.reason ?? 'The spec issue was skipped.');
+        break;
+      case 'issue-create-failed':
+        view.specIssue = { status: 'failed', source: event.source, error: event.error };
+        addEntry('issue', `Could not file the spec issue: ${event.error}`);
+        break;
       case 'job-done':
         if (flow === 'merge' && event.summary?.ref) {
           view.mergeMeta = { ...(view.mergeMeta ?? {}), ref: event.summary.ref };
@@ -1951,7 +2010,11 @@ function createSession(flow) {
       }
     }
 
-    const readyLabel = flow === 'merge' ? 'integration branch ready' : `${copy.finalLabel} ready`;
+    const readyLabel = flow === 'merge'
+      ? 'integration branch ready'
+      : flow === 'specIssue' && view.specIssue?.status === 'created'
+        ? 'spec filed'
+        : `${copy.finalLabel} ready`;
 
     if (flow === 'merge') {
       // The next step is a landing decision, not another composer prompt.
@@ -1998,6 +2061,11 @@ function createSession(flow) {
       showHandoff();
     }
 
+    // The spec issue workflow ends with the tracker handoff, not a build.
+    if (view.finished && flow === 'specIssue') {
+      showSpecIssueResult();
+    }
+
     // A merge hands over to the landing decision, one branch at a time.
     if (flow === 'merge') {
       if (kind === 'done' && view.mergeMeta?.ref) {
@@ -2012,6 +2080,35 @@ function createSession(flow) {
         );
       }
     }
+  }
+
+  function showSpecIssueResult() {
+    const issue = view.specIssue;
+    const tracker = trackerLabel(issue?.source);
+    let body;
+
+    if (issue?.status === 'created') {
+      const link = issue.url
+        ? ` <a href="${escapeText(issue.url)}" target="_blank" rel="noreferrer">Open issue</a>`
+        : '';
+      body = `<p>Filed as <strong>${escapeText(issue.key)}</strong> in ${escapeText(tracker)}.${link}</p>`;
+    } else if (issue?.status === 'failed') {
+      body = `<p>The spec is saved, but ${escapeText(tracker)} refused the issue: ${escapeText(issue.error)}</p>`;
+    } else if (issue?.status === 'skipped') {
+      body = `<p>The spec is saved, but no issue was created. ${escapeText(issue.reason ?? '')}</p>`;
+    } else {
+      body = '<p>The spec is saved. No tracker issue was created.</p>';
+    }
+
+    dom.handoff.innerHTML = `
+      <section class="handoff-card" aria-labelledby="spec-issue-title">
+        <p class="handoff-eyebrow">Spec ready</p>
+        <h2 id="spec-issue-title">${issue?.status === 'created' ? 'Issue filed' : 'Spec saved'}</h2>
+        ${body}
+        <p class="handoff-lede">Nothing was committed, pushed, or built. Start another spec below when you are ready.</p>
+      </section>
+    `;
+    dom.handoff.classList.remove('hidden');
   }
 
   const PIPELINE_COPY = {
@@ -2721,6 +2818,7 @@ function createSession(flow) {
     view.setup = false;
     view.setupError = '';
     view.sourceIssue = null;
+    view.specIssue = null;
     hideHandoff();
     dom.richView.innerHTML = '';
     dom.rawView.textContent = '';
@@ -2789,7 +2887,8 @@ function createSession(flow) {
           agentPreset,
           agentCmd,
           ...(sourceIssue ? { issue: sourceIssue } : {}),
-          ...(flow === 'merge'
+          ...(flow === 'specIssue' ? { specIssueSource: dom.issueSource?.value ?? '' } : {}),
+          ...(flow === 'merge' || flow === 'specIssue'
             ? {}
             : {
               publish: publishRequested,
@@ -3042,6 +3141,7 @@ function createSession(flow) {
 const sessionViews = {
   enhancement: createSession('enhancement'),
   feature: createSession('feature'),
+  specIssue: createSession('specIssue'),
   merge: createSession('merge')
 };
 
@@ -3296,6 +3396,7 @@ async function loadConfig() {
     sessionViews.feature?.syncPublish?.();
     sessionViews.enhancement?.syncIssueSource?.();
     sessionViews.feature?.syncIssueSource?.();
+    sessionViews.specIssue?.syncIssueSource?.();
     // The merge setup reads local branches from this config, so it refreshes
     // after a landing or a retry without leaving the tab.
     sessionViews.merge?.refreshSetup?.();

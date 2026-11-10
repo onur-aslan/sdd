@@ -23,6 +23,7 @@ import {
   parseStudioArgs,
   readSettings,
   readStore,
+  resolveSpecIssueTarget,
   resolveStudioJira,
   shouldOpenBrowser,
   STUDIO_AGENT_PRESETS,
@@ -1174,6 +1175,265 @@ test('a feature build runs the chosen pipeline after the spec exists', async (t)
   assert.ok(trackerCalls.some((call) => call.options.method === 'POST'));
 });
 
+test('resolveSpecIssueTarget prefers the imported issue, then the requested source, then the saved one', () => {
+  assert.deepEqual(
+    resolveSpecIssueTarget({
+      request: { issue: { source: 'gitlab', key: 'GL-2', target: 'group/repo' } },
+      saved: { specIssueSource: 'github', githubRepo: 'owner/repo' }
+    }),
+    { source: 'gitlab', target: 'group/repo' }
+  );
+
+  assert.deepEqual(
+    resolveSpecIssueTarget({
+      request: { specIssueSource: 'github' },
+      saved: { specIssueSource: 'jira', project: 'ABC', githubRepo: 'owner/repo' }
+    }),
+    { source: 'github', target: 'owner/repo' }
+  );
+
+  assert.deepEqual(
+    resolveSpecIssueTarget({ request: {}, saved: { specIssueSource: 'jira', project: 'ABC' } }),
+    { source: 'jira', target: 'ABC' }
+  );
+
+  assert.deepEqual(resolveSpecIssueTarget({ request: {}, saved: {} }), { source: 'jira', target: '' });
+});
+
+test('a spec issue session files the written spec without branching or publishing', async (t) => {
+  const root = createRepo();
+  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+  const trackerCalls = [];
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  writeSettings(root, {
+    project: 'ABC',
+    jiraUrl: 'https://jira.internal',
+    jiraAuth: 'bearer',
+    jiraApiVersion: '2',
+    jiraToken: 'secret',
+    specIssueSource: 'jira'
+  });
+
+  const response = (data, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => data,
+    text: async () => JSON.stringify(data)
+  });
+  const manager = createJobManager({
+    cwd: root,
+    fetchImpl: async (url, options = {}) => {
+      trackerCalls.push({ url, options });
+
+      if (url.endsWith('/rest/api/2/issue') && options.method === 'POST') {
+        return response({ id: '20001', key: 'ABC-42' });
+      }
+
+      throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
+    },
+    spawnImpl: async (command, args) => {
+      const prompt = args.at(-1) ?? '';
+
+      // The interview turn writes the spec and exits, which ends the session.
+      if (/interview brief/.test(prompt)) {
+        fs.mkdirSync(path.dirname(specPath), { recursive: true });
+        fs.writeFileSync(specPath, '# Feature: Saved searches\n\nRemember filters.\n', 'utf8');
+
+        return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+      }
+
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    }
+  });
+
+  const session = manager.startSpecIssue({
+    brief: 'Add saved searches.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]',
+    specIssueSource: 'jira',
+    publish: true,
+    closeIssues: true
+  });
+
+  await waitFor(() => session.status === 'done');
+
+  const snapshot = manager.snapshot(session);
+  const types = snapshot.events.map((event) => event.type);
+  const created = snapshot.events.find((event) => event.type === 'issue-created');
+
+  assert.equal(snapshot.flow, 'specIssue');
+  assert.equal(session.publish, null);
+  assert.equal(session.result.artifact, specPath);
+  assert.ok(types.includes('issue-created'));
+  assert.equal(created.type, 'issue-created');
+  assert.equal(created.source, 'jira');
+  assert.equal(created.key, 'ABC-42');
+  assert.equal(created.url, 'https://jira.internal/browse/ABC-42');
+  assert.equal(snapshot.events.some((event) => event.type === 'publish'), false);
+  assert.equal(snapshot.events.some((event) => event.type === 'issue-closed'), false);
+
+  assert.equal(trackerCalls[0].url, 'https://jira.internal/rest/api/2/issue');
+  assert.equal(JSON.parse(trackerCalls[0].options.body).fields.summary, 'Saved searches');
+  assert.equal(
+    JSON.parse(trackerCalls[0].options.body).fields.description,
+    '# Feature: Saved searches\n\nRemember filters.\n'
+  );
+
+  assert.deepEqual(session.specIssue, {
+    status: 'created',
+    created: true,
+    source: 'jira',
+    key: 'ABC-42',
+    id: '20001',
+    url: 'https://jira.internal/browse/ABC-42'
+  });
+  assert.equal(snapshot.events.find((event) => event.type === 'job-done').summary.issue.key, 'ABC-42');
+});
+
+test('a spec issue session stays done when no tracker target is set', async (t) => {
+  const root = createRepo();
+  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const manager = createJobManager({
+    cwd: root,
+    spawnImpl: async (command, args) => {
+      const prompt = args.at(-1) ?? '';
+
+      if (/interview brief/.test(prompt)) {
+        fs.mkdirSync(path.dirname(specPath), { recursive: true });
+        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
+      }
+
+      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+    }
+  });
+
+  const session = manager.startSpecIssue({
+    brief: 'Add saved searches.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]',
+    specIssueSource: 'jira'
+  });
+
+  await waitFor(() => session.status === 'done');
+
+  const skipped = manager.snapshot(session).events.find((event) => event.type === 'issue-skipped');
+
+  assert.equal(skipped.source, 'jira');
+  assert.match(skipped.reason, /Pick a Jira project/);
+  assert.equal(session.specIssue.status, 'skipped');
+});
+
+test('a spec issue session stays done when the tracker rejects the issue', async (t) => {
+  const root = createRepo();
+  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  writeSettings(root, {
+    project: 'ABC',
+    jiraUrl: 'https://jira.internal',
+    jiraAuth: 'bearer',
+    jiraApiVersion: '2',
+    jiraToken: 'secret',
+    specIssueSource: 'jira'
+  });
+
+  const manager = createJobManager({
+    cwd: root,
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({}),
+      text: async () => '{"errorMessages":["No permission"]}'
+    }),
+    spawnImpl: async (command, args) => {
+      const prompt = args.at(-1) ?? '';
+
+      if (/interview brief/.test(prompt)) {
+        fs.mkdirSync(path.dirname(specPath), { recursive: true });
+        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
+      }
+
+      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+    }
+  });
+
+  const session = manager.startSpecIssue({
+    brief: 'Add saved searches.',
+    agentPreset: 'cursor',
+    agentCmd: '["cursor-agent","-p"]'
+  });
+
+  await waitFor(() => session.status === 'done');
+
+  const failed = manager.snapshot(session).events.find((event) => event.type === 'issue-create-failed');
+
+  assert.match(failed.error, /Jira issue create failed \(403\)/);
+  assert.equal(session.specIssue.status, 'failed');
+  assert.ok(fs.existsSync(specPath));
+});
+
+test('the studio exposes the spec issue route', async (t) => {
+  const root = createRepo();
+  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+  const studio = createStudioServer({
+    cwd: root,
+    version: '9.9.9',
+    spawnImpl: async (command, args) => {
+      const prompt = args.at(-1) ?? '';
+
+      if (/interview brief/.test(prompt)) {
+        fs.mkdirSync(path.dirname(specPath), { recursive: true });
+        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
+      }
+
+      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+    }
+  });
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve));
+
+  const base = `http://127.0.0.1:${studio.server.address().port}`;
+
+  t.after(() => studio.close());
+
+  const started = await fetch(`${base}/api/spec-issues`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: 'Add saved searches.',
+      agentPreset: 'cursor',
+      agentCmd: '["cursor-agent","-p"]',
+      specIssueSource: 'jira'
+    })
+  });
+
+  assert.equal(started.status, 202);
+
+  const { job } = await started.json();
+
+  assert.equal(job.flow, 'specIssue');
+
+  await waitFor(async () => (
+    await collectSession(base, '/api/spec-issues', job.id)
+  ).job.status === 'done');
+
+  const finished = await collectSession(base, '/api/spec-issues', job.id);
+  const list = await (await fetch(`${base}/api/spec-issues`)).json();
+
+  assert.equal(finished.job.flow, 'specIssue');
+  assert.equal(finished.job.specIssue.status, 'skipped');
+  assert.equal(list.jobs.length, 1);
+  assert.equal((await fetch(`${base}/api/features/${job.id}`)).status, 404);
+});
+
 function createMergeFixture() {
   const root = createRepo();
   const target = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -1477,7 +1737,7 @@ test('the job manager routes a permission request to the browser', async (t) => 
     cwd: root,
     spawnProcess: (command, args, options) => {
       // startSession picks the id, so the fake writes where the session reads.
-      const dir = path.join(root, '.bug-fix', 'enhancements', options.env.SDD_SESSION_ID);
+      const dir = path.join(root, '.sdd', 'enhancements', options.env.SDD_SESSION_ID);
 
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(

@@ -63,17 +63,15 @@ test('the pipeline maps the E2E checkbox to --no-verify', () => {
   ]);
 });
 
-test('the step prompt invokes the native skill and tells the agent to stop before commit', () => {
-  const prompt = buildStepPrompt({ skill: 'sdd-developer', args: ['docs/sdd/features/x/spec.md'] }, { verify: true, agentPreset: 'claude' });
+test('the step prompt is the native skill call with its arguments', () => {
+  const prompt = buildStepPrompt({ skill: 'sdd-developer', args: ['docs/sdd/features/x/spec.md'] }, { agentPreset: 'claude' });
 
-  assert.match(prompt, /^\/sdd-developer/);
-  assert.match(prompt, /docs\/sdd\/features\/x\/spec\.md/);
-  assert.match(prompt, /Do not commit/);
+  assert.equal(prompt, '/sdd-developer docs/sdd/features/x/spec.md');
   assert.doesNotMatch(prompt, /--no-verify/);
 
-  const skipped = buildStepPrompt({ skill: 'feature-tdd', args: ['feature.md', '--no-verify'] }, { verify: false, agentPreset: 'claude' });
+  const skipped = buildStepPrompt({ skill: 'feature-tdd', args: ['feature.md', '--no-verify'] }, { agentPreset: 'claude' });
 
-  assert.match(skipped, /Skip the E2E verification/);
+  assert.equal(skipped, '/feature-tdd feature.md --no-verify');
 });
 
 test('a direct build runs one skill step and reports the changed files', async (t) => {

@@ -49,6 +49,18 @@ export const SESSION_FLOWS = {
     // touched spec file is the structural end-of-interview signal.
     artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' }
   },
+  // A separate planning flow: the same deep-spec interview, but its output is a
+  // tracker issue created by the studio after the spec is written. It does not
+  // build, publish, or close anything.
+  specIssue: {
+    id: 'specIssue',
+    label: 'Spec issue',
+    skillName: 'deep-spec',
+    skillPath: path.resolve(here, '..', 'sdd', 'skills', 'deep-spec', 'SKILL.md'),
+    workDir: 'spec-issues',
+    finalLabel: 'spec',
+    artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' }
+  },
   merge: {
     id: 'merge',
     label: 'Merge',
@@ -67,7 +79,7 @@ export function resolveSessionFlow(flow) {
   const config = SESSION_FLOWS[String(flow ?? '').trim()];
 
   if (!config) {
-    const error = new Error(`Unknown session flow "${flow}". Use "enhancement", "feature", or "merge".`);
+    const error = new Error(`Unknown session flow "${flow}". Use "enhancement", "feature", "specIssue", or "merge".`);
     error.statusCode = 400;
     throw error;
   }
@@ -138,281 +150,51 @@ export function readSessionSkill(flow) {
   }
 }
 
-// The contract that turns a plan-and-build skill into an interview the studio
-// can render: one question per turn, then the artifact, then (for enhancement)
-// an approval-gated implementation loop. The skill file is never modified; this
-// wrapper only changes how the turns are paced.
+// Every flow forwards the request straight to its skill. The skill owns the
+// interview, the approval rules, and the output format; the studio owns the
+// repository and tracker side effects.
 export function buildSessionInstructions(flow, { agentPreset, skillArguments = {} } = {}) {
   const config = resolveSessionFlow(flow);
-  const nativeSkillAgent = isNativeSkillAgent(agentPreset);
-  if (!nativeSkillAgent) {
+
+  if (!isNativeSkillAgent(agentPreset)) {
     const error = new Error('A native skill-capable agent must be selected; embedded skill text is disabled in Studio sessions.');
     error.statusCode = 400;
     throw error;
   }
-  const artifactRoot = config.artifact
-    ? config.artifact.root.split(path.sep).join('/')
-    : '';
-  const lines = [
-    `# ${config.label} session`,
-    '',
-    `You are running the \`${config.skillName}\` workflow as a guided interview with one`,
-    'human. You and the human take turns in a chat.',
-    ''
-  ];
 
-  if (nativeSkillAgent) {
-    lines.unshift(buildNativeSkillCall(config.skillName, agentPreset, skillArguments), '');
-  }
-
-  if (config.mode === 'merge') {
-    lines.push(
-      '## How this session works',
-      '',
-      '- This session integrates one branch into another. It is not a plan-only',
-      '  interview, and it is not a feature design session.',
-      '- Start with the preflight checks: the working tree is clean, both branches',
-      '  exist, and the integration branch does not. Then dry-run the merge without',
-      '  changing the working tree.',
-      '- Ask exactly one question at a time, and only when a decision is needed: a',
-      '  risky conflict, or a conflict the skill says a human must decide.',
-      "- The human's next message is their answer to your last question.",
-      '- When a resolution table needs approval, present it and stop. After the',
-      '  human approves it, build the merge.',
-      '- If the merge is clean and no decision is needed, continue without asking.',
-      '',
-      '## Rules for this session',
-      '',
-      '- All work happens on the integration branch named in the request. Never',
-      '  check out, modify, or delete the target branch.',
-      '- Never push, force-push, or touch a remote. Never rewrite the target branch.',
-      '- Resolve conflicts by editing the conflicted files. Do not invent unrelated',
-      '  changes or drop either side silently.',
-      '- Commit the merge on the integration branch. The session ends when that',
-      '  branch exists; stop there and report.',
-      '- Do not touch Jira or any external tracker.',
-      '- The studio guards these rules. A denied command is final: report it and',
-      '  continue a different way.',
-      ''
-    );
-  } else if (config.planLabel) {
-    lines.push(
-      '## How this session works',
-      '',
-      'This session has two phases.',
-      '',
-      '### Phase 1: interview and plan',
-      '',
-      '- Ask exactly one question at a time and keep the reply focused on it.',
-      "- The human's next message is their answer to your last question.",
-      '- Avoid asking what you can infer by reading the repository.',
-      '- When you have enough to decide, do NOT ask another question. Present the',
-      `  ${config.planLabel} in that reply instead.`,
-      `- The ${config.planLabel} is a checkpoint, not the end of the session. Stop after`,
-      '  presenting it and wait for the human.',
-      '- Do not change anything before the human explicitly approves the plan. If the',
-      '  human asks for changes, revise the plan and wait for approval again.',
-      '',
-      '### Phase 2: implement and verify',
-      '',
-      "- This phase starts only when the human's latest message explicitly approves",
-      '  the plan. An approval is not a new interview answer.',
-      '- Inspect the existing code, conventions, and current behavior first.',
-      '- Apply the smallest change that satisfies the approved plan, then verify the',
-      '  relevant behavior and check for regressions.',
-      '- Follow the skill\'s implementation-and-verification workflow.',
-      '- A reply in this phase is either a question about a decision you cannot',
-      `  infer, or the final ${config.finalLabel}.`,
-      '- Do not expand the approved scope. If the plan must change materially, stop,',
-      '  present the updated plan, and wait for approval again.',
-      '',
-      '## Rules for this session',
-      '',
-      '- You may read the repository at any time to ground your questions, the plan,',
-      '  and the implementation.',
-      '- Do not modify, create, or delete any file before the human approves the plan.',
-      '  After approval, change only what the approved plan requires.',
-      '- You may run the tests, builds, and other checks the verification needs. Do',
-      '  not install or upgrade dependencies or change the environment.',
-      '- Do not commit. Do not push. Do not open a pull request.',
-      '- Do not touch Jira or any external tracker.',
-      '- Ask only about decisions you cannot infer; state your assumptions for the rest.',
-      ''
-    );
-  } else {
-    lines.push(
-      '## How this session works',
-      '',
-      `- Every reply from you is either the next single question, or the final ${config.finalLabel}.`,
-      '- Ask exactly one question at a time and keep the reply focused on it.',
-      '- When you have enough to decide, do NOT ask another question. Produce the',
-      `  final ${config.finalLabel} in that reply instead.`,
-      "- The human's next message is their answer to your last question.",
-      '- Never stop to wait on your own; always end a reply with a question or the',
-      `  final ${config.finalLabel}.`,
-      '',
-      '## Rules for this session',
-      '',
-      `- You may read the repository to ground your questions and the ${config.finalLabel}.`,
-      '- You may create exactly one file: the final spec at',
-      `  \`${artifactRoot}/<feature-name>/${config.artifact.name}\`. Do not create or`,
-      '  modify anything else. Do not commit. Do not push.',
-      '- Do not run commands that change the repository or its dependencies.',
-      '- Do not touch Jira or any external tracker.',
-      `- Stop at the ${config.finalLabel}. Do not implement anything yet.`,
-      '- Ask only about decisions you cannot infer; state your assumptions for the rest.',
-      ''
-    );
-  }
-
-  if (config.mode === 'merge') {
-    lines.push(
-      `## What the final ${config.finalLabel} must contain`,
-      '',
-      '1. The source branch and the target branch.',
-      '2. The integration branch name.',
-      '3. The files that conflicted, and how each side was resolved.',
-      '4. The checks that were run, and their result.',
-      '5. Anything a human must still confirm before landing the branch.',
-      '',
-      'State only what was actually verified. Never claim a conflict is resolved',
-      'without evidence.'
-    );
-  } else if (config.planLabel) {
-    lines.push(
-      '## What the plan must contain',
-      '',
-      'A Markdown enhancement plan. Include:',
-      '',
-      '1. A short summary of the change in plain language.',
-      '2. A Mermaid flowchart in a fenced ```mermaid block showing the flow or the',
-      '   before/after shape.',
-      '3. Components affected, with file paths.',
-      '4. Views affected: pages, endpoints, services, or data flows.',
-      '5. Implementation and verification: the smallest change, the tests or checks,',
-      '   and the known risks.',
-      '6. Open Questions: at most three, each one decision the human must still make.',
-      '',
-      'Keep it specific to this repository. Prefer existing patterns over new ones.',
-      '',
-      `## What the final ${config.finalLabel} must contain`,
-      '',
-      'The report the skill asks for after the work is done. Include:',
-      '',
-      '1. The changes made, in plain language.',
-      '2. The files affected.',
-      '3. The attempts used, against the limit.',
-      '4. The verification that was run and its result.',
-      '5. Unresolved issues or limitations.',
-      '',
-      'State only what was actually verified. Never claim success without evidence.'
-    );
-  } else {
-    lines.push(
-      `## What the final ${config.finalLabel} must contain`,
-      '',
-      'A Markdown feature spec following the deep-spec workflow. Include:',
-      '',
-      '1. The problem and the outcome in plain language.',
-      '2. The decisions reached during the interview, and the reasoning.',
-      '3. A Mermaid flowchart in a fenced ```mermaid block for the main flow.',
-      '4. Components, data, and interfaces affected, with file paths.',
-      '5. The verification plan.',
-      '6. Open Questions: decisions that are still unresolved.',
-      '',
-      `Write the spec to \`${artifactRoot}/<feature-name>/${config.artifact.name}\` and`,
-      'present the same content inline as your final reply. Writing that file is what',
-      'ends the interview, so write it once, at the end, and only then.'
-    );
-  }
-
-  lines.push(
-    '',
-    '## Diagrams',
-    '',
-    '- Wherever a diagram carries the meaning, draw it with Mermaid in a fenced',
-    '  ```mermaid block — flowcharts, sequence diagrams, state diagrams, ER',
-    '  diagrams, data flows. The reader renders Mermaid inline, so a real diagram',
-    '  beats a text sketch.',
-    "- Keep the ASCII mock preview the skill asks for when the diagram is a UI",
-    '  layout or a before/after wireframe: Mermaid cannot draw a screen. Use ASCII',
-    '  for anything that must line up column by column or sit at an exact position.',
-    '- Do not draw the same thing twice, once as ASCII and once as Mermaid.',
-    ''
-  );
-
-  lines.push('');
-
-  return lines.join('\n');
+  return buildNativeSkillCall(config.skillName, agentPreset, skillArguments);
 }
 
-// The first message of a live session: the whole contract plus the request.
+// The first message of a live session: the skill call plus the request.
 export function buildSessionOpening(flow, brief, options = {}) {
-  const config = resolveSessionFlow(flow);
-  const closing = config.mode === 'merge'
-    ? 'Start the preflight checks and the dry run now. Ask a question only when a decision is needed.'
-    : 'Start the interview now. Ask your first single question.';
-
   return [
     buildSessionInstructions(flow, options),
-    '## The request',
     '',
-    validateBrief(brief),
-    '',
-    closing
+    validateBrief(brief)
   ].join('\n');
 }
 
 // A self-contained prompt for agents that cannot hold a live conversation: the
-// accumulated transcript is replayed and the agent asks the next question.
+// skill call, the request, and the transcript replayed so far.
 export function buildTurnPrompt(flow, { brief, turns = [], ...options } = {}) {
-  const config = resolveSessionFlow(flow);
-  const lines = [
-    buildSessionInstructions(flow, options),
+  const lines = [buildSessionInstructions(flow, options)];
+
+  if (turns.length === 0) {
+    lines.push('', validateBrief(brief));
+    return lines.join('\n');
+  }
+
+  lines.push(
     '## Conversation so far',
     '',
     `**Human:** ${validateBrief(brief)}`
-  ];
+  );
 
   for (const turn of turns) {
     lines.push('', turn.role === 'assistant' ? '**You:**' : '**Human:**', '', String(turn.text ?? ''));
   }
 
-  lines.push('', '## Now', '');
-
-  if (turns.length === 0) {
-    lines.push(
-      config.mode === 'merge'
-        ? 'Start the preflight checks and the dry run now. Ask a question only when a decision is needed.'
-        : 'Ask your first single question.'
-    );
-  } else if (config.mode === 'merge') {
-    lines.push(
-      'Continue the merge session:',
-      '',
-      '- If the human approved the resolution table, build the merge on the',
-      '  integration branch now.',
-      '- Otherwise ask the next single question, or present the decision table.',
-      '- The session ends when the integration branch exists. If it already exists,',
-      '  stop and report instead of touching the target.'
-    );
-  } else if (config.planLabel) {
-    lines.push(
-      `Continue the session. The human's latest message decides the phase:`,
-      '',
-      `- If it approves the plan, implement and verify it now, then produce the final ${config.finalLabel}.`,
-      '- If it asks for a change to the plan, present the revised plan and wait for',
-      '  approval.',
-      '- Otherwise, ask the next single question, or present the plan when you have',
-      '  enough to decide.'
-    );
-  } else {
-    lines.push(
-      `Continue: ask the next single question, or, if you have enough, produce the final ${config.finalLabel}.`
-    );
-  }
-
-  lines.push('', '');
+  lines.push('', '## Now', '', 'Continue the interview.');
 
   return lines.join('\n');
 }
@@ -1364,10 +1146,8 @@ async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit,
 
     const skillInvocation = `${buildNativeSkillCall(config.skillName, deps.agentPreset, deps.skillArguments)} `;
     const agentPrompt = count === 1
-      ? `${skillInvocation}${config.mode === 'merge'
-        ? `Read the interview brief at \`${promptFile}\` and follow it. Never push; commit only on the specified integration branch.`
-        : `Read the interview brief at \`${promptFile}\` and follow it. Its file rules are exact; do not commit or push.`}`
-      : `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it. Continue the interview; its file rules still apply.`;
+      ? `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it.`
+      : `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it. Continue the interview.`;
     const invocation = buildAgentInvocation(command, { prompt: agentPrompt, promptFile });
     const spec = buildSpawnSpec(invocation);
 
@@ -1510,7 +1290,7 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
   const skillArguments = {
     ...validateSessionSkillArguments(config.id, request.skillArguments),
     ...(config.mode === 'merge' && request.merge
-      ? { source: request.merge.source, target: request.merge.target }
+      ? { arguments: [request.merge.source, request.merge.target].filter(Boolean).join(' ') }
       : {})
   };
   const agentPreset = request.agentPreset;
