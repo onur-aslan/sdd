@@ -1,23 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import {
-  DEFAULT_AGENT_COMMAND,
-  buildAgentInvocation,
-  buildSpawnSpec,
-  normalizeAgentCommand,
-  runProcess
-} from './bug-sweep.js';
-import {
-  assertNativeSkillAvailable,
-  buildNativeSkillCall,
-  resolveNativeSkillAgent
-} from './native-skills.js';
+import { runProcess } from './bug-sweep.js';
+import { buildNativeSkillCall } from './native-skills.js';
 
 // The feature workflow has two implementation paths after the spec is approved:
 // one shot (sdd-developer) or task-by-task TDD (spec-to-task -> feature-tdd).
-// The studio asks the human which one, then runs the same skills the workflow
-// file names. The skill files themselves are never modified.
+// Both run in the same live Claude process that wrote the spec.
 export const FEATURE_PIPELINES = [
   {
     id: 'direct',
@@ -33,8 +22,6 @@ export const FEATURE_PIPELINES = [
   }
 ];
 
-const DEFAULT_BUILD_TIMEOUT_SECONDS = 3600;
-
 export function resolveFeaturePipeline(value) {
   const pipeline = FEATURE_PIPELINES.find((entry) => entry.id === String(value ?? 'direct').trim());
 
@@ -47,7 +34,8 @@ export function resolveFeaturePipeline(value) {
   return pipeline;
 }
 
-// Everything the build needs is derived from the spec the interview wrote.
+// Everything the build needs is derived from the spec the interview wrote in
+// the session worktree.
 export function describeFeatureBuild({ specPath, cwd = process.cwd() } = {}) {
   const absolute = path.resolve(cwd, String(specPath ?? ''));
 
@@ -81,13 +69,13 @@ export function buildFeatureSteps({ pipeline, specRelative, featureRelative, ver
   return [{ skill: 'sdd-developer', args: [specRelative, ...verifyFlag] }];
 }
 
-// The step prompt is the skill call with the same arguments the CLI build
-// passes. The skill owns the work and the report; the studio owns publishing.
-export function buildStepPrompt(step, { agentPreset } = {}) {
-  return buildNativeSkillCall(step.skill, agentPreset, { arguments: step.args.join(' ') });
+// One step is one user turn in the same live session. The skill owns the work
+// and the report; the Studio owns publishing and the session lifecycle.
+export function buildStepPrompt(step) {
+  return buildNativeSkillCall(step.skill, { arguments: step.args.join(' ') });
 }
 
-async function changedFiles(cwd) {
+export async function changedFiles(cwd) {
   try {
     const result = await runProcess('git', ['status', '--porcelain'], { cwd, timeoutMs: 30000 });
 
@@ -102,120 +90,4 @@ async function changedFiles(cwd) {
   } catch {
     return [];
   }
-}
-
-// Run the chosen pipeline one skill at a time, so the UI can show which step is
-// running and a failure points at the step that caused it.
-export async function runFeatureBuild(request = {}, dependencies = {}) {
-  const cwd = dependencies.cwd ?? process.cwd();
-  const emit = dependencies.emit ?? (() => {});
-  const spawnImpl = dependencies.spawnImpl ?? runProcess;
-  const pipeline = resolveFeaturePipeline(request.pipeline);
-  const verify = request.verify !== false;
-  const described = describeFeatureBuild({ specPath: request.specPath, cwd });
-  const steps = buildFeatureSteps({
-    pipeline: pipeline.id,
-    specRelative: described.specRelative,
-    featureRelative: described.featureRelative,
-    verify
-  });
-  const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);
-  const agentPreset = resolveNativeSkillAgent(request.agentPreset, command);
-  for (const step of steps) assertNativeSkillAvailable(cwd, agentPreset, step.skill);
-  const timeoutSeconds = Number(dependencies.timeoutSeconds) > 0
-    ? Number(dependencies.timeoutSeconds)
-    : DEFAULT_BUILD_TIMEOUT_SECONDS;
-
-  if (dependencies.signal?.aborted) {
-    const error = new Error('The build was cancelled.');
-    error.cancelled = true;
-    throw error;
-  }
-
-  emit({
-    type: 'build-started',
-    pipeline: pipeline.id,
-    verify,
-    spec: described.specRelative,
-    steps: steps.map((step) => ({ skill: step.skill, args: step.args }))
-  });
-
-  const results = [];
-  let featureSnapshot = fs.existsSync(described.featurePath)
-    ? fs.statSync(described.featurePath).mtimeMs
-    : 0;
-
-  for (const [index, step] of steps.entries()) {
-    emit({ type: 'build-step', index, skill: step.skill, status: 'running' });
-
-    const prompt = buildStepPrompt(step, { verify, agentPreset });
-    const invocation = buildAgentInvocation(command, { prompt });
-    const spec = buildSpawnSpec(invocation);
-
-    let result;
-
-    try {
-      result = await spawnImpl(spec.command, spec.args, {
-        cwd,
-        signal: dependencies.signal,
-        timeoutMs: timeoutSeconds * 1000,
-        env: { ...process.env, SDD_BUILD_PIPELINE: pipeline.id, SDD_BUILD_STEP: step.skill },
-        onStdout: (chunk) => emit({ type: 'output', stream: 'stdout', step: index, chunk }),
-        onStderr: (chunk) => emit({ type: 'output', stream: 'stderr', step: index, chunk })
-      });
-    } catch (error) {
-      if (dependencies.signal?.aborted) {
-        const cancelled = new Error('The build was cancelled.');
-        cancelled.cancelled = true;
-        throw cancelled;
-      }
-
-      throw new Error(`The agent could not be started: ${error.message}`);
-    }
-
-    if (result.aborted || dependencies.signal?.aborted) {
-      const error = new Error('The build was cancelled.');
-      error.cancelled = true;
-      throw error;
-    }
-
-    if (result.timedOut) {
-      throw new Error(`${step.skill} did not finish within ${timeoutSeconds} seconds.`);
-    }
-
-    if (result.code !== 0) {
-      const detail = (result.stderr || result.stdout || '').trim().split('\n').slice(-4).join(' ');
-
-      throw new Error(`${step.skill} failed (exit ${result.code}).${detail ? ` ${detail}` : ''}`);
-    }
-
-    if (step.produces) {
-      const exists = fs.existsSync(described.featurePath);
-      const mtime = exists ? fs.statSync(described.featurePath).mtimeMs : 0;
-
-      if (!exists) {
-        throw new Error(`${step.skill} finished without writing ${step.produces}.`);
-      }
-
-      featureSnapshot = mtime;
-    }
-
-    emit({ type: 'build-step', index, skill: step.skill, status: 'done' });
-    results.push({ skill: step.skill, args: step.args });
-  }
-
-  const changed = await changedFiles(cwd);
-
-  emit({ type: 'build-done', changed: changed.length });
-
-  return {
-    pipeline: pipeline.id,
-    verify,
-    specPath: described.specPath,
-    featurePath: described.featurePath,
-    steps: results,
-    verified: verify,
-    featureWritten: Boolean(featureSnapshot),
-    changedFiles: changed
-  };
 }

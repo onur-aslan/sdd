@@ -518,11 +518,9 @@ test('renderBugPrompt includes the result contract and the attempt limit', () =>
   assert.match(prompt, /"status": "fixed"/);
 });
 
-test('the sweep invokes the bug-sweep skill and passes the attempt limit', () => {
-  assert.match(buildNativeSkillCall('bug-sweep', 'claude', { max_turns: 3 }), /^\/bug-sweep/);
-  assert.match(buildNativeSkillCall('bug-sweep', 'claude', { max_turns: 3 }), /max_turns=3/);
-  assert.match(buildNativeSkillCall('bug-sweep', 'codex', { max_turns: 3 }), /\$bug-sweep/);
-  assert.match(buildNativeSkillCall('bug-sweep', 'opencode', { max_turns: 3 }), /bug-sweep skill/);
+test('the sweep invokes the bug-sweep skill through Claude', () => {
+  assert.equal(buildNativeSkillCall('bug-sweep'), '/bug-sweep');
+  assert.equal(buildNativeSkillCall('bug-sweep', { arguments: 'ABC-1' }), '/bug-sweep ABC-1');
 });
 
 test('bug-sweep delegates the fix and owns the JSON result', () => {
@@ -550,7 +548,6 @@ test('bug-sweep requires the bug-sweep skill, not only bug-fix', async () => {
     await assert.rejects(
       () => runBugSweep(['--project', 'ABC', ...jiraFlags], {
         cwd: root,
-        agentPreset: 'claude',
         logger: () => {}
       }),
       /cannot invoke \/bug-sweep/
@@ -676,13 +673,13 @@ test('a limited sweep waits for resume before tagging and publishing', async () 
     ];
     const jiraFetch = createFilteringJiraFetch();
 
-    const first = await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
+    const first = await runBugSweep(baseArgs, { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(first, /1 bug\(s\) still pending/);
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), '');
     assert.equal(git(root, ['rev-list', '--count', 'HEAD']), '2');
 
-    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
+    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(second, /Fixed: 1\/2/);
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
@@ -723,7 +720,7 @@ test('--resume starts a fresh sweep when there is nothing to resume', async () =
       '--no-pr',
       '--resume',
       ...jiraFlags
-    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
     assert.equal(git(root, ['tag', '-l', 'bug-fix-2026-10-19']), 'bug-fix-2026-10-19');
@@ -760,7 +757,7 @@ test('a bug sweep commits fixed bugs, records failures, and tags the branch', as
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
     const agentArgs = fs.readFileSync(argsFile, 'utf8');
@@ -821,7 +818,7 @@ test('--worktree fixes bugs in an isolated checkout and leaves the main tree unt
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
 
@@ -901,7 +898,7 @@ test('--fetch-base starts the worktree from the up-to-date remote branch', async
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} });
+    ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} });
 
     assert.match(output, /Fixed: 1\/2/);
 
@@ -950,7 +947,7 @@ test('--worktree reuses one branch checkout until the branch is merged', async (
     ];
     const jiraFetch = createFilteringJiraFetch();
 
-    const first = await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
+    const first = await runBugSweep(baseArgs, { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(first, /1 bug\(s\) still pending/);
 
@@ -963,7 +960,7 @@ test('--worktree reuses one branch checkout until the branch is merged', async (
     assert.equal(fs.existsSync(worktreePath), true, 'the worktree is kept while bugs are pending');
     assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), originalBranch);
 
-    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: jiraFetch, logger: () => {} });
+    const second = await runBugSweep([...baseArgs, '--resume'], { cwd: root, fetchImpl: jiraFetch, logger: () => {} });
 
     assert.match(second, /Fixed: 1\/2/);
     assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).worktree, worktreePath, '--resume reuses the recorded worktree');
@@ -975,7 +972,7 @@ test('--worktree reuses one branch checkout until the branch is merged', async (
     // archive it with a merge tag, remove the checkout, and delete the branch
     // and its state before starting fresh.
     git(root, ['merge', '-q', '--ff-only', 'bug-fix/2026-10-19']);
-    const third = await runBugSweep([...baseArgs, '--resume'], { cwd: root, agentPreset: 'claude', fetchImpl: emptyFetch, logger: () => {} });
+    const third = await runBugSweep([...baseArgs, '--resume'], { cwd: root, fetchImpl: emptyFetch, logger: () => {} });
 
     assert.match(third, /No bugs matched/);
     assert.equal(fs.existsSync(worktreePath), false, 'the worktree is removed after the branch is merged');
@@ -1016,7 +1013,7 @@ test('--reset-branch archives an unmerged branch after a squash merge', async ()
       ...jiraFlags
     ];
 
-    await runBugSweep(baseArgs, { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
+    await runBugSweep(baseArgs, { cwd: root, fetchImpl: createFilteringJiraFetch(), logger: () => {} });
 
     const tip = git(root, ['rev-parse', 'bug-fix/2026-10-19']);
     const stablePath = path.join(root, '.sdd', 'worktrees', 'bug-fix-2026-10-19');
@@ -1024,7 +1021,7 @@ test('--reset-branch archives an unmerged branch after a squash merge', async ()
 
     assert.equal(fs.existsSync(stablePath), true);
 
-    const output = await runBugSweep([...baseArgs, '--reset-branch'], { cwd: root, agentPreset: 'claude', fetchImpl: emptyFetch, logger: () => {} });
+    const output = await runBugSweep([...baseArgs, '--reset-branch'], { cwd: root, fetchImpl: emptyFetch, logger: () => {} });
 
     assert.match(output, /No bugs matched/);
     assert.equal(git(root, ['branch', '--list', 'bug-fix/2026-10-19']), '');
@@ -1072,7 +1069,7 @@ test('a sweep continues fixes committed on its branch by another checkout', asyn
       '--no-push',
       '--no-pr',
       ...jiraFlags
-    ], { cwd: root, agentPreset: 'claude', fetchImpl: createFilteringJiraFetch(), logger: () => {} });
+    ], { cwd: root, fetchImpl: createFilteringJiraFetch(), logger: () => {} });
 
     const state = JSON.parse(fs.readFileSync(path.join(root, '.sdd', 'state-bug-fix-2026-10-19.json'), 'utf8'));
     const carried = state.bugs.find((bug) => bug.key === 'ABC-2');
@@ -1118,7 +1115,7 @@ test('--worktree refuses a sweep branch checked out in the main worktree', async
         '--no-push',
         '--no-pr',
         ...jiraFlags
-      ], { cwd: root, agentPreset: 'claude', fetchImpl: fakeFetch, logger: () => {} }),
+      ], { cwd: root, fetchImpl: fakeFetch, logger: () => {} }),
       /checked out outside the sweep worktree/
     );
 

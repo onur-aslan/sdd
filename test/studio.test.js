@@ -21,16 +21,21 @@ import {
   listJiraIssues,
   listJiraProjects,
   parseStudioArgs,
+  publicSettings,
   readSettings,
   readStore,
   resolveSpecIssueTarget,
   resolveStudioJira,
   shouldOpenBrowser,
-  STUDIO_AGENT_PRESETS,
   STUDIO_PR_PRESETS,
   writeSettings
 } from '../cli/studio.js';
-import { DEFAULT_AGENT_COMMAND } from '../cli/bug-sweep.js';
+import {
+  defaultWorkflowSettings,
+  normalizeClaudeEnv,
+  parseClaudeModelList,
+  resolveWorkflowSelection
+} from '../cli/agent-config.js';
 import { run } from '../cli/index.js';
 
 const fakeFetch = async () => ({
@@ -84,7 +89,7 @@ function createRepo() {
   git(root, ['config', 'user.name', 'Studio Bot']);
   git(root, ['config', 'commit.gpgsign', 'false']);
   for (const skill of ['enhancement', 'deep-spec', 'merge', 'bug-sweep', 'bug-fix', 'sdd-developer', 'spec-to-task', 'feature-tdd']) {
-    const skillFile = path.join(root, '.cursor', 'skills', skill, 'SKILL.md');
+    const skillFile = path.join(root, '.claude', 'skills', skill, 'SKILL.md');
     fs.mkdirSync(path.dirname(skillFile), { recursive: true });
     fs.writeFileSync(skillFile, `---\nname: ${skill}\ndescription: Test fixture skill.\n---\n`, 'utf8');
   }
@@ -95,41 +100,39 @@ function createRepo() {
   return root;
 }
 
-function createFakeAgent(root) {
-  if (process.platform === 'win32') {
-    const scriptPath = path.join(root, 'fake-agent.cmd');
+// A stand-in for the one-shot bug-sweep Claude call. The real sweep passes a
+// short skill prompt; the orchestrator owns the JSON result file and git.
+function fakeSweepAgent() {
+  return async (command, args, options = {}) => {
+    const env = options.env ?? {};
+    const key = env.SDD_BUG_KEY;
 
-    fs.writeFileSync(scriptPath, [
-      '@echo off',
-      'if not "%SDD_BUG_KEY%"=="ABC-1" goto notfixed',
-      '> "%SDD_BUG_RESULT_FILE%" echo {"key":"ABC-1","status":"fixed","summary":"Null guard","how":"Added a guard","critical":false,"evidence":["test"]}',
-      'echo patched>> app.txt',
-      'exit /b 0',
-      ':notfixed',
-      '> "%SDD_BUG_RESULT_FILE%" echo {"key":"ABC-2","status":"not-fixed","reason":"Could not reproduce"}',
-      'exit /b 0',
-      ''
-    ].join('\r\n'), 'utf8');
+    if (key === 'ABC-1') {
+      fs.writeFileSync(
+        env.SDD_BUG_RESULT_FILE,
+        JSON.stringify({
+          key: 'ABC-1',
+          status: 'fixed',
+          summary: 'Null guard',
+          how: 'Added a guard',
+          critical: false,
+          evidence: ['test']
+        }),
+        'utf8'
+      );
+      fs.appendFileSync(path.join(options.cwd, 'app.txt'), 'patched\n', 'utf8');
+    } else {
+      fs.writeFileSync(
+        env.SDD_BUG_RESULT_FILE,
+        JSON.stringify({ key, status: 'not-fixed', reason: 'Could not reproduce' }),
+        'utf8'
+      );
+    }
 
-    return scriptPath;
-  }
+    options.onStdout?.('');
 
-  const scriptPath = path.join(root, 'fake-agent.sh');
-
-  fs.writeFileSync(scriptPath, [
-    '#!/bin/sh',
-    'if [ "$SDD_BUG_KEY" = "ABC-1" ]; then',
-    '  printf \'%s\\n\' \'{"key":"ABC-1","status":"fixed","summary":"Null guard","how":"Added a guard","critical":false,"evidence":["test"]}\' > "$SDD_BUG_RESULT_FILE"',
-    '  printf \'patched\\n\' >> app.txt',
-    'else',
-    '  printf \'%s\\n\' \'{"key":"ABC-2","status":"not-fixed","reason":"Could not reproduce"}\' > "$SDD_BUG_RESULT_FILE"',
-    'fi',
-    'exit 0',
-    ''
-  ].join('\n'), 'utf8');
-  fs.chmodSync(scriptPath, 0o755);
-
-  return scriptPath;
+    return { code: 0, stdout: '', stderr: '' };
+  };
 }
 
 async function waitFor(predicate, timeoutMs = 30000) {
@@ -150,7 +153,7 @@ async function waitFor(predicate, timeoutMs = 30000) {
 // user messages from stdin and answers each with an assistant message and the
 // `result` that ends the turn, so the live engine can be tested without Claude.
 function createFakeLiveAgent(reply) {
-  return () => {
+  return (command, args, options) => {
     const child = new EventEmitter();
 
     child.pid = 4242;
@@ -192,7 +195,7 @@ function createFakeLiveAgent(reply) {
 
         turn += 1;
 
-        const text = reply(turn, message?.message?.content?.[0]?.text ?? '');
+        const text = reply(turn, message?.message?.content?.[0]?.text ?? '', options);
 
         child.stdout.write(`${JSON.stringify({
           type: 'assistant',
@@ -253,7 +256,6 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     project: 'ABC',
     date: '2026-10-19',
     base: 'main',
-    agentCmd: '["opencode"]',
     maxTurns: 3,
     dryRun: true,
     worktree: true,
@@ -266,7 +268,6 @@ test('buildSweepArgs turns a dashboard request into bug-sweep flags', () => {
     '--project', 'ABC',
     '--date', '2026-10-19',
     '--base', 'main',
-    '--agent-cmd', '["opencode"]',
     '--max-turns', '3',
     '--dry-run',
     '--worktree',
@@ -294,27 +295,76 @@ test('formatStudioHelp documents the command', () => {
   assert.match(help, /--port/);
 });
 
-test('the studio offers a one-click agent choice and forwards it', () => {
-  assert.deepEqual(STUDIO_AGENT_PRESETS.map((agent) => agent.id), ['claude', 'cursor', 'opencode', 'codex', 'antigravity', 'custom']);
-  assert.equal(STUDIO_AGENT_PRESETS[0].command, DEFAULT_AGENT_COMMAND);
-  assert.match(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'claude').command, /claude/);
-  assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command, '["cursor-agent","-p","--force","--output-format","stream-json"]');
-  assert.deepEqual(JSON.parse(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'codex').command), ['codex', 'exec', '--json', '--skip-git-repo-check']);
-  assert.deepEqual(JSON.parse(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'antigravity').command), ['agy', '--dangerously-skip-permissions', '-p']);
-  assert.equal(STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'custom').command, '');
+test('the workflow selection resolves model, effort, and the Claude environment', () => {
+  const selection = resolveWorkflowSelection(
+    {
+      claudeEnv: {
+        ANTHROPIC_BASE_URL: 'https://proxy.example',
+        ANTHROPIC_MODEL: 'nim-model',
+        ANTHROPIC_AUTH_TOKEN: 'secret',
+        PATH: '/not-allowed'
+      },
+      workflows: {}
+    },
+    'enhancement',
+    { model: 'nim-model', effort: 'high', mr: false }
+  );
 
-  assert.deepEqual(
-    buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'claude').command }),
-    ['--project', 'ABC', '--agent-cmd', '["claude","-p"]']
+  assert.equal(selection.provider, undefined);
+  assert.equal(selection.model, 'nim-model');
+  assert.equal(selection.effort, 'high');
+  assert.equal(selection.mr, false);
+  assert.deepEqual(selection.args, ['--model', 'nim-model', '--effort', 'high']);
+  assert.deepEqual(selection.environment, {
+    ANTHROPIC_BASE_URL: 'https://proxy.example',
+    ANTHROPIC_MODEL: 'nim-model',
+    ANTHROPIC_AUTH_TOKEN: 'secret'
+  });
+
+  // Default is "send no flag"; any gateway model id is accepted because there
+  // is no built-in catalog to validate against.
+  const defaults = resolveWorkflowSelection({}, 'feature', { model: 'Default', effort: 'Default' });
+  assert.deepEqual(defaults.args, []);
+  assert.equal(
+    resolveWorkflowSelection({}, 'feature', { model: 'some-custom-model' }).model,
+    'some-custom-model'
   );
-  assert.deepEqual(
-    buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'cursor').command }),
-    ['--project', 'ABC', '--agent-cmd', '["cursor-agent","-p","--force","--output-format","stream-json"]']
+  assert.throws(
+    () => resolveWorkflowSelection({}, 'feature', { effort: 'extreme' }),
+    /Unknown effort/
   );
-  assert.deepEqual(
-    buildSweepArgs({ project: 'ABC', agentCmd: STUDIO_AGENT_PRESETS.find((agent) => agent.id === 'antigravity').command }),
-    ['--project', 'ABC', '--agent-cmd', '["agy","--dangerously-skip-permissions","-p"]']
+
+  assert.deepEqual(normalizeClaudeEnv({ ANTHROPIC_MODEL: 'nim-model', PATH: '/bad', CLAUDE_CODE_USE_BEDROCK: '' }), {
+    ANTHROPIC_MODEL: 'nim-model'
+  });
+
+  const listed = parseClaudeModelList(
+    'Current model: `nim-model`\nUsage: /model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.',
+    { ANTHROPIC_MODEL: 'nim-model' }
   );
+
+  assert.equal(listed.current, 'nim-model');
+  assert.ok(listed.models.includes('sonnet'));
+  assert.ok(listed.models.includes('nim-model'));
+
+  const saved = publicSettings({
+    claudeEnv: {
+      ANTHROPIC_MODEL: 'nim-model',
+      ANTHROPIC_AUTH_TOKEN: 'secret'
+    },
+    workflows: {
+      enhancement: { model: 'nim-model', effort: 'max', mr: false }
+    }
+  });
+
+  assert.equal(saved.claudeEnv.ANTHROPIC_MODEL, 'nim-model');
+  assert.equal(saved.claudeEnv.ANTHROPIC_AUTH_TOKEN, '');
+  assert.deepEqual(saved.claudeEnvSecrets, ['ANTHROPIC_AUTH_TOKEN']);
+  assert.equal(saved.workflows.enhancement.model, 'nim-model');
+  assert.equal(saved.workflows.enhancement.effort, 'max');
+  assert.equal(saved.workflows.enhancement.mr, false);
+  assert.equal('provider' in saved.workflows.enhancement, false);
+  assert.equal(saved.workflows.feature.mr, true);
 });
 
 test('the studio offers a one-click forge choice and forwards it', () => {
@@ -366,6 +416,14 @@ test('settings remember the Jira connection locally but keep the token off the A
   const root = createRepo();
 
   try {
+    const workflows = defaultWorkflowSettings();
+
+    workflows.enhancement = {
+      model: 'nim-model',
+      effort: 'high',
+      mr: false
+    };
+
     const stored = writeSettings(root, {
       project: 'ABC',
       push: false,
@@ -374,6 +432,11 @@ test('settings remember the Jira connection locally but keep the token off the A
       jiraAuth: 'bearer',
       jiraCa: '/etc/ssl/jira-ca.pem',
       prCommand: 'glab mr create',
+      claudeEnv: {
+        ANTHROPIC_MODEL: 'nim-model',
+        ANTHROPIC_AUTH_TOKEN: 'secret-env'
+      },
+      workflows,
       agentPreset: 'claude',
       jiraToken: 'secret',
       jiraUrl: 'https://jira.internal',
@@ -381,6 +444,9 @@ test('settings remember the Jira connection locally but keep the token off the A
     });
 
     assert.equal(stored.jiraToken, 'secret');
+    // The retired agent selection is ignored instead of being written again.
+    assert.equal('agentPreset' in stored, false);
+    assert.equal('providers' in stored, false);
     assert.equal(hasSavedToken(root), true);
 
     const publicSettings = readSettings(root);
@@ -393,7 +459,12 @@ test('settings remember the Jira connection locally but keep the token off the A
       jiraAuth: 'bearer',
       jiraCa: '/etc/ssl/jira-ca.pem',
       prCommand: 'glab mr create',
-      agentPreset: 'claude',
+      claudeEnv: {
+        ANTHROPIC_MODEL: 'nim-model',
+        ANTHROPIC_AUTH_TOKEN: ''
+      },
+      claudeEnvSecrets: ['ANTHROPIC_AUTH_TOKEN'],
+      workflows,
       jiraUrl: 'https://jira.internal',
       jiraEmail: 'bot@example.com'
     });
@@ -417,7 +488,12 @@ test('settings left under the bug-sweep work dir move to the studio state dir', 
     fs.mkdirSync(path.dirname(legacy), { recursive: true });
     fs.writeFileSync(legacy, JSON.stringify({ project: 'ABC', agentPreset: 'cursor', jiraToken: 'secret' }), 'utf8');
 
-    assert.deepEqual(readSettings(root), { project: 'ABC', agentPreset: 'cursor' });
+    assert.deepEqual(readSettings(root), {
+      project: 'ABC',
+      claudeEnv: {},
+      claudeEnvSecrets: [],
+      workflows: defaultWorkflowSettings()
+    });
     assert.equal(readStore(root).jiraToken, 'secret');
     assert.ok(fs.existsSync(path.join(root, '.sdd', 'studio.settings.json')));
     assert.ok(fs.existsSync(path.join(root, '.sdd', '.gitignore')));
@@ -452,14 +528,22 @@ test('resolveStudioJira falls back to the locally saved connection', () => {
 });
 
 test('applySettings fills only the values a request leaves undefined', () => {
+  const workflows = defaultWorkflowSettings();
+
+  workflows.feature = {
+    model: 'nim-model',
+    effort: 'max',
+    mr: false
+  };
+
   const merged = applySettings(
     { project: 'ABC', jql: '' },
-    { project: 'OLD', jql: 'project = OLD', agentPreset: 'claude', prCommand: 'glab mr create' }
+    { project: 'OLD', jql: 'project = OLD', workflows, prCommand: 'glab mr create' }
   );
 
   assert.equal(merged.project, 'ABC');
   assert.equal(merged.jql, '');
-  assert.equal(merged.agentPreset, 'claude');
+  assert.deepEqual(merged.workflows, workflows);
   assert.equal(merged.prCommand, 'glab mr create');
 });
 
@@ -626,27 +710,50 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   assert.equal(config.git.repo, true);
   assert.equal(config.cwd, root);
   assert.equal(config.defaults.verifyCommand, '');
-  assert.ok(config.agents.some((agent) => agent.id === 'opencode'));
-  assert.ok(config.agents.some((agent) => agent.id === 'cursor'));
-  assert.equal(config.defaults.agentPreset, 'claude');
+  assert.equal(config.providers, undefined);
+  assert.deepEqual(config.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(config.workflowsAvailable, ['enhancement', 'feature', 'specIssue', 'merge', 'bugSweep']);
+  assert.equal(config.workflows.enhancement.model, '');
+  assert.equal(config.workflows.enhancement.effort, '');
+  assert.equal('provider' in config.workflows.enhancement, false);
+  assert.deepEqual(config.settings.claudeEnv, {});
+  assert.deepEqual(config.settings.claudeEnvSecrets, []);
+  assert.equal(config.defaults.agentPreset, undefined);
   assert.match(config.defaults.branch, /^bug-fix\/.+\/sdd-studio$/);
   assert.equal(config.defaults.tag, null);
   assert.ok(config.prPresets.some((preset) => preset.id === 'gitlab'));
   assert.equal(config.defaults.prPreset, 'github');
   assert.deepEqual(config.featurePipelines.map((pipeline) => pipeline.id), ['direct', 'tdd']);
-  assert.deepEqual(config.settings, {});
+  assert.equal(config.settings.agentPreset, undefined);
+  assert.deepEqual(config.settings.claudeEnv, {});
+  assert.ok(config.settings.workflows.feature);
 
   const saved = await fetch(`${base}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project: 'ABC', agentPreset: 'claude', verifyCmd: 'npm test', base: 'develop', publish: 'commit', prPreset: 'gitlab', jiraToken: 'secret' })
+    body: JSON.stringify({
+      project: 'ABC',
+      agentPreset: 'claude',
+      verifyCmd: 'npm test',
+      base: 'develop',
+      publish: 'commit',
+      prPreset: 'gitlab',
+      claudeEnv: { ANTHROPIC_MODEL: 'nim-model', ANTHROPIC_AUTH_TOKEN: 'secret' },
+      jiraToken: 'secret'
+    })
   });
 
-  // verifyCmd is no longer a studio setting; the verify command is auto-detected.
-  assert.deepEqual(
-    (await saved.json()).settings,
-    { project: 'ABC', agentPreset: 'claude', base: 'develop', publish: 'push', prPreset: 'gitlab' }
-  );
+  // verifyCmd and the old agent preset are no longer studio settings.
+  const savedBody = await saved.json();
+
+  assert.equal(savedBody.settings.project, 'ABC');
+  assert.equal(savedBody.settings.base, 'develop');
+  assert.equal(savedBody.settings.publish, 'push');
+  assert.equal(savedBody.settings.prPreset, 'gitlab');
+  assert.equal(savedBody.settings.agentPreset, undefined);
+  assert.equal(savedBody.settings.claudeEnv.ANTHROPIC_MODEL, 'nim-model');
+  assert.equal(savedBody.settings.claudeEnv.ANTHROPIC_AUTH_TOKEN, '');
+  assert.deepEqual(savedBody.settings.claudeEnvSecrets, ['ANTHROPIC_AUTH_TOKEN']);
 
   const settings = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(settings.settings.project, 'ABC');
@@ -690,7 +797,6 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
 
 test('studio runs a sweep and streams structured progress events', async (t) => {
   const root = createRepo();
-  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-agent-'));
   const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-remote-'));
 
   git(remote, ['init', '--bare', '-q']);
@@ -698,12 +804,15 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
 
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(agentDir, { recursive: true, force: true });
     fs.rmSync(remote, { recursive: true, force: true });
   });
 
-  const agentPath = createFakeAgent(agentDir);
-  const studio = createStudioServer({ cwd: root, version: '9.9.9', fetchImpl: fakeFetch });
+  const studio = createStudioServer({
+    cwd: root,
+    version: '9.9.9',
+    fetchImpl: fakeFetch,
+    spawnImpl: fakeSweepAgent()
+  });
 
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve));
 
@@ -718,9 +827,13 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
       project: 'ABC',
       date: '2026-10-19',
       base: 'HEAD',
-      agentCmd: JSON.stringify([agentPath]),
-      agentPreset: 'cursor',
       publish: 'push',
+      model: 'nim-model',
+      effort: 'high',
+      claudeEnv: {
+        ANTHROPIC_MODEL: 'nim-model',
+        ANTHROPIC_AUTH_TOKEN: 'secret-env'
+      },
       jiraUrl: 'https://jira.example.com',
       jiraEmail: 'bot@example.com',
       jiraToken: 'secret'
@@ -742,6 +855,8 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
   const types = events.map((event) => event.type);
 
   assert.equal(final.job.status, 'done');
+  assert.equal(final.job.selection.environment, undefined);
+  assert.equal(final.job.request.claudeEnv.ANTHROPIC_AUTH_TOKEN, '');
   assert.ok(types.includes('sweep-started'));
   assert.ok(types.includes('bugs-found'));
   assert.ok(types.includes('job-done'));
@@ -766,11 +881,18 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
   assert.equal(settings.jiraToken, undefined);
   assert.equal(settings.publish, 'push');
   assert.equal(settings.push, undefined);
+  assert.equal(settings.claudeEnv.ANTHROPIC_MODEL, 'nim-model');
+  assert.equal(settings.claudeEnv.ANTHROPIC_AUTH_TOKEN, '');
+  assert.deepEqual(settings.claudeEnvSecrets, ['ANTHROPIC_AUTH_TOKEN']);
+  assert.deepEqual(settings.workflows.bugSweep, {
+    model: 'nim-model',
+    effort: 'high',
+    mr: true
+  });
 });
 
 test('the job manager refuses a second sweep while one is running', async (t) => {
   const root = createRepo();
-  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-agent-'));
   const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-remote-'));
 
   git(remote, ['init', '--bare', '-q']);
@@ -778,18 +900,14 @@ test('the job manager refuses a second sweep while one is running', async (t) =>
 
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(agentDir, { recursive: true, force: true });
     fs.rmSync(remote, { recursive: true, force: true });
   });
 
-  const agentPath = createFakeAgent(agentDir);
-  const manager = createJobManager({ cwd: root, fetchImpl: fakeFetch });
+  const manager = createJobManager({ cwd: root, fetchImpl: fakeFetch, spawnImpl: fakeSweepAgent() });
   const request = {
     project: 'ABC',
-    agentPreset: 'cursor',
     date: '2026-10-19',
     base: 'HEAD',
-    agentCmd: JSON.stringify([agentPath]),
     publish: 'push',
     jiraUrl: 'https://jira.example.com',
     jiraEmail: 'bot@example.com',
@@ -804,50 +922,48 @@ test('the job manager refuses a second sweep while one is running', async (t) =>
 });
 
 test('an enhancement session interviews, implements after plan approval, then records the report', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-session-'));
+  const root = createRepo();
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   // Settings the session must remember rather than overwrite.
   writeSettings(root, { project: 'ABC', jiraToken: 'secret', settingsSeen: true });
 
-  let calls = 0;
+  let spawns = 0;
+  const agent = createFakeLiveAgent((turn, prompt, options) => {
+    if (turn === 1) {
+      return 'Let me start with storage.\n\nLocal disk or a database?\n';
+    }
+
+    if (turn === 2) {
+      return '# Plan\n\nUse local disk.\n\n```mermaid\nflowchart LR\nA-->B\n```\n';
+    }
+
+    // The approved plan is implemented in the same conversation.
+    fs.writeFileSync(path.join(options.cwd, 'palette.js'), 'export const open = () => {};\n', 'utf8');
+
+    return '# Report\n\nAdded palette.js and verified it.\n';
+  });
   const manager = createJobManager({
     cwd: root,
-    // A non-Claude command uses the replay-per-turn engine: one prompt per turn.
-    spawnImpl: async (command, args, options) => {
-      calls += 1;
-
-      let text;
-
-      if (calls === 1) {
-        text = 'Let me start with storage.\n\n```interview\nLocal disk or a database?\n```\n';
-      } else if (calls === 2) {
-        text = '# Plan\n\nUse local disk.\n\n```mermaid\nflowchart LR\nA-->B\n```\n';
-      } else {
-        // The approved plan is implemented in the same conversation.
-        fs.writeFileSync(path.join(root, 'palette.js'), 'export const open = () => {};\n', 'utf8');
-        text = '# Report\n\nAdded palette.js and verified it.\n';
-      }
-
-      options.onStdout(text);
-
-      return { code: 0, stdout: text, stderr: '' };
-    }
+    spawnProcess: (command, args, options) => {
+      spawns += 1;
+      return agent(command, args, options);
+    },
+    terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
+  const job = await manager.startEnhancement({
     brief: 'Add a command palette.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]'
+    model: 'nim-model',
+    effort: 'high',
+    mr: false
   });
 
   assert.equal(job.type, 'enhancement');
   assert.equal(job.flow, 'enhancement');
-  assert.throws(
-    () => manager.startEnhancement({ brief: 'Another change.', agentCmd: '["cursor-agent","-p"]' }),
-    /already running/
-  );
-  assert.throws(() => manager.startSweep({ project: 'ABC' }), /already running/);
+  assert.equal(job.selection.provider, undefined);
+  assert.equal(job.selection.model, 'nim-model');
+  assert.equal(job.selection.effort, 'high');
 
   const questions = () => manager.snapshot(job).events.filter((event) => event.type === 'question');
 
@@ -862,7 +978,6 @@ test('an enhancement session interviews, implements after plan approval, then re
 
   await waitFor(() => questions().length === 3);
   assert.match(questions()[2].text, /# Report/);
-  assert.ok(fs.existsSync(path.join(root, 'palette.js')));
 
   // The report has no artifact, so the human closes the session.
   assert.equal(manager.submitInput(job.id, { done: true }), true);
@@ -877,6 +992,7 @@ test('an enhancement session interviews, implements after plan approval, then re
     .map((event) => event.chunk)
     .join('');
 
+  assert.equal(spawns, 1);
   assert.ok(types.includes('question'));
   assert.ok(types.includes('answer'));
   assert.ok(types.includes('job-done'));
@@ -889,12 +1005,52 @@ test('an enhancement session interviews, implements after plan approval, then re
 
   const saved = readSettings(root);
 
-  assert.equal(saved.agentPreset, 'cursor');
-  assert.equal(saved.agentCmd, '["cursor-agent","-p"]');
-  // Remembering the agent must not drop the rest of the store.
+  assert.equal(saved.workflows.enhancement.model, 'nim-model');
+  assert.equal(saved.workflows.enhancement.effort, 'high');
+  assert.equal(saved.workflows.enhancement.mr, false);
+  // Remembering the workflow must not drop the rest of the store.
   assert.equal(saved.project, 'ABC');
   assert.equal(saved.settingsSeen, true);
   assert.equal(readStore(root).jiraToken, 'secret');
+});
+
+test('two sessions in the same workflow run in parallel worktrees', async (t) => {
+  const root = createRepo();
+  const worktrees = [];
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const agent = createFakeLiveAgent((turn, prompt, options) => {
+    worktrees.push(options.cwd);
+    return '```interview\nWhich storage?\n```\n';
+  });
+  const manager = createJobManager({
+    cwd: root,
+    spawnProcess: agent,
+    terminate: (child) => child.kill?.()
+  });
+
+  const first = await manager.startEnhancement({ brief: 'Add a command palette.' });
+  const second = await manager.startEnhancement({ brief: 'Add a settings drawer.' });
+
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.worktree, second.worktree);
+  assert.match(first.worktree, /\.sdd[\\/]worktrees[\\/]/);
+  assert.match(second.worktree, /\.sdd[\\/]worktrees[\\/]/);
+
+  await waitFor(() => (
+    manager.snapshot(first).status === 'waiting' && manager.snapshot(second).status === 'waiting'
+  ));
+
+  // Neither session occupies the main checkout.
+  assert.equal(fs.existsSync(path.join(root, '.sdd', 'worktrees', first.id)), true);
+
+  manager.cancelJob(first.id);
+  manager.cancelJob(second.id);
+
+  await waitFor(() => first.status === 'stopped' && second.status === 'stopped');
+  assert.equal(fs.existsSync(path.join(root, '.sdd', 'worktrees', first.id)), false);
+  assert.equal(fs.existsSync(path.join(root, '.sdd', 'worktrees', second.id)), false);
 });
 
 test('an enhancement closes its source issue after the work succeeds', async (t) => {
@@ -945,36 +1101,29 @@ test('an enhancement closes its source issue after the work succeeds', async (t)
 
     throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
   };
-  let turns = 0;
   const manager = createJobManager({
     cwd: root,
     fetchImpl,
-    spawnImpl: async (command, args, options) => {
-      turns += 1;
-
-      let text;
-
-      if (turns === 1) {
-        text = '```interview\nWhat should change?\n```\n';
-      } else if (turns === 2) {
-        text = '# Plan\n\nChange it.\n';
-      } else {
-        fs.writeFileSync(path.join(root, 'change.js'), 'export const changed = true;\n', 'utf8');
-        text = '# Report\n\nChanged it.\n';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      if (turn === 1) {
+        return 'What should change?\n';
       }
 
-      options.onStdout(text);
+      if (turn === 2) {
+        return '# Plan\n\nChange it.\n';
+      }
 
-      return { code: 0, stdout: text, stderr: '' };
-    }
+      fs.writeFileSync(path.join(options.cwd, 'change.js'), 'export const changed = true;\n', 'utf8');
+
+      return '# Report\n\nChanged it.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
+  const job = await manager.startEnhancement({
     brief: 'ABC-1: Fix the thing.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]',
     base,
     publish: true,
-    pr: false,
+    mr: false,
     issue: { source: 'jira', key: 'ABC-1', url: 'https://jira.internal/browse/ABC-1', target: 'ABC' },
     closeIssues: true
   });
@@ -1001,49 +1150,58 @@ test('an enhancement closes its source issue after the work succeeds', async (t)
   );
 });
 
-test('an enhancement session branches up front and commits when the human finishes', async (t) => {
+test('a session works on its own branch and leaves the main checkout untouched', async (t) => {
   const root = createRepo();
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-branch-remote-'));
   const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  let calls = 0;
 
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(remote, ['init', '--bare', '-q']);
+  git(root, ['remote', 'add', 'origin', remote]);
+  git(root, ['push', '-q', '-u', 'origin', 'HEAD']);
+
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(remote, { recursive: true, force: true });
+  });
 
   const manager = createJobManager({
     cwd: root,
-    spawnImpl: async (command, args, options) => {
-      calls += 1;
-
-      let text;
-
-      if (calls === 1) {
-        text = '```interview\nLocal disk or a database?\n```\n';
-      } else if (calls === 2) {
-        text = '# Plan\n\nUse local disk.\n';
-      } else {
-        fs.writeFileSync(path.join(root, 'palette.js'), 'export const open = () => {};\n', 'utf8');
-        text = '# Report\n\nAdded palette.js and verified it.\n';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      if (turn === 1) {
+        return 'Local disk or a database?\n';
       }
 
-      options.onStdout(text);
+      if (turn === 2) {
+        return '# Plan\n\nUse local disk.\n';
+      }
 
-      return { code: 0, stdout: text, stderr: '' };
-    }
+      fs.writeFileSync(path.join(options.cwd, 'palette.js'), 'export const open = () => {};\n', 'utf8');
+
+      return '# Report\n\nAdded palette.js and verified it.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
+  const job = await manager.startEnhancement({
     brief: 'Add a command palette.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]',
-    publish: true,
-    push: false,
-    pr: false
+    mr: false
   });
 
   const questions = () => manager.snapshot(job).events.filter((event) => event.type === 'question');
 
   await waitFor(() => questions().length === 1);
   assert.equal(job.publish.status, 'branch');
-  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), job.publish.branch);
   assert.equal(job.publish.base, base);
+  assert.equal(job.branch, job.publish.branch);
+  assert.equal(job.worktree, path.join(root, '.sdd', 'worktrees', job.id));
+  assert.equal(fs.existsSync(job.worktree), true);
+
+  // The branch exists, but the main checkout is still on the base branch.
+  assert.equal(
+    git(root, ['rev-parse', '--verify', `refs/heads/${job.publish.branch}`]).length > 0,
+    true
+  );
+  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), base);
+  assert.equal(git(root, ['status', '--porcelain']), '');
 
   manager.submitInput(job.id, { answer: 'Local disk.' });
   await waitFor(() => questions().length === 2);
@@ -1053,21 +1211,27 @@ test('an enhancement session branches up front and commits when the human finish
 
   await waitFor(() => job.status === 'done');
 
-  assert.equal(job.publish.status, 'committed');
+  assert.equal(job.publish.status, 'pushed');
   assert.equal(job.publish.commits.length, 1);
-  assert.match(git(root, ['log', '-1', '--format=%s']), /command palette/);
+  assert.match(git(root, ['log', job.publish.branch, '-1', '--format=%s']), /command palette/);
+  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), base);
   assert.equal(git(root, ['status', '--porcelain']), '');
+
+  // The worktree is gone; the pushed branch stays for the merge request.
+  assert.equal(fs.existsSync(job.worktree), false);
+  assert.equal(
+    git(remote, ['rev-parse', '--verify', `refs/heads/${job.publish.branch}`]).length > 0,
+    true
+  );
 
   const types = manager.snapshot(job).events.map((event) => event.type);
 
   assert.ok(types.includes('publish'));
 });
 
-test('a feature build runs the chosen pipeline after the spec exists', async (t) => {
+test('a feature session builds the chosen pipeline in the same job after the spec exists', async (t) => {
   const root = createRepo();
   const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-feature-remote-'));
-  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
-  const featurePath = path.join(path.dirname(specPath), 'feature.md');
   const prompts = [];
   const trackerCalls = [];
 
@@ -1115,64 +1279,62 @@ test('a feature build runs the chosen pipeline after the spec exists', async (t)
 
       throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
     },
-    spawnImpl: async (command, args) => {
-      const prompt = args.at(-1) ?? '';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      const specPath = path.join(options.cwd, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+      const featurePath = path.join(path.dirname(specPath), 'feature.md');
 
-      prompts.push(prompt);
-
-      // The interview turn writes the spec; the build steps then run the skills.
-      if (/interview brief/.test(prompt)) {
+      if (turn === 1) {
+        prompts.push('deep-spec');
         fs.mkdirSync(path.dirname(specPath), { recursive: true });
         fs.writeFileSync(specPath, '# Spec\n\nSaved searches live in the sidebar.\n', 'utf8');
 
-        return { code: 0, stdout: '# Spec written.\n', stderr: '' };
+        return '# Spec written.\n';
       }
 
-      if (/spec-to-task/.test(prompt)) {
+      if (turn === 2) {
+        prompts.push('spec-to-task');
         fs.writeFileSync(featurePath, '# Tasks\n', 'utf8');
+
+        return 'Tasks written.\n';
       }
 
-      return { code: 0, stdout: 'ok\n', stderr: '' };
-    }
+      prompts.push('feature-tdd');
+
+      return '# Report\n\nImplemented every task.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
 
-  const session = manager.startFeature({
+  const session = await manager.startFeature({
     brief: 'Add saved searches.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]',
     base,
-    publish: true,
-    pr: false,
+    mr: false,
     issue: { source: 'jira', key: 'ABC-7', url: 'https://jira.internal/browse/ABC-7', target: 'ABC' }
   });
 
+  await waitFor(() => manager.snapshot(session).events.some((event) => event.type === 'build-choice'));
+  assert.equal(manager.snapshot(session).status, 'waiting');
+
+  assert.equal(manager.submitBuild(session.id, { pipeline: 'tdd', verify: false }), true);
+  assert.equal(manager.submitBuild(session.id, { pipeline: 'tdd' }), false);
+
   await waitFor(() => session.status === 'done');
-  assert.match(session.result.artifact, /spec\.md$/);
-  // A spec session does not close its issue; only the build does.
-  assert.equal(session.publish.status, 'committed');
-  assert.equal(manager.snapshot(session).events.some((event) => event.type === 'issue-closed'), false);
-  assert.equal(trackerCalls.length, 0);
 
-  const build = manager.startFeatureBuild(session.id, { pipeline: 'tdd', verify: false });
-
-  assert.equal(build.type, 'feature-build');
-  assert.equal(build.sessionId, session.id);
-
-  await waitFor(() => build.status === 'done');
-
-  const events = manager.snapshot(build).events;
+  const events = manager.snapshot(session).events;
   const done = events.filter((event) => event.type === 'build-step' && event.status === 'done');
 
+  assert.match(session.result.artifact, /spec\.md$/);
   assert.equal(events.find((event) => event.type === 'build-started').verify, false);
   assert.deepEqual(done.map((event) => event.skill), ['spec-to-task', 'feature-tdd']);
-  assert.equal(build.result.verify, false);
-  assert.equal(build.result.featureWritten, true);
-  assert.match(prompts.at(-1), /feature-tdd/);
-  // The session stays finished; the build is its own job.
-  assert.equal(manager.snapshot(session).status, 'done');
-  assert.equal(build.publish.status, 'pushed');
+  assert.equal(session.result.build.verify, false);
+  assert.equal(session.result.build.verified, false);
+  assert.deepEqual(prompts, ['deep-spec', 'spec-to-task', 'feature-tdd']);
+  assert.equal(events.some((event) => event.type === 'build-done'), true);
+  assert.equal(session.publish.status, 'pushed');
   assert.equal(events.find((event) => event.type === 'issue-closed').key, 'ABC-7');
   assert.ok(trackerCalls.some((call) => call.options.method === 'POST'));
+  // The build is the same job, and its worktree is removed when it ends.
+  assert.equal(fs.existsSync(session.worktree), false);
 });
 
 test('resolveSpecIssueTarget prefers the imported issue, then the requested source, then the saved one', () => {
@@ -1233,25 +1395,20 @@ test('a spec issue session files the written spec without branching or publishin
 
       throw new Error(`Unexpected request: ${options.method ?? 'GET'} ${url}`);
     },
-    spawnImpl: async (command, args) => {
-      const prompt = args.at(-1) ?? '';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      const file = path.join(options.cwd, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
 
-      // The interview turn writes the spec and exits, which ends the session.
-      if (/interview brief/.test(prompt)) {
-        fs.mkdirSync(path.dirname(specPath), { recursive: true });
-        fs.writeFileSync(specPath, '# Feature: Saved searches\n\nRemember filters.\n', 'utf8');
+      // The interview turn writes the spec, which ends the session structurally.
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '# Feature: Saved searches\n\nRemember filters.\n', 'utf8');
 
-        return { code: 0, stdout: '# Spec written.\n', stderr: '' };
-      }
-
-      return { code: 0, stdout: 'ok\n', stderr: '' };
-    }
+      return '# Spec written.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
 
-  const session = manager.startSpecIssue({
+  const session = await manager.startSpecIssue({
     brief: 'Add saved searches.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]',
     specIssueSource: 'jira',
     publish: true,
     closeIssues: true
@@ -1266,6 +1423,7 @@ test('a spec issue session files the written spec without branching or publishin
   assert.equal(snapshot.flow, 'specIssue');
   assert.equal(session.publish, null);
   assert.equal(session.result.artifact, specPath);
+  assert.equal(fs.readFileSync(specPath, 'utf8'), '# Feature: Saved searches\n\nRemember filters.\n');
   assert.ok(types.includes('issue-created'));
   assert.equal(created.type, 'issue-created');
   assert.equal(created.source, 'jira');
@@ -1273,6 +1431,8 @@ test('a spec issue session files the written spec without branching or publishin
   assert.equal(created.url, 'https://jira.internal/browse/ABC-42');
   assert.equal(snapshot.events.some((event) => event.type === 'publish'), false);
   assert.equal(snapshot.events.some((event) => event.type === 'issue-closed'), false);
+  assert.equal(snapshot.worktree, '');
+  assert.equal(fs.existsSync(path.join(root, '.sdd', 'worktrees', session.id)), false);
 
   assert.equal(trackerCalls[0].url, 'https://jira.internal/rest/api/2/issue');
   assert.equal(JSON.parse(trackerCalls[0].options.body).fields.summary, 'Saved searches');
@@ -1294,28 +1454,24 @@ test('a spec issue session files the written spec without branching or publishin
 
 test('a spec issue session stays done when no tracker target is set', async (t) => {
   const root = createRepo();
-  const specPath = path.join(root, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const manager = createJobManager({
     cwd: root,
-    spawnImpl: async (command, args) => {
-      const prompt = args.at(-1) ?? '';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      const file = path.join(options.cwd, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
 
-      if (/interview brief/.test(prompt)) {
-        fs.mkdirSync(path.dirname(specPath), { recursive: true });
-        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
-      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '# Feature: Saved searches\n', 'utf8');
 
-      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
-    }
+      return '# Spec written.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
 
-  const session = manager.startSpecIssue({
+  const session = await manager.startSpecIssue({
     brief: 'Add saved searches.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]',
     specIssueSource: 'jira'
   });
 
@@ -1351,22 +1507,19 @@ test('a spec issue session stays done when the tracker rejects the issue', async
       json: async () => ({}),
       text: async () => '{"errorMessages":["No permission"]}'
     }),
-    spawnImpl: async (command, args) => {
-      const prompt = args.at(-1) ?? '';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      const file = path.join(options.cwd, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
 
-      if (/interview brief/.test(prompt)) {
-        fs.mkdirSync(path.dirname(specPath), { recursive: true });
-        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
-      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '# Feature: Saved searches\n', 'utf8');
 
-      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
-    }
+      return '# Spec written.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
 
-  const session = manager.startSpecIssue({
-    brief: 'Add saved searches.',
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]'
+  const session = await manager.startSpecIssue({
+    brief: 'Add saved searches.'
   });
 
   await waitFor(() => session.status === 'done');
@@ -1384,16 +1537,15 @@ test('the studio exposes the spec issue route', async (t) => {
   const studio = createStudioServer({
     cwd: root,
     version: '9.9.9',
-    spawnImpl: async (command, args) => {
-      const prompt = args.at(-1) ?? '';
+    spawnProcess: createFakeLiveAgent((turn, prompt, options) => {
+      const file = path.join(options.cwd, 'docs', 'sdd', 'features', 'saved-searches', 'spec.md');
 
-      if (/interview brief/.test(prompt)) {
-        fs.mkdirSync(path.dirname(specPath), { recursive: true });
-        fs.writeFileSync(specPath, '# Feature: Saved searches\n', 'utf8');
-      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '# Feature: Saved searches\n', 'utf8');
 
-      return { code: 0, stdout: '# Spec written.\n', stderr: '' };
-    }
+      return '# Spec written.\n';
+    }),
+    terminate: (child) => child.kill?.()
   });
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1409,8 +1561,6 @@ test('the studio exposes the spec issue route', async (t) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       brief: 'Add saved searches.',
-      agentPreset: 'cursor',
-      agentCmd: '["cursor-agent","-p"]',
       specIssueSource: 'jira'
     })
   });
@@ -1430,6 +1580,8 @@ test('the studio exposes the spec issue route', async (t) => {
 
   assert.equal(finished.job.flow, 'specIssue');
   assert.equal(finished.job.specIssue.status, 'skipped');
+  assert.match(finished.markdown, /specIssue session/);
+  assert.equal(fs.existsSync(specPath), true);
   assert.equal(list.jobs.length, 1);
   assert.equal((await fetch(`${base}/api/features/${job.id}`)).status, 404);
 });
@@ -1449,19 +1601,26 @@ function createMergeFixture() {
   return { root, target, source, ref };
 }
 
-function createMergeAgent({ root, target, ref }) {
-  return async () => {
-    // What the merge skill does: branch from the target, then merge the source.
-    git(root, ['checkout', '-q', '-b', ref, target]);
-    git(root, ['merge', '--no-ff', '-q', '-m', 'Merge feature', 'feature']);
+function createMergeAgent({ source, target, ref }) {
+  return createFakeLiveAgent((turn, prompt, options) => {
+    // What the merge skill does inside its worktree: branch from the target,
+    // then merge the source. The main checkout is never touched.
+    if (turn === 1) {
+      git(options.cwd, ['checkout', '-q', '-b', ref, target]);
+      git(options.cwd, ['merge', '--no-ff', '-q', '-m', 'Merge feature', source]);
+    }
 
-    return { code: 0, stdout: '# Merge report\n\nMerged feature; no conflicts.\n', stderr: '' };
-  };
+    return '# Merge report\n\nMerged feature; no conflicts.\n';
+  });
 }
 
-test('a merge session refuses a dirty tree and an existing integration branch', async (t) => {
+test('a merge session starts from a dirty checkout and refuses an existing integration branch', async (t) => {
   const fixture = createMergeFixture();
-  const manager = createJobManager({ cwd: fixture.root });
+  const manager = createJobManager({
+    cwd: fixture.root,
+    spawnProcess: createMergeAgent(fixture),
+    terminate: (child) => child.kill?.()
+  });
 
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
@@ -1469,25 +1628,22 @@ test('a merge session refuses a dirty tree and an existing integration branch', 
 
   fs.writeFileSync(dirtyFile, 'dirty\n', 'utf8');
 
-  await assert.rejects(
-    manager.startMerge({
-      source: fixture.source,
-      target: fixture.target,
-      agentPreset: 'cursor',
-      agentCmd: '["cursor-agent","-p"]'
-    }),
-    /working tree has changes/
-  );
+  // The worktree isolates the merge, so a dirty main checkout is allowed.
+  const job = await manager.startMerge({
+    source: fixture.source,
+    target: fixture.target
+  });
+
+  await waitFor(() => job.status === 'done');
+  assert.equal(job.result.ref, fixture.ref);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
 
   fs.rmSync(dirtyFile, { force: true });
-  git(fixture.root, ['branch', fixture.ref, fixture.target]);
 
   await assert.rejects(
     manager.startMerge({
       source: fixture.source,
-      target: fixture.target,
-      agentPreset: 'cursor',
-      agentCmd: '["cursor-agent","-p"]'
+      target: fixture.target
     }),
     /already exists/
   );
@@ -1497,16 +1653,15 @@ test('a merge session ends at the integration branch and lands it by fast-forwar
   const fixture = createMergeFixture();
   const manager = createJobManager({
     cwd: fixture.root,
-    spawnImpl: createMergeAgent(fixture)
+    spawnProcess: createMergeAgent(fixture),
+    terminate: (child) => child.kill?.()
   });
 
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
   const job = await manager.startMerge({
     source: fixture.source,
-    target: fixture.target,
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]'
+    target: fixture.target
   });
 
   assert.equal(job.flow, 'merge');
@@ -1518,15 +1673,17 @@ test('a merge session ends at the integration branch and lands it by fast-forwar
 
   assert.equal(job.result.ref, fixture.ref);
   assert.equal(done.summary.ref, fixture.ref);
-  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+  // The integration branch exists; the target itself was not checked out or moved.
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
+  assert.equal(fs.existsSync(job.worktree), false);
 
-  // A dirty tree blocks landing, and the branch stays put.
+  // A dirty tree blocks landing, and the target stays put.
   const scratch = path.join(fixture.root, 'scratch.txt');
 
   fs.writeFileSync(scratch, 'not committed\n', 'utf8');
 
   await assert.rejects(manager.landMerge(job.id), /working tree has changes/);
-  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
 
   fs.rmSync(scratch, { force: true });
 
@@ -1534,7 +1691,7 @@ test('a merge session ends at the integration branch and lands it by fast-forwar
 
   assert.equal(landed.target, fixture.target);
   assert.equal(landed.fastForward, true);
-  assert.equal(landed.previousBranch, fixture.ref);
+  assert.equal(landed.previousBranch, fixture.target);
   assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
   assert.equal(
     git(fixture.root, ['rev-parse', 'HEAD']),
@@ -1547,30 +1704,27 @@ test('a merge session refuses to land when the target moved', async (t) => {
   const fixture = createMergeFixture();
   const manager = createJobManager({
     cwd: fixture.root,
-    spawnImpl: createMergeAgent(fixture)
+    spawnProcess: createMergeAgent(fixture),
+    terminate: (child) => child.kill?.()
   });
 
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
   const job = await manager.startMerge({
     source: fixture.source,
-    target: fixture.target,
-    agentPreset: 'cursor',
-    agentCmd: '["cursor-agent","-p"]'
+    target: fixture.target
   });
 
   await waitFor(() => job.status === 'done');
 
   // Someone lands another change on the target after the integration branch
   // was cut. A fast-forward is no longer possible, and the studio refuses.
-  git(fixture.root, ['checkout', '-q', fixture.target]);
   fs.writeFileSync(path.join(fixture.root, 'later.txt'), 'later\n', 'utf8');
   git(fixture.root, ['add', '-A']);
   git(fixture.root, ['commit', '-q', '-m', 'later target work']);
-  git(fixture.root, ['checkout', '-q', fixture.ref]);
 
   await assert.rejects(manager.landMerge(job.id), /has moved/);
-  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.ref);
+  assert.equal(git(fixture.root, ['rev-parse', '--abbrev-ref', 'HEAD']), fixture.target);
 });
 
 test('the studio exposes the merge route and the explicit land endpoint', async (t) => {
@@ -1578,7 +1732,8 @@ test('the studio exposes the merge route and the explicit land endpoint', async 
   const studio = createStudioServer({
     cwd: fixture.root,
     version: '9.9.9',
-    spawnImpl: createMergeAgent(fixture)
+    spawnProcess: createMergeAgent(fixture),
+    terminate: (child) => child.kill?.()
   });
 
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
@@ -1594,9 +1749,7 @@ test('the studio exposes the merge route and the explicit land endpoint', async 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       source: fixture.source,
-      target: fixture.target,
-      agentPreset: 'cursor',
-      agentCmd: '["cursor-agent","-p"]'
+      target: fixture.target
     })
   });
 
@@ -1630,7 +1783,7 @@ test('the studio exposes the merge route and the explicit land endpoint', async 
 });
 
 test('a live Claude session streams questions and answers over one process', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-live-'));
+  const root = createRepo();
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -1638,15 +1791,13 @@ test('a live Claude session streams questions and answers over one process', asy
     cwd: root,
     spawnProcess: createFakeLiveAgent((turn) => (
       turn === 1
-        ? 'Which storage should we use?\n\n```interview\nLocal disk or a database?\n```\n'
+        ? 'Which storage should we use?\n\nLocal disk or a database?\n'
         : '# Plan\n\nLocal disk it is.\n'
     )),
     terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
-    brief: 'Add a command palette.',
-    agentPreset: 'claude',
-    agentCmd: DEFAULT_AGENT_COMMAND
+  const job = await manager.startEnhancement({
+    brief: 'Add a command palette.'
   });
 
   assert.equal(job.result, null);
@@ -1675,7 +1826,7 @@ test('a live Claude session streams questions and answers over one process', asy
 });
 
 test('a live turn with no assistant text fails with the agent diagnostic', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-live-empty-'));
+  const root = createRepo();
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -1710,10 +1861,8 @@ test('a live turn with no assistant text fails with the agent diagnostic', async
     },
     terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
-    brief: 'Add a command palette.',
-    agentPreset: 'claude',
-    agentCmd: DEFAULT_AGENT_COMMAND
+  const job = await manager.startEnhancement({
+    brief: 'Add a command palette.'
   });
 
   await waitFor(() => job.status === 'failed');
@@ -1728,7 +1877,7 @@ test('a live turn with no assistant text fails with the agent diagnostic', async
 });
 
 test('the job manager routes a permission request to the browser', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-perm-'));
+  const root = createRepo();
   const spawnAgent = createFakeLiveAgent(() => '# Plan\n\nLocal disk.');
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1737,7 +1886,7 @@ test('the job manager routes a permission request to the browser', async (t) => 
     cwd: root,
     spawnProcess: (command, args, options) => {
       // startSession picks the id, so the fake writes where the session reads.
-      const dir = path.join(root, '.sdd', 'enhancements', options.env.SDD_SESSION_ID);
+      const dir = path.join(root, '.sdd', 'sessions', 'enhancement', options.env.SDD_SESSION_ID);
 
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(
@@ -1750,10 +1899,8 @@ test('the job manager routes a permission request to the browser', async (t) => 
     },
     terminate: (child) => child.kill?.()
   });
-  const job = manager.startEnhancement({
-    brief: 'Add a command palette.',
-    agentPreset: 'claude',
-    agentCmd: DEFAULT_AGENT_COMMAND
+  const job = await manager.startEnhancement({
+    brief: 'Add a command palette.'
   });
 
   await waitFor(() => manager.snapshot(job).events.some((event) => event.type === 'permission'));
@@ -1778,36 +1925,35 @@ test('the job manager routes a permission request to the browser', async (t) => 
   await waitFor(() => job.status === 'done');
 });
 
-test('cancelling a session stops the live process', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-studio-live-cancel-'));
+test('cancelling a session stops the live process and removes its worktree', async (t) => {
+  const root = createRepo();
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   let killed = false;
   const manager = createJobManager({
     cwd: root,
-    spawnProcess: createFakeLiveAgent(() => '```interview\nStill going?\n```\n'),
+    spawnProcess: createFakeLiveAgent(() => 'Still going?\n'),
     terminate: (child) => {
       killed = true;
       child.kill?.();
     }
   });
-  const job = manager.startEnhancement({
-    brief: 'Add a command palette.',
-    agentPreset: 'claude',
-    agentCmd: DEFAULT_AGENT_COMMAND
+  const job = await manager.startEnhancement({
+    brief: 'Add a command palette.'
   });
 
   await waitFor(() => manager.snapshot(job).events.some((event) => event.type === 'question'));
 
   assert.equal(manager.cancelJob(job.id), true);
 
-  await waitFor(() => job.status === 'cancelled');
+  await waitFor(() => job.status === 'stopped');
   assert.ok(killed);
+  assert.equal(fs.existsSync(job.worktree), false);
 
   const types = manager.snapshot(job).events.map((event) => event.type);
 
-  assert.ok(types.includes('job-cancelled'));
+  assert.ok(types.includes('job-stopped'));
 });
 
 
@@ -1825,10 +1971,8 @@ test('cancelling a sweep stops it and reports a cancelled job', async (t) => {
   const manager = createJobManager({ cwd: root, fetchImpl: fakeFetch, spawnImpl });
   const job = manager.startSweep({
     project: 'ABC',
-    agentPreset: 'cursor',
     date: '2026-10-19',
     base: 'HEAD',
-    agentCmd: JSON.stringify(['fake-agent']),
     publish: 'push',
     jiraUrl: 'https://jira.example.com',
     jiraEmail: 'bot@example.com',
@@ -2079,9 +2223,7 @@ test('studio runs interview sessions and keeps them separate from sweeps', async
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      brief: 'Add a command palette.',
-      agentPreset: 'claude',
-      agentCmd: DEFAULT_AGENT_COMMAND
+      brief: 'Add a command palette.'
     })
   });
 
@@ -2093,14 +2235,25 @@ test('studio runs interview sessions and keeps them separate from sweeps', async
     await collectSession(base, '/api/enhancements', job.id)
   ).job.status === 'waiting');
 
-  // A second session while one is waiting is refused.
-  const busy = await fetch(`${base}/api/features`, {
+  // Sessions run in their own worktrees, so a second one may start in parallel.
+  const parallel = await fetch(`${base}/api/features`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ brief: 'A new feature.' })
   });
 
-  assert.equal(busy.status, 409);
+  assert.equal(parallel.status, 202);
+
+  const parallelJob = (await parallel.json()).job;
+
+  await waitFor(async () => (
+    await collectSession(base, '/api/features', parallelJob.id)
+  ).job.status === 'waiting');
+
+  await fetch(`${base}/api/features/${parallelJob.id}/cancel`, { method: 'POST' });
+  await waitFor(async () => (
+    await collectSession(base, '/api/features', parallelJob.id)
+  ).job.status === 'stopped');
 
   const answered = await fetch(`${base}/api/jobs/${job.id}/input`, {
     method: 'POST',
@@ -2140,15 +2293,14 @@ test('studio runs interview sessions and keeps them separate from sweeps', async
   assert.match(output, /# Result/);
   assert.match(output, /```mermaid/);
   assert.ok(final.job.events.every((event) => Number.isInteger(event.seq)));
+  assert.match(final.markdown, /enhancement session/);
 
   // The feature tab runs the same engine under its own prefix.
   const feature = await fetch(`${base}/api/features`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      brief: 'Add saved searches.',
-      agentPreset: 'claude',
-      agentCmd: DEFAULT_AGENT_COMMAND
+      brief: 'Add saved searches.'
     })
   });
 
@@ -2184,8 +2336,9 @@ test('studio runs interview sessions and keeps them separate from sweeps', async
   const sessions = await (await fetch(`${base}/api/enhancements`)).json();
   const sweeps = await (await fetch(`${base}/api/sweeps`)).json();
 
-  assert.equal(features.jobs.length, 1);
-  assert.equal(features.jobs[0].flow, 'feature');
+  assert.equal(features.jobs.length, 2);
+  assert.ok(features.jobs.some((entry) => entry.flow === 'feature' && entry.status === 'done'));
+  assert.ok(features.jobs.some((entry) => entry.flow === 'feature' && entry.status === 'stopped'));
   assert.equal(sessions.jobs.length, 1);
   assert.equal(sweeps.jobs.length, 0);
 

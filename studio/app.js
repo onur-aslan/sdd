@@ -1,6 +1,10 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+function escapeText(value) {
+  return window.SDDMarkdown ? window.SDDMarkdown.escapeHtml(value) : String(value ?? '');
+}
+
 const el = {
   repoInfo: $('#repo-info'),
   versionChip: $('#version-chip'),
@@ -30,8 +34,13 @@ const el = {
   planSummary: $('#plan-summary'),
   advancedToggle: $('#advanced-toggle'),
   advancedBody: $('#advanced-body'),
-  agentPreset: $('#agent-preset'),
-  agentCustomField: $('#agent-custom-field'),
+  sweepModelPicker: $('#sweep-model-picker'),
+  sweepEffort: $('#sweep-effort'),
+  claudeEnv: $('#claude-env'),
+  addClaudeEnv: $('#add-claude-env'),
+  refreshModels: $('#refresh-models'),
+  modelSource: $('#model-source'),
+  workflowDefaults: $('#workflow-defaults'),
   prPreset: $('#pr-preset'),
   prCustomField: $('#pr-custom-field'),
   checkJira: $('#check-jira'),
@@ -66,15 +75,13 @@ const el = {
   interviewTitle: $('#interview-title'),
   interviewPrompt: $('#interview-prompt'),
   interviewBody: $('#interview-body'),
-  interviewSubmit: $('#interview-submit'),
-  enhancementScope: $('#enhancement-scope'),
-  featureScope: $('#feature-scope'),
-  specIssueScope: $('#spec-issue-scope'),
-  mergeScope: $('#merge-scope')
+  interviewSubmit: $('#interview-submit')
 };
 
 const state = {
   config: null,
+  models: [],
+  modelsError: '',
   jobId: null,
   source: null,
   bugs: new Map(),
@@ -400,29 +407,177 @@ function attach(jobId) {
   source.onerror = () => setConnection('down', 'reconnecting');
 }
 
-function agentPresets() {
-  return state.config?.agents ?? [];
+function efforts() {
+  return state.config?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max'];
 }
 
-function presetCommand(id) {
-  return agentPresets().find((preset) => preset.id === id)?.command ?? '';
+function modelOptions() {
+  return state.models ?? [];
 }
 
-function inferAgentPreset(agentCmd) {
-  if (!agentCmd) {
-    return state.config?.defaults?.agentPreset || 'claude';
+function workflowSettings(flow) {
+  return state.config?.workflows?.[flow] ?? {
+    model: '',
+    effort: '',
+    mr: true
+  };
+}
+
+function modelLabel(id) {
+  return id ? String(id) : 'Default';
+}
+
+const CUSTOM_MODEL = '__custom__';
+
+// Claude Code exposes a short list of aliases, while a gateway can expose any
+// model id. The picker keeps both: known ids in a select, plus a custom field.
+function modelChoices() {
+  const seen = new Set();
+  const choices = [];
+
+  for (const entry of [...(state.models ?? []), ...envModels()]) {
+    const value = String(entry ?? '').trim();
+
+    if (!value || value === CUSTOM_MODEL || value.toLowerCase() === 'default' || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    choices.push(value);
   }
 
-  const match = agentPresets().find((preset) => preset.id !== 'custom' && preset.command === agentCmd);
-
-  return match ? match.id : 'custom';
+  return choices;
 }
 
-function toggleAgentCustom() {
-  const custom = el.form.agentPreset.value === 'custom';
+function fillModelPicker(picker, selected) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
 
-  el.agentCustomField.classList.toggle('hidden', !custom);
-  updateSessionAgents();
+  if (!select || !input) {
+    return;
+  }
+
+  const value = String(selected ?? '').trim();
+  const choices = modelChoices();
+  const custom = value !== '' && value.toLowerCase() !== 'default' && !choices.includes(value);
+
+  select.replaceChildren(new Option('Default', ''));
+
+  for (const model of choices) {
+    select.append(new Option(model, model));
+  }
+
+  select.append(new Option('Custom…', CUSTOM_MODEL));
+  select.value = custom ? CUSTOM_MODEL : choices.includes(value) ? value : '';
+  input.value = custom ? value : '';
+  input.classList.toggle('hidden', !custom);
+}
+
+function modelPickerValue(picker) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
+
+  if (!select) {
+    return '';
+  }
+
+  if (select.value !== CUSTOM_MODEL) {
+    return select.value;
+  }
+
+  return (input?.value ?? '').trim();
+}
+
+function wireModelPicker(picker, onChange) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
+
+  if (!select || !input) {
+    return;
+  }
+
+  select.addEventListener('change', () => {
+    const custom = select.value === CUSTOM_MODEL;
+
+    input.classList.toggle('hidden', !custom);
+
+    if (custom) {
+      input.focus();
+    }
+
+    onChange?.();
+  });
+  input.addEventListener('input', () => onChange?.());
+}
+
+function fillEffortSelect(select, selected) {
+  if (!select) {
+    return;
+  }
+
+  select.replaceChildren(new Option('Default', ''));
+
+  for (const effort of efforts()) {
+    select.append(new Option(effort, effort));
+  }
+
+  select.value = efforts().includes(selected) ? selected : '';
+}
+
+function selectionFrom(prefix) {
+  const selection = {
+    model: prefix.modelPicker ? modelPickerValue(prefix.modelPicker) : prefix.model?.value || '',
+    effort: prefix.effort?.value || ''
+  };
+
+  // Workflows without a merge-request control keep their stored choice. Only
+  // enhancement and feature render the checkbox.
+  if (prefix.mr) {
+    selection.mr = prefix.mr.checked !== false;
+  }
+
+  return selection;
+}
+
+function currentSelection(flow) {
+  return workflowSettings(flow);
+}
+
+// The workflow form is the default, not a one-off: every change is remembered
+// so the next session opens with the same model, effort, and MR choice.
+let workflowSaveTimer = null;
+
+function rememberWorkflow(flow, selection) {
+  if (!state.config) {
+    return;
+  }
+
+  const current = state.config.workflows?.[flow] ?? {};
+  const mr = selection.mr === undefined ? current.mr !== false : selection.mr !== false;
+
+  state.config.workflows = {
+    ...(state.config.workflows ?? {}),
+    [flow]: { ...selection, mr }
+  };
+
+  window.clearTimeout(workflowSaveTimer);
+  workflowSaveTimer = window.setTimeout(async () => {
+    try {
+      await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({ workflows: state.config.workflows })
+      });
+    } catch {
+      // Remembering the form is a convenience; a session can still start.
+    }
+  }, 250);
+}
+
+function renderSweepSelection() {
+  const selection = workflowSettings('bugSweep');
+
+  fillModelPicker(el.sweepModelPicker, selection.model);
+  fillEffortSelect(el.sweepEffort, selection.effort);
 }
 
 function prPresets() {
@@ -465,8 +620,9 @@ function formRequest({ dryRun = false } = {}) {
   const data = new FormData(el.form);
   const text = (name) => (data.get(name) ?? '').toString().trim();
   const checked = (name) => data.get(name) === 'on';
-  const agentPreset = text('agentPreset') || 'claude';
-  const agentCmd = agentPreset === 'custom' ? text('agentCmd') : presetCommand(agentPreset);
+  const model = modelPickerValue(el.sweepModelPicker);
+  const effort = text('effort');
+  const mr = publishChoice(state.config?.settings ?? {}) === 'pr';
   const prPreset = text('prPreset') || 'github';
   const prCommand = prPreset === 'custom' ? text('prCommand') : prPresetCommand(prPreset);
   const gitlabPush = prPreset === 'gitlab-push';
@@ -495,8 +651,9 @@ function formRequest({ dryRun = false } = {}) {
     githubLabel: text('githubLabel'),
     issues,
     base: text('base'),
-    agentPreset,
-    agentCmd,
+    model,
+    effort,
+    mr,
     verifyCmd: state.config?.defaults?.verifyCommand ?? '',
     jiraType,
     jiraUrl: text('jiraUrl'),
@@ -1010,8 +1167,6 @@ function settingsPayload() {
     gitlabProject: request.gitlabProject,
     project: request.project,
     base: request.base,
-    agentPreset: request.agentPreset,
-    agentCmd: request.agentCmd,
     publish: request.publish,
     closeIssues: request.closeIssues,
     jiraType: request.jiraType,
@@ -1197,49 +1352,45 @@ async function submitAnswer() {
 const SESSION_COPY = {
   enhancement: {
     endpoint: '/api/enhancements',
+    title: 'Enhancement sessions',
     finalLabel: 'report',
-    scope: 'plan → implement → verify',
     placeholder: 'Describe the enhancement…',
     restartPlaceholder: 'Start another enhancement…',
     answerPlaceholder: 'Type your answer, or approve the plan…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the enhancement below or start from a Jira, GitHub, or GitLab issue. The agent asks one question at a time, drafts a plan, and after you approve it implements and verifies the change. When the report is ready the studio commits the change on its own branch and opens a merge request.'
+    emptyBody: 'One live Claude process runs the interview in its own worktree. When the report is ready, the studio commits and pushes the session branch; the merge request is optional.'
   },
   feature: {
     endpoint: '/api/features',
+    title: 'Feature sessions',
     finalLabel: 'spec',
-    scope: 'spec → build',
     placeholder: 'Describe the feature…',
     restartPlaceholder: 'Start another feature…',
     answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the feature below or start from a Jira, GitHub, or GitLab issue. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready you choose how to build it; the build commits to the session branch and opens a merge request.'
+    emptyBody: 'One live Claude process runs the design interview and writes the spec. You choose the build path next; the build stays in this session.'
   },
   specIssue: {
     endpoint: '/api/spec-issues',
+    title: 'Spec issue sessions',
     finalLabel: 'spec',
-    scope: 'spec → issue',
     placeholder: 'Describe the feature to spec…',
     restartPlaceholder: 'Start another spec…',
     answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'Describe the feature below. The agent runs the design interview one question at a time, then writes the spec to docs/sdd/features. When the spec is ready the studio files it as one issue in the tracker you pick. Nothing is committed, pushed, or built.'
+    emptyBody: 'One live Claude process runs the design interview in a worktree and writes the spec. The studio copies it into the main checkout and files one tracker issue; nothing is committed or pushed.'
   },
   merge: {
     endpoint: '/api/merges',
+    title: 'Merge sessions',
     finalLabel: 'merge report',
-    scope: 'review → integrate',
     placeholder: 'Pick a source and target above…',
     restartPlaceholder: 'Start another merge…',
     answerPlaceholder: 'Type your answer, or approve the resolution table…',
     emptyTitle: 'Merge two branches.',
-    emptyBody: 'Choose a source branch and a target. The agent dry-runs the merge, asks one decision at a time, and builds an integration branch. The target is not touched until you land it.'
+    emptyBody: 'The live Claude process dry-runs the merge in a worktree opened from the target, then builds an integration branch. The target is untouched until you land it.'
   }
 };
-
-function escapeText(value) {
-  return window.SDDMarkdown ? window.SDDMarkdown.escapeHtml(value) : String(value ?? '');
-}
 
 function createSession(flow) {
   const root = document.querySelector(`[data-session-flow="${flow}"]`);
@@ -1249,21 +1400,33 @@ function createSession(flow) {
   }
 
   const copy = SESSION_COPY[flow];
-  const scopeEl = {
-    enhancement: el.enhancementScope,
-    feature: el.featureScope,
-    specIssue: el.specIssueScope,
-    merge: el.mergeScope
-  }[flow];
-  // A merge ends when its integration branch exists, so it has no hand-finish.
-  const canFinish = flow !== 'merge';
+  const isMerge = flow === 'merge';
+  const canFinish = flow === 'enhancement';
+  const ALIVE = new Set(['starting', 'queued', 'running', 'waiting', 'stopping', 'cancelling']);
+  let listExpanded = false;
 
   root.innerHTML = `
+    <section class="session-home hidden" data-role="home" aria-label="${copy.title}">
+      <header class="session-list-head">
+        <button type="button" class="session-list-toggle" data-role="list-toggle" aria-expanded="false" aria-controls="session-list-${flow}">
+          <span class="session-list-title">Sessions</span>
+          <span class="session-list-count" data-role="list-count">0</span>
+          <svg class="session-list-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button type="button" class="btn sm hidden" data-role="new">New session</button>
+      </header>
+      <div class="session-list-body" data-role="list-body" id="session-list-${flow}" hidden>
+        <p class="session-list-note">Read-only history of the last 20 sessions.</p>
+        <ul class="session-list" data-role="session-list"></ul>
+        <p class="session-list-empty" data-role="session-list-empty">No earlier sessions.</p>
+      </div>
+    </section>
+
     <section class="session" aria-label="${copy.finalLabel} session">
-      <header class="session-bar">
+      <header class="session-bar hidden" data-role="bar">
         <div class="session-id">
           <span class="badge" data-role="badge">ready</span>
-          <span class="session-agent" data-role="agent"></span>
+          <span class="session-lock" data-role="lock" title="Model and effort are locked for this session"></span>
         </div>
         <div class="session-tools">
           <div class="segmented" role="group" aria-label="Conversation view">
@@ -1272,57 +1435,27 @@ function createSession(flow) {
           </div>
           <button type="button" class="btn quiet sm" data-role="copy">Copy</button>
           ${canFinish ? `<button type="button" class="btn quiet sm" data-role="finish" title="End the session when the reply is the final ${copy.finalLabel}" disabled>Finish</button>` : ''}
-          <button type="button" class="btn quiet-danger sm" data-role="stop" disabled>Stop</button>
+          <button type="button" class="btn quiet-danger sm" data-role="stop" disabled title="Stop the process and delete the worktree">Stop</button>
         </div>
       </header>
 
-      <div class="session-stage" data-role="stage" role="log" aria-live="off" aria-label="Conversation" tabindex="0">
+      <div class="session-setup" data-role="setup"></div>
+
+      <div class="session-stage hidden" data-role="stage" role="log" aria-live="off" aria-label="Conversation" tabindex="0">
         <div class="session-empty" data-role="empty">
-          <p class="session-empty-title" data-role="empty-title">${copy.emptyTitle}</p>
-          <p data-role="empty-body">${copy.emptyBody}</p>
-          ${flow === 'merge' ? '' : flow === 'specIssue' ? `
-            <div class="session-import">
-              <div class="session-import-row">
-                <label class="session-import-label" for="source-${flow}">File in</label>
-                <select id="source-${flow}" data-role="issue-source" aria-label="Issue tracker">
-                  <option value="jira">Jira</option>
-                  <option value="github">GitHub</option>
-                  <option value="gitlab">GitLab</option>
-                </select>
-              </div>
-              <p class="session-import-status" data-role="issue-status" role="status"></p>
-            </div>
-          ` : `
-            <div class="session-import">
-              <div class="session-import-row">
-                <label class="session-import-label" for="source-${flow}">Start from</label>
-                <select id="source-${flow}" data-role="issue-source" aria-label="Issue source">
-                  <option value="jira">Jira</option>
-                  <option value="github">GitHub</option>
-                  <option value="gitlab">GitLab</option>
-                </select>
-                <select id="issue-${flow}" data-role="issue-select" disabled>
-                  <option value="">Load open issues…</option>
-                </select>
-                <button type="button" class="btn quiet sm" data-role="issue-load">Load issues</button>
-              </div>
-              <p class="session-import-status" data-role="issue-status" role="status"></p>
-              <label class="toggle session-publish">
-                <input type="checkbox" data-role="publish" checked>
-                <span>Create a branch, commit, and open a merge request</span>
-              </label>
-            </div>
-          `}
+          <p class="session-empty-title">${copy.emptyTitle}</p>
+          <p>${copy.emptyBody}</p>
         </div>
         <article class="session-rich hidden" data-role="rich-view"></article>
-        <pre class="session-raw hidden" data-role="raw-view"></pre>
+        <pre class="session-raw hidden" data-role="raw-view" aria-label="Raw stream"></pre>
       </div>
 
       <div class="handoff hidden" data-role="handoff"></div>
 
-      <form class="session-input" data-role="input-form">
+      <form class="session-input hidden" data-role="input-form">
         <textarea data-role="input" rows="1" spellcheck="false" aria-label="Your answer" placeholder="${copy.placeholder}"></textarea>
         <button type="submit" class="session-send" data-role="send" aria-label="Send">
+          <span class="session-send-label" data-role="send-label" aria-hidden="true"></span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13M12 5l7 7-7 7"/></svg>
         </button>
       </form>
@@ -1331,67 +1464,89 @@ function createSession(flow) {
 
   const q = (role) => root.querySelector(`[data-role="${role}"]`);
   const dom = {
+    home: q('home'),
+    listToggle: q('list-toggle'),
+    listCount: q('list-count'),
+    listBody: q('list-body'),
+    bar: q('bar'),
+    newBtn: q('new'),
+    list: q('session-list'),
+    listEmpty: q('session-list-empty'),
     badge: q('badge'),
-    agent: q('agent'),
+    lock: q('lock'),
     richBtn: q('rich'),
     rawBtn: q('raw'),
     copy: q('copy'),
     finish: q('finish'),
     stop: q('stop'),
+    setup: q('setup'),
     stage: q('stage'),
     empty: q('empty'),
-    issueSource: q('issue-source'),
-    issueSelect: q('issue-select'),
-    issueLoad: q('issue-load'),
-    issueStatus: q('issue-status'),
-    publish: q('publish'),
     richView: q('rich-view'),
     rawView: q('raw-view'),
     handoff: q('handoff'),
     inputForm: q('input-form'),
     input: q('input'),
-    send: q('send')
+    send: q('send'),
+    sendLabel: q('send-label')
   };
   const view = {
     jobId: null,
     sessionId: null,
     source: null,
     entries: [],
+    raw: [],
     active: null,
     awaiting: false,
     running: false,
     finished: false,
+    readOnly: false,
+    setup: false,
+    sessionOpen: false,
+    setupError: '',
     seq: 0,
     mode: 'rich',
     renderTimer: null,
     statusTimer: null,
     turnStartedAt: 0,
     turnLabel: 'writing',
+    working: [],
     build: null,
-    buildSource: null,
-    buildTimer: null,
-    buildPainted: false,
-    // Merge only: the source/target/ref from the job request, and whether the
-    // setup plate (rather than the transcript) is the current surface.
+    jobs: [],
     mergeMeta: null,
-    setup: false,
-    // The issue imported into the composer, so a successful session can close it.
+    setupChoice: null,
     sourceIssue: null,
-    // Spec issue only: the create/skip/fail result reported by the job.
-    specIssue: null
+    specIssue: null,
+    branch: ''
   };
-  view.issueChoices = [];
+  let issueChoices = [];
+  let stopArmed = false;
+  let stopTimer = null;
 
   function setStatus(text, live) {
     dom.badge.textContent = text;
     dom.badge.classList.toggle('running', Boolean(live));
   }
 
-  function setScope(text) {
-    if (scopeEl) {
-      scopeEl.textContent = text;
-    }
+  function setBarVisible(visible) {
+    dom.bar.classList.toggle('hidden', !visible);
   }
+
+  function setListExpanded(expanded) {
+    listExpanded = expanded;
+    dom.listToggle.setAttribute('aria-expanded', String(expanded));
+    dom.listBody.hidden = !expanded;
+  }
+
+  function syncSessionHome() {
+    const count = view.jobs.length;
+
+    dom.home.classList.toggle('hidden', count === 0);
+    dom.listCount.textContent = String(count);
+    dom.listToggle.setAttribute('aria-label', `${copy.title}, ${count} saved ${count === 1 ? 'session' : 'sessions'}`);
+    dom.newBtn.classList.toggle('hidden', !view.sessionOpen);
+  }
+
 
   function setInputEnabled(enabled, placeholder) {
     dom.input.disabled = !enabled;
@@ -1403,47 +1558,28 @@ function createSession(flow) {
     }
   }
 
-  // The merge tab starts from a setup plate, not a free-text brief, so its
-  // composer is only visible while the interview is actually running.
   function setComposerVisible(visible) {
     dom.inputForm.classList.toggle('hidden', !visible);
   }
 
-  function selectedAgent() {
-    const agentPreset = el.form.agentPreset.value;
-    const agentCmd = agentPreset === 'custom'
-      ? el.form.agentCmd.value.trim()
-      : presetCommand(agentPreset);
+  function setComposerAction(action) {
+    const starting = action === 'start';
 
-    return { agentPreset, agentCmd };
+    dom.inputForm.classList.toggle('is-start', starting);
+    dom.send.setAttribute('aria-label', starting ? 'Start session' : 'Send');
+    dom.sendLabel.textContent = starting ? 'Start' : '';
   }
 
-  function updateAgent() {
-    const preset = agentPresets().find((agent) => agent.id === el.form.agentPreset.value);
-
-    dom.agent.textContent = preset?.label ?? 'Custom agent';
-    // The badge names the agent; the title says what will actually run, so the
-    // session is traceable to the configured command.
-    dom.agent.title = preset?.command || 'Custom command from Settings';
+  function setSetupVisible(visible) {
+    dom.setup.classList.toggle('hidden', !visible);
+    dom.stage.classList.toggle('hidden', visible);
   }
 
-  function syncPublish() {
-    if (!dom.publish) {
-      return;
-    }
+  function paintLock(values = {}) {
+    const model = values.model ? modelLabel(values.model) : 'Default model';
+    const effort = values.effort ? `${values.effort} effort` : 'Default effort';
 
-    const settings = state.config?.settings ?? {};
-    const label = dom.publish.closest('label')?.querySelector('span');
-
-    if (!label) {
-      return;
-    }
-
-    const choice = publishChoice(settings);
-
-    label.textContent = choice === 'push'
-      ? 'Create a branch, commit, and push (no merge request)'
-      : 'Create a branch, commit, and open a merge request';
+    dom.lock.textContent = `${model} · ${effort}`;
   }
 
   function trackerLabel(source) {
@@ -1458,29 +1594,150 @@ function createSession(flow) {
     ].filter(Boolean).join('\n\n');
   }
 
+  // ---------------------------------------------------------------
+  // Session setup: model/effort, MR, and an optional issue
+  // ---------------------------------------------------------------
+
+  function selectionMarkup() {
+    const selection = workflowSettings(flow);
+    // Only enhancement and feature publish a branch with an optional merge
+    // request. Spec issue files an issue; merge lands an integration branch.
+    const showMr = !isMerge && flow !== 'specIssue';
+
+    return `
+      <div class="selection-row${showMr ? '' : ' selection-row-compact'}">
+        <label class="field"><span>Model</span>
+          <span class="model-picker" data-model-picker>
+            <select data-role="model-select" aria-label="Model"></select>
+            <input data-role="model" class="model-custom hidden" placeholder="Model id" autocomplete="off" aria-label="Custom model id">
+          </span>
+        </label>
+        <label class="field"><span>Effort</span><select data-role="effort" aria-label="Effort"></select></label>
+        ${showMr ? `<label class="toggle selection-mr">
+          <input type="checkbox" data-role="mr"${selection.mr !== false ? ' checked' : ''}>
+          <span>Open a merge request</span>
+        </label>` : ''}
+      </div>
+      <p class="hint">The selection is remembered for ${copy.title.toLowerCase()} and locked once the session starts. Choose Default to use the Claude environment.</p>
+    `;
+  }
+
+  function selectedFromSetup() {
+    return selectionFrom({
+      modelPicker: dom.setup.querySelector('[data-model-picker]'),
+      effort: dom.setup.querySelector('[data-role="effort"]'),
+      mr: dom.setup.querySelector('[data-role="mr"]')
+    });
+  }
+
+  function wireSelection() {
+    const modelPicker = dom.setup.querySelector('[data-model-picker]');
+    const effortSelect = dom.setup.querySelector('[data-role="effort"]');
+    const mrBox = dom.setup.querySelector('[data-role="mr"]');
+
+    if (!modelPicker || !effortSelect) {
+      return;
+    }
+
+    const saved = workflowSettings(flow);
+
+    fillModelPicker(modelPicker, saved.model);
+    fillEffortSelect(effortSelect, saved.effort);
+
+    if (mrBox) {
+      mrBox.checked = saved.mr !== false;
+    }
+
+    const remember = () => rememberWorkflow(flow, selectedFromSetup());
+
+    wireModelPicker(modelPicker, remember);
+    effortSelect.addEventListener('change', remember);
+    mrBox?.addEventListener('change', remember);
+  }
+
+  function issueImportMarkup() {
+    if (isMerge) {
+      return '';
+    }
+
+    const sourceOptions = `
+      <option value="jira">Jira</option>
+      <option value="github">GitHub</option>
+      <option value="gitlab">GitLab</option>
+    `;
+
+    if (flow === 'specIssue') {
+      return `
+        <div class="session-import">
+          <div class="session-import-row">
+            <label class="session-import-label" for="source-${flow}">File in</label>
+            <select id="source-${flow}" data-role="issue-source" aria-label="Issue tracker">${sourceOptions}</select>
+          </div>
+          <p class="session-import-status" data-role="issue-status" role="status"></p>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="session-import">
+        <div class="session-import-row">
+          <label class="session-import-label" for="source-${flow}">Start from</label>
+          <select id="source-${flow}" data-role="issue-source" aria-label="Issue source">${sourceOptions}</select>
+          <select id="issue-${flow}" data-role="issue-select" disabled>
+            <option value="">Load open issues…</option>
+          </select>
+          <button type="button" class="btn quiet sm" data-role="issue-load">Load issues</button>
+        </div>
+        <p class="session-import-status" data-role="issue-status" role="status"></p>
+      </div>
+    `;
+  }
+
   function syncIssueSource() {
-    if (!dom.issueSource) return;
+    const source = dom.setup.querySelector('[data-role="issue-source"]');
+
+    if (!source) {
+      return;
+    }
+
     const saved = state.config?.settings?.[`${flow}Source`] ?? 'jira';
-    dom.issueSource.value = ['jira', 'github', 'gitlab'].includes(saved) ? saved : 'jira';
+
+    source.value = ['jira', 'github', 'gitlab'].includes(saved) ? saved : 'jira';
   }
 
   async function saveIssueSource() {
-    if (!dom.issueSource) return;
-    const source = dom.issueSource.value;
+    const source = dom.setup.querySelector('[data-role="issue-source"]');
+
+    if (!source) {
+      return;
+    }
+
     try {
-      await api('/api/settings', { method: 'POST', body: JSON.stringify({ [`${flow}Source`]: source }) });
-      if (state.config?.settings) state.config.settings[`${flow}Source`] = source;
+      await api('/api/settings', { method: 'POST', body: JSON.stringify({ [`${flow}Source`]: source.value }) });
+
+      if (state.config?.settings) {
+        state.config.settings[`${flow}Source`] = source.value;
+      }
     } catch (error) {
-      dom.issueStatus.textContent = `Could not save source: ${error.message}`;
+      const status = dom.setup.querySelector('[data-role="issue-status"]');
+
+      if (status) {
+        status.textContent = `Could not save source: ${error.message}`;
+      }
     }
   }
 
   async function loadExternalIssues() {
-    if (!dom.issueLoad || !dom.issueSelect) {
+    const sourceSelect = dom.setup.querySelector('[data-role="issue-source"]');
+    const issueSelect = dom.setup.querySelector('[data-role="issue-select"]');
+    const loadButton = dom.setup.querySelector('[data-role="issue-load"]');
+    const status = dom.setup.querySelector('[data-role="issue-status"]');
+
+    if (!sourceSelect || !issueSelect || !status) {
       return;
     }
 
-    const source = dom.issueSource.value;
+    const source = sourceSelect.value;
     const settings = state.config?.settings ?? {};
     const request = source === 'github'
       ? { githubRepo: settings.githubRepo, ignoreLabels: true, limit: 100 }
@@ -1490,149 +1747,347 @@ function createSession(flow) {
     const target = source === 'github' ? request.githubRepo : source === 'gitlab' ? request.gitlabProject : request.project;
     const endpoint = source === 'github' ? '/api/github/bugs' : source === 'gitlab' ? '/api/gitlab/issues' : '/api/jira/issues';
 
-    dom.issueLoad.disabled = true;
-    dom.issueSelect.disabled = true;
-    dom.issueStatus.textContent = 'Loading open issues…';
+    if (loadButton) {
+      loadButton.disabled = true;
+    }
+    issueSelect.disabled = true;
+    status.textContent = 'Loading open issues…';
 
     try {
       if (!target) {
         const label = source === 'github' ? 'GitHub repository' : source === 'gitlab' ? 'GitLab project' : 'Jira project';
-        dom.issueStatus.textContent = `Set a ${label} in Settings first.`;
+        status.textContent = `Set a ${label} in Settings first.`;
         return;
       }
-      const result = await api(endpoint, {
-        method: 'POST',
-        body: JSON.stringify(request)
-      });
+
+      const result = await api(endpoint, { method: 'POST', body: JSON.stringify(request) });
 
       if (!result.configured) {
-        dom.issueStatus.textContent = result.error || `${source} is not configured. Check Settings.`;
+        status.textContent = result.error || `${source} is not configured. Check Settings.`;
         return;
       }
 
       if (result.error) {
-        dom.issueStatus.textContent = result.error;
+        status.textContent = result.error;
         return;
       }
 
       const issues = source === 'github' ? (result.bugs ?? []) : (result.issues ?? []);
-      view.issueChoices = issues;
 
-      dom.issueSelect.replaceChildren(new Option('Choose an issue…', ''));
+      issueChoices = issues;
+      issueSelect.replaceChildren(new Option('Choose an issue…', ''));
 
       for (const issue of issues) {
-        dom.issueSelect.append(new Option(`${issue.key} — ${issue.summary}`, issue.key));
+        issueSelect.append(new Option(`${issue.key} — ${issue.summary}`, issue.key));
       }
 
-      dom.issueSelect.disabled = issues.length === 0;
-      dom.issueStatus.textContent = issues.length === 0
+      issueSelect.disabled = issues.length === 0;
+      status.textContent = issues.length === 0
         ? 'No open issues in the project.'
         : `${issues.length} open issue${issues.length === 1 ? '' : 's'}. Pick one to import.`;
     } catch (error) {
-      dom.issueStatus.textContent = error.message;
+      status.textContent = error.message;
     } finally {
-      dom.issueLoad.disabled = false;
+      if (loadButton) {
+        loadButton.disabled = false;
+      }
     }
   }
 
   async function importSelectedIssue() {
-    const key = dom.issueSelect?.value;
+    const sourceSelect = dom.setup.querySelector('[data-role="issue-source"]');
+    const issueSelect = dom.setup.querySelector('[data-role="issue-select"]');
+    const loadButton = dom.setup.querySelector('[data-role="issue-load"]');
+    const status = dom.setup.querySelector('[data-role="issue-status"]');
+
+    if (!sourceSelect || !issueSelect || !status) {
+      return;
+    }
+
+    const key = issueSelect.value;
 
     if (!key) {
       return;
     }
 
-    const source = dom.issueSource.value;
+    const source = sourceSelect.value;
     const settings = state.config?.settings ?? {};
-    dom.issueSelect.disabled = true;
-    dom.issueLoad.disabled = true;
-    dom.issueStatus.textContent = `Loading ${key}…`;
+    issueSelect.disabled = true;
+
+    if (loadButton) {
+      loadButton.disabled = true;
+    }
+    status.textContent = `Loading ${key}…`;
 
     try {
-      let issue = view.issueChoices.find((candidate) => candidate.key === key);
+      let issue = issueChoices.find((candidate) => candidate.key === key);
+
       if (source === 'jira') {
         const result = await api('/api/jira/issue', { method: 'POST', body: JSON.stringify({ key }) });
 
         if (!result.configured) {
-          dom.issueStatus.textContent = 'Jira is not configured. Add the URL and token in Settings.';
+          status.textContent = 'Jira is not configured. Add the URL and token in Settings.';
           return;
         }
 
         if (result.error || !result.issue) {
-          dom.issueStatus.textContent = result.error || `Jira issue ${key} was not found.`;
+          status.textContent = result.error || `Jira issue ${key} was not found.`;
           return;
         }
         issue = result.issue;
       }
 
       if (!issue) {
-        dom.issueStatus.textContent = `Issue ${key} is no longer in the loaded list. Reload issues.`;
+        status.textContent = `Issue ${key} is no longer in the loaded list. Reload issues.`;
         return;
       }
+
       const target = source === 'github'
         ? settings.githubRepo
         : source === 'gitlab'
           ? settings.gitlabProject
           : settings.project;
-      view.sourceIssue = {
-        source,
-        key: issue.key,
-        url: issue.url ?? '',
-        target: target ?? ''
-      };
+
+      view.sourceIssue = { source, key: issue.key, url: issue.url ?? '', target: target ?? '' };
       dom.input.value = issueBrief(issue);
       autoGrow();
       dom.input.focus();
-      const closeNote = el.form.closeIssues?.checked
-        ? ' It is closed when the work succeeds.'
-        : '';
-      dom.issueStatus.textContent = `Imported ${issue.key}. Edit it below and press Send.${closeNote}`;
+      status.textContent = `Imported ${issue.key}. Edit it below and press Send.`;
     } catch (error) {
-      dom.issueStatus.textContent = error.message;
+      status.textContent = error.message;
     } finally {
-      dom.issueSelect.disabled = false;
-      dom.issueLoad.disabled = false;
+      issueSelect.disabled = false;
+
+      if (loadButton) {
+        loadButton.disabled = false;
+      }
     }
   }
 
-  // The dots mean "the agent is working"; the seconds next to them say how long
-  // this turn has been open, so a stalled provider looks stalled, not frozen.
-  function paintClock() {
-    if (!view.turnStartedAt) {
+  function wireIssueImport() {
+    const source = dom.setup.querySelector('[data-role="issue-source"]');
+    const load = dom.setup.querySelector('[data-role="issue-load"]');
+    const select = dom.setup.querySelector('[data-role="issue-select"]');
+
+    syncIssueSource();
+
+    source?.addEventListener('change', () => {
+      issueChoices = [];
+      view.sourceIssue = null;
+      if (select) {
+        select.replaceChildren(new Option('Load open issues…', ''));
+        select.disabled = true;
+      }
+      const status = dom.setup.querySelector('[data-role="issue-status"]');
+      if (status) status.textContent = '';
+      saveIssueSource();
+    });
+    load?.addEventListener('click', loadExternalIssues);
+    select?.addEventListener('change', importSelectedIssue);
+  }
+
+  function renderSetup(error = '') {
+    if (view.running) {
       return;
     }
 
-    const seconds = Math.max(0, Math.round((Date.now() - view.turnStartedAt) / 1000));
+    view.setup = true;
+    view.sessionOpen = false;
+    view.readOnly = false;
+    view.finished = false;
+    view.setupError = error;
+    view.branch = '';
+    paintLock({});
+    hideHandoff();
+    dom.empty.classList.add('hidden');
+    dom.richView.innerHTML = '';
+    dom.rawView.textContent = '';
+    dom.richView.classList.add('hidden');
+    dom.rawView.classList.add('hidden');
+    setStatus('ready', false);
+    setBarVisible(false);
+    dom.stop.disabled = true;
 
-    setStatus(`${view.turnLabel} · ${seconds}s`, true);
+    if (dom.finish) {
+      dom.finish.disabled = true;
+    }
+
+    if (!state.config) {
+      setSetupVisible(true);
+      dom.setup.innerHTML = '<p class="hint">Loading workspace…</p>';
+      setComposerVisible(false);
+      return;
+    }
+
+    if (isMerge) {
+      renderMergeSetup(error);
+      return;
+    }
+
+    setSetupVisible(true);
+    dom.setup.innerHTML = `
+      <div class="session-start">
+        <p class="session-start-lede">${copy.emptyBody}</p>
+        ${selectionMarkup()}
+        ${issueImportMarkup()}
+        ${error ? `<p class="handoff-error" role="alert">${escapeText(error)}</p>` : ''}
+      </div>
+    `;
+    wireSelection();
+    wireIssueImport();
+    setComposerVisible(true);
+    setComposerAction('start');
+    setInputEnabled(true, copy.placeholder);
+    autoGrow();
   }
 
-  function startTurnClock(label = 'writing') {
-    view.turnLabel = label;
-    view.turnStartedAt = Date.now();
-    paintClock();
+  // ---------------------------------------------------------------
+  // Session list
+  // ---------------------------------------------------------------
 
-    if (!view.statusTimer) {
-      view.statusTimer = window.setInterval(paintClock, 1000);
+  function isAlive(job) {
+    return ALIVE.has(job?.status);
+  }
+
+  function jobBrief(job) {
+    return String(job?.request?.brief ?? job?.brief ?? '').split(/\r?\n/).find(Boolean) ?? 'Untitled session';
+  }
+
+  function jobSelectionText(job) {
+    const selection = job?.selection ?? {};
+    const model = selection.model ? modelLabel(selection.model) : 'Default';
+    const effort = selection.effort || 'Default';
+
+    return `${model}/${effort}`;
+  }
+
+  function statusKind(status) {
+    if (status === 'done') return 'done';
+    if (status === 'failed') return 'failed';
+    if (status === 'stopped' || status === 'cancelled') return 'cancelled';
+    if (status === 'waiting') return 'waiting';
+    return 'running';
+  }
+
+  function renderSessionList() {
+    if (!dom.list) {
+      return;
+    }
+
+    dom.list.replaceChildren();
+    dom.listEmpty.classList.toggle('hidden', view.jobs.length > 0);
+
+    for (const job of view.jobs) {
+      const item = document.createElement('li');
+      const alive = isAlive(job);
+      const active = job.id === view.sessionId;
+      const brief = escapeText(jobBrief(job));
+
+      item.className = `session-row${active ? ' current' : ''}`;
+      item.dataset.id = job.id;
+      item.innerHTML = `
+        <button type="button" class="session-row-main" data-action="open" aria-label="Open session: ${brief}">
+          <span class="badge ${statusKind(job.status)}">${escapeText(job.status ?? '')}</span>
+          <span class="session-row-copy">
+            <span class="session-row-brief">${brief}</span>
+            <span class="session-row-meta">${escapeText(jobSelectionText(job))} · ${escapeText(job.branch || job.publish?.branch || '—')}</span>
+          </span>
+        </button>
+        <span class="session-row-actions">
+          ${alive ? '<button type="button" class="btn quiet-danger sm" data-action="stop">Stop</button>' : ''}
+          ${alive ? '' : '<button type="button" class="btn quiet sm" data-action="remove">Remove</button>'}
+        </span>
+      `;
+      dom.list.append(item);
+    }
+
+    syncSessionHome();
+  }
+
+  async function loadSessionList() {
+    try {
+      const { jobs } = await api(copy.endpoint);
+
+      view.jobs = Array.isArray(jobs) ? jobs : [];
+      renderSessionList();
+    } catch {
+      view.jobs = [];
+      renderSessionList();
     }
   }
 
-  function setTurnLabel(label) {
-    view.turnLabel = label || 'working';
-    paintClock();
+  async function openSession(job) {
+    if (!job) {
+      return;
+    }
+
+    resetSession({ setup: false });
+    view.sessionId = job.id;
+    view.readOnly = job.readOnly === true || job.historical === true || !isAlive(job);
+    view.mergeMeta = job.request?.merge ?? null;
+    view.branch = job.branch || job.publish?.branch || '';
+
+    if (job.result?.ref) {
+      view.mergeMeta = { ...(view.mergeMeta ?? {}), ref: job.result.ref };
+    }
+
+    paintLock(job.selection ?? {
+      model: job.model,
+      effort: job.effort
+    });
+
+    if (isAlive(job) && !view.readOnly) {
+      setSetupVisible(false);
+      dom.stage.classList.remove('hidden');
+      attach(job.id);
+      return;
+    }
+
+    view.seq = 0;
+
+    for (const event of job.events ?? []) {
+      onEvent(event);
+    }
+
+    view.running = false;
+    view.awaiting = false;
+    setSetupVisible(false);
+    dom.stage.classList.remove('hidden');
+    setComposerVisible(false);
+    setInputEnabled(false);
+    dom.stop.disabled = true;
+    if (dom.finish) dom.finish.disabled = true;
+
+    if (view.entries.length === 0) {
+      try {
+        const detail = await api(`${copy.endpoint}/${job.id}`);
+
+        if (detail?.markdown) {
+          addEntry('markdown', detail.markdown);
+        }
+      } catch {
+        // History may be unreadable; the list row still tells the story.
+      }
+    }
+
+    setStatus(job.status ?? 'done', false);
+    render();
+
+    if (isMerge && job.status === 'done' && view.mergeMeta?.ref) {
+      showMergeLanding();
+    }
+
+    renderSessionList();
   }
 
-  function stopTurnClock() {
-    window.clearInterval(view.statusTimer);
-    view.statusTimer = null;
-    view.turnStartedAt = 0;
-  }
+  // ---------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------
 
   function rawText() {
-    return view.entries
-      .filter((entry) => entry.role === 'agent')
-      .map((entry) => renderTerminalText(entry.text))
-      .join('');
+    return view.raw.length > 0
+      ? view.raw.join('\n')
+      : view.entries.filter((entry) => entry.role === 'agent').map((entry) => renderTerminalText(entry.text)).join('');
   }
 
   function renderTerminalText(value) {
@@ -1642,10 +2097,21 @@ function createSession(flow) {
       .replace(/\r/g, '');
   }
 
+  function renderWorking() {
+    if (!view.running || view.awaiting || view.working.length === 0) {
+      return '';
+    }
+
+    const latest = view.working[view.working.length - 1];
+
+    return `<details class="session-working">
+      <summary><span class="session-working-dots" aria-hidden="true"><i></i><i></i><i></i></span> working — ${escapeText(latest)}</summary>
+      <ul>${view.working.map((item) => `<li>${escapeText(item)}</li>`).join('')}</ul>
+    </details>`;
+  }
+
   function renderEntry(entry, index) {
     if (entry.role === 'agent') {
-      // An empty turn is the agent thinking, not something to read: keep it only
-      // while it is the live tail (where the thinking dots sit).
       if (!entry.text.trim() && index < view.entries.length - 1) {
         return '';
       }
@@ -1662,7 +2128,7 @@ function createSession(flow) {
 
     if (entry.role === 'permission') {
       const decided = Boolean(entry.state) && entry.state !== 'pending';
-      const disabled = entry.busy ? ' disabled' : '';
+      const disabled = entry.busy || view.readOnly ? ' disabled' : '';
       const actions = decided
         ? `<p class="permission-state">${escapeText(entry.state)}</p>`
         : `<div class="permission-actions">
@@ -1712,33 +2178,31 @@ function createSession(flow) {
       </article>`;
     }
 
+    if (entry.role === 'marker') {
+      return `<p class="session-marker" role="status"><span>${escapeText(entry.text)}</span></p>`;
+    }
+
+    if (entry.role === 'step') {
+      return `<p class="session-step" data-status="${escapeText(entry.status ?? 'waiting')}" role="status">
+        <span class="session-step-index">${escapeText(entry.index)}</span>
+        <span>${escapeText(entry.text)}</span>
+        <span class="session-step-state">${escapeText(entry.status ?? 'waiting')}${entry.error ? ` · ${escapeText(entry.error)}` : ''}</span>
+      </p>`;
+    }
+
+    if (entry.role === 'markdown') {
+      return `<article class="turn turn-markdown"><div class="turn-body">${window.SDDMarkdown ? window.SDDMarkdown.render(entry.text) : `<pre>${escapeText(entry.text)}</pre>`}</div></article>`;
+    }
+
     return `<article class="turn turn-session" role="status"><p>${escapeText(entry.text)}</p></article>`;
   }
 
-  // The transcript is a record; only the finished session's last turn is
-  // stamped as the artifact.
   function decorate() {
     const agentTurns = dom.richView.querySelectorAll('.turn-agent');
     const lastAgent = agentTurns[agentTurns.length - 1];
 
-    if (!lastAgent || view.entries[view.entries.length - 1]?.role !== 'agent') {
-      return;
-    }
-
-    if (view.finished) {
+    if (lastAgent && view.finished) {
       lastAgent.dataset.stamp = copy.finalLabel;
-    }
-
-    // The dots mean "the agent is working on the next reply". While the
-    // session is waiting for the user's answer they must not show — the
-    // user has to see that a reply is owed, not a still-running agent.
-    if (view.running && !view.awaiting) {
-      const thinking = document.createElement('span');
-
-      thinking.className = 'session-thinking';
-      thinking.setAttribute('aria-hidden', 'true');
-      thinking.innerHTML = '<i></i><i></i><i></i>';
-      lastAgent.append(thinking);
     }
   }
 
@@ -1760,7 +2224,7 @@ function createSession(flow) {
       dom.rawView.classList.remove('hidden');
       dom.richView.classList.add('hidden');
     } else {
-      dom.richView.innerHTML = view.entries.map(renderEntry).join('');
+      dom.richView.innerHTML = view.entries.map(renderEntry).join('') + renderWorking();
       dom.richView.classList.remove('hidden');
       dom.rawView.classList.add('hidden');
       decorate();
@@ -1774,7 +2238,7 @@ function createSession(flow) {
 
   function scheduleRender() {
     window.clearTimeout(view.renderTimer);
-    view.renderTimer = window.setTimeout(render, 160);
+    view.renderTimer = window.setTimeout(render, 120);
   }
 
   function addEntry(role, text, extra = {}) {
@@ -1788,6 +2252,41 @@ function createSession(flow) {
     dom.rawBtn.setAttribute('aria-pressed', String(mode === 'raw'));
     render();
   }
+
+  function paintClock() {
+    if (!view.turnStartedAt) {
+      return;
+    }
+
+    const seconds = Math.max(0, Math.round((Date.now() - view.turnStartedAt) / 1000));
+
+    setStatus(`${view.turnLabel} · ${seconds}s`, true);
+  }
+
+  function startTurnClock(label = 'writing') {
+    view.turnLabel = label;
+    view.turnStartedAt = Date.now();
+    paintClock();
+
+    if (!view.statusTimer) {
+      view.statusTimer = window.setInterval(paintClock, 1000);
+    }
+  }
+
+  function setTurnLabel(label) {
+    view.turnLabel = label || 'working';
+    paintClock();
+  }
+
+  function stopTurnClock() {
+    window.clearInterval(view.statusTimer);
+    view.statusTimer = null;
+    view.turnStartedAt = 0;
+  }
+
+  // ---------------------------------------------------------------
+  // Events
+  // ---------------------------------------------------------------
 
   function publishEventText(event) {
     switch (event.status) {
@@ -1805,8 +2304,6 @@ function createSession(flow) {
           : `Pushed ${event.branch}; the forge did not return a merge request URL.`;
       case 'failed':
         return `Git publishing failed: ${event.error}`;
-      case 'abandoned':
-        return event.reason || `Branch ${event.branch} was left in place.`;
       case 'no-changes':
         return event.reason || 'No changes to commit.';
       default:
@@ -1826,19 +2323,27 @@ function createSession(flow) {
       case 'job-started':
         setStatus('starting', true);
         break;
+      case 'worktree':
+        view.branch = event.branch ?? '';
+        setTurnLabel('working');
+        break;
       case 'session-started':
         view.setup = false;
+        view.sessionOpen = true;
         view.running = true;
+        setSetupVisible(false);
         dom.stage.classList.remove('hidden');
-        if (flow === 'merge') {
-          setComposerVisible(true);
-        }
+        setComposerVisible(true);
+        setComposerAction('send');
+        setBarVisible(true);
+        paintLock(event);
         addEntry('you', event.brief ?? '');
-        setStatus(event.engine === 'live' ? 'interviewing · live' : 'interviewing', true);
+        setStatus('interviewing · live', true);
         break;
       case 'turn-started':
         view.active = { role: 'agent', text: '' };
         view.entries.push(view.active);
+        view.working = [];
         startTurnClock('writing');
         scheduleRender();
         break;
@@ -1850,10 +2355,17 @@ function createSession(flow) {
         view.active.text += event.chunk ?? '';
         scheduleRender();
         break;
+      case 'raw':
+        view.raw.push(`${event.direction === 'in' ? '→' : '←'} ${String(event.line ?? '')}`);
+
+        if (view.raw.length > 2000) {
+          view.raw = view.raw.slice(-2000);
+        }
+        break;
       case 'activity':
-        // Focused chat view keeps tool names and paths out of the transcript
-        // and status line; only show that the agent is still working.
+        view.working.push(event.label || 'tool');
         setTurnLabel('working');
+        scheduleRender();
         break;
       case 'question': {
         stopTurnClock();
@@ -1900,8 +2412,6 @@ function createSession(flow) {
           .reverse()
           .find((entry) => entry.role === 'permission' && entry.state === 'pending');
 
-        // A merge-guard decision is recorded as its own line; it never owns a
-        // permission plate, so it must not close an earlier pending one.
         if (pending && event.reason !== 'merge-guard') {
           pending.busy = false;
           pending.state = event.reason === 'expired'
@@ -1930,9 +2440,7 @@ function createSession(flow) {
         const text = publishEventText(event);
 
         if (text) {
-          addEntry('publish', text, {
-            url: event.status === 'published' ? event.prUrl : ''
-          });
+          addEntry('publish', text, { url: event.status === 'published' ? event.prUrl : '' });
         }
 
         if (event.status === 'published' && event.prUrl) {
@@ -1940,22 +2448,14 @@ function createSession(flow) {
         }
         break;
       }
-      case 'issue-closed': {
-        const suffix = event.status ? ` as ${event.status}` : '';
-
-        addEntry('publish', `Closed ${event.key}${suffix}.`, { url: event.url ?? '' });
+      case 'issue-closed':
+        addEntry('publish', `Closed ${event.key}${event.status ? ` as ${event.status}` : ''}.`, { url: event.url ?? '' });
         break;
-      }
       case 'issue-close-failed':
         addEntry('publish', `Could not close ${event.key}: ${event.error}`);
         break;
       case 'issue-created':
-        view.specIssue = {
-          status: 'created',
-          source: event.source,
-          key: event.key,
-          url: event.url ?? ''
-        };
+        view.specIssue = { status: 'created', source: event.source, key: event.key, url: event.url ?? '' };
         addEntry('issue', `Filed ${event.key} in ${trackerLabel(event.source)}.`, { url: event.url ?? '' });
         announceStatus(`The spec was filed as ${event.key}.`);
         break;
@@ -1967,68 +2467,137 @@ function createSession(flow) {
         view.specIssue = { status: 'failed', source: event.source, error: event.error };
         addEntry('issue', `Could not file the spec issue: ${event.error}`);
         break;
+      case 'build-ready':
+        stopTurnClock();
+        view.awaiting = true;
+        view.active = null;
+        setStatus('spec ready', false);
+        addEntry('marker', event.spec ? `${event.spec} written` : 'spec.md written');
+        if (!view.readOnly) {
+          showBuildChoice(event);
+        }
+        break;
+      case 'build-choice':
+        // The job emits both build-ready and build-choice; the card is already open.
+        break;
+      case 'build-started':
+        view.build = {
+          pipeline: event.pipeline,
+          verify: event.verify !== false,
+          steps: (event.steps ?? []).map((step) => ({ skill: step.skill, status: 'waiting' })),
+          status: 'running'
+        };
+        hideHandoff();
+        view.awaiting = false;
+        setStatus('building', true);
+        addEntry('marker', `build · ${event.pipeline ?? 'direct'}`);
+        break;
+      case 'build-step': {
+        const index = Number(event.index ?? 0);
+        const total = view.build?.steps?.length ?? 0;
+        const label = `step ${index + 1}/${total || '?'}  ${event.skill ?? 'step'}`;
+        const existing = view.entries.find((entry) => entry.role === 'step' && entry.stepIndex === index);
+
+        if (view.build?.steps?.[index]) {
+          view.build.steps[index].status = event.status;
+        }
+
+        if (existing) {
+          existing.status = event.status;
+          existing.error = event.error ?? '';
+        } else {
+          view.entries.push({
+            role: 'step',
+            text: label,
+            stepIndex: index,
+            status: event.status,
+            error: event.error ?? ''
+          });
+        }
+
+        setStatus(`building · ${event.status === 'done' ? 'next step' : event.skill ?? 'step'}`, true);
+        scheduleRender();
+        break;
+      }
+      case 'build-done':
+        addEntry('marker', 'build done');
+        if (view.build) {
+          view.build.status = 'done';
+        }
+        setStatus('publishing', true);
+        break;
       case 'job-done':
-        if (flow === 'merge' && event.summary?.ref) {
+        if (isMerge && event.summary?.ref) {
           view.mergeMeta = { ...(view.mergeMeta ?? {}), ref: event.summary.ref };
         }
-        finishSession('done', '', event.summary?.output);
+        if (event.summary?.issue) {
+          view.specIssue = event.summary.issue;
+        }
+        if (event.summary?.publish?.prUrl) {
+          addEntry('publish', publishEventText(event.summary.publish) || 'Published.', {
+            url: event.summary.publish.prUrl
+          });
+        }
+        finishSession('done', '', event.summary);
+        break;
+      case 'job-stopped':
+        finishSession('stopped', '', event.summary);
+        break;
+      case 'job-cancelled':
+        finishSession('stopped', '', event.summary);
         break;
       case 'job-failed':
         finishSession('failed', event.message);
-        break;
-      case 'job-cancelled':
-        finishSession('cancelled', 'Stopped.');
         break;
       default:
         break;
     }
   }
 
-  function finishSession(kind, message = '', output = '') {
+  function finishSession(kind, message = '', summary = null) {
     stopTurnClock();
+    const wasReadOnly = view.readOnly;
+
     view.running = false;
     view.awaiting = false;
     view.finished = kind === 'done';
-    // The finished session keeps its transcript, but the input now starts a new
-    // one instead of trying to talk to a process that is already gone.
+    view.sessionOpen = true;
     view.jobId = null;
-    view.setup = false;
+    view.active = null;
+    view.working = [];
     dom.stop.disabled = true;
-    dom.stage.classList.remove('hidden');
+    disarmStop();
+    setBarVisible(true);
+
     if (dom.finish) {
       dom.finish.disabled = true;
     }
 
-    // A feature session ends with the spec file as the preview, not the agent's
-    // one-line "spec written" confirmation.
-    if (typeof output === 'string' && output.trim()) {
-      const lastAgent = [...view.entries].reverse().find((entry) => entry.role === 'agent');
+    setSetupVisible(false);
+    dom.stage.classList.remove('hidden');
+    setComposerVisible(false);
+    setInputEnabled(false);
 
-      if (lastAgent) {
-        lastAgent.text = output;
-        view.active = null;
-      }
-    }
+    const readyLabel = kind === 'done'
+      ? isMerge
+        ? 'integration branch ready'
+        : flow === 'feature'
+          ? 'build finished'
+          : flow === 'specIssue' && view.specIssue?.status === 'created'
+            ? 'spec filed'
+            : `${copy.finalLabel} ready`
+      : kind === 'stopped'
+        ? 'stopped'
+        : 'failed';
 
-    const readyLabel = flow === 'merge'
-      ? 'integration branch ready'
-      : flow === 'specIssue' && view.specIssue?.status === 'created'
-        ? 'spec filed'
-        : `${copy.finalLabel} ready`;
-
-    if (flow === 'merge') {
-      // The next step is a landing decision, not another composer prompt.
-      setInputEnabled(false);
-      setComposerVisible(false);
-    } else {
-      setInputEnabled(true, copy.restartPlaceholder);
-    }
-
-    setStatus(kind === 'done' ? readyLabel : kind === 'cancelled' ? 'stopped' : 'failed', false);
-    setScope(kind === 'done' ? readyLabel : kind === 'cancelled' ? 'stopped' : 'session failed');
+    setStatus(kind === 'done' ? readyLabel : kind === 'stopped' ? 'stopped' : 'failed', false);
 
     if (message) {
       addEntry('session', message);
+    }
+
+    if (summary?.output && flow === 'specIssue' && !view.specIssue) {
+      view.specIssue = summary.issue ?? null;
     }
 
     if (view.source) {
@@ -2050,35 +2619,33 @@ function createSession(flow) {
     announceStatus(
       kind === 'done'
         ? `The ${copy.finalLabel} is ready.`
-        : kind === 'cancelled'
+        : kind === 'stopped'
           ? 'Session stopped.'
           : 'Session failed.'
     );
 
-    // A feature session hands over to the build decision instead of ending at
-    // the transcript: the workflow continues with an implementation skill.
-    if (view.finished && flow === 'feature') {
-      showHandoff();
-    }
-
-    // The spec issue workflow ends with the tracker handoff, not a build.
-    if (view.finished && flow === 'specIssue') {
+    if (kind === 'done' && flow === 'specIssue') {
       showSpecIssueResult();
     }
 
-    // A merge hands over to the landing decision, one branch at a time.
-    if (flow === 'merge') {
+    if (isMerge) {
       if (kind === 'done' && view.mergeMeta?.ref) {
         showMergeLanding();
       } else {
         showMergeRetry(
           kind === 'failed'
             ? message
-            : kind === 'cancelled'
+            : kind === 'stopped'
               ? 'The merge was stopped before the integration branch was created.'
               : 'The session ended without an integration branch.'
         );
       }
+    }
+
+    if (!wasReadOnly) {
+      window.setTimeout(() => {
+        loadSessionList();
+      }, 250);
     }
   }
 
@@ -2105,48 +2672,40 @@ function createSession(flow) {
         <p class="handoff-eyebrow">Spec ready</p>
         <h2 id="spec-issue-title">${issue?.status === 'created' ? 'Issue filed' : 'Spec saved'}</h2>
         ${body}
-        <p class="handoff-lede">Nothing was committed, pushed, or built. Start another spec below when you are ready.</p>
+        <p class="handoff-lede">Nothing was committed or pushed. Start another spec from the session list when you are ready.</p>
       </section>
     `;
     dom.handoff.classList.remove('hidden');
   }
 
-  const PIPELINE_COPY = {
-    direct: {
-      label: 'Direct implementation',
-      skill: 'sdd-developer',
-      body: 'One agent run: implement the spec, review and fix, verify each story.'
-    },
-    tdd: {
-      label: 'Task-by-task TDD',
-      skill: 'spec-to-task → feature-tdd',
-      body: 'Split the spec into tasks first, then implement each task with Chicago TDD.'
-    }
-  };
+  // ---------------------------------------------------------------
+  // Feature build: a turn in the same session, not a separate job
+  // ---------------------------------------------------------------
 
-  function showHandoff() {
-    if (flow !== 'feature' || !view.sessionId) {
-      return;
-    }
-
+  function showBuildChoice(event) {
     dom.handoff.innerHTML = `
-      <section class="handoff-card" aria-labelledby="handoff-title">
+      <section class="handoff-card build-choice" aria-labelledby="handoff-title">
         <p class="handoff-eyebrow">Spec ready</p>
         <h2 id="handoff-title">How should the agent build it?</h2>
-        <p class="handoff-lede">The workflow continues after the spec. Pick a path and the studio runs
-          those skills in order, in this checkout, and stops before commit.</p>
+        <p class="handoff-lede">Choose a path. The build runs in this same session, and the transcript below shows every step.</p>
 
         <div class="pipeline-list" role="radiogroup" aria-label="Implementation path">
-          ${Object.entries(PIPELINE_COPY).map(([id, item], index) => `
-            <label class="pipeline">
-              <input type="radio" name="pipeline" value="${id}" ${index === 0 ? 'checked' : ''}>
-              <span class="pipeline-body">
-                <span class="pipeline-name">${item.label}</span>
-                <span class="pipeline-skill">${item.skill}</span>
-                <span class="pipeline-note">${item.body}</span>
-              </span>
-            </label>
-          `).join('')}
+          <label class="pipeline">
+            <input type="radio" name="pipeline" value="direct" checked>
+            <span class="pipeline-body">
+              <span class="pipeline-name">Direct implementation</span>
+              <span class="pipeline-skill">sdd-developer</span>
+              <span class="pipeline-note">One agent run: implement the spec, review and fix, verify each story.</span>
+            </span>
+          </label>
+          <label class="pipeline">
+            <input type="radio" name="pipeline" value="tdd">
+            <span class="pipeline-body">
+              <span class="pipeline-name">Task-by-task TDD</span>
+              <span class="pipeline-skill">spec-to-task → feature-tdd</span>
+              <span class="pipeline-note">Split the spec into tasks first, then implement each task with Chicago TDD.</span>
+            </span>
+          </label>
         </div>
 
         <label class="toggle handoff-verify">
@@ -2176,6 +2735,36 @@ function createSession(flow) {
     announceStatus('The spec is ready. Choose how to build it.');
   }
 
+  async function startBuild() {
+    const pipeline = dom.handoff.querySelector('input[name="pipeline"]:checked')?.value ?? 'direct';
+    const verify = dom.handoff.querySelector('[data-role="verify"]')?.checked !== false;
+    const errorEl = dom.handoff.querySelector('[data-role="build-error"]');
+
+    if (errorEl) {
+      errorEl.textContent = '';
+    }
+
+    if (!view.sessionId) {
+      return;
+    }
+
+    try {
+      await api(`${copy.endpoint}/${view.sessionId}/build`, {
+        method: 'POST',
+        body: JSON.stringify({ pipeline, verify })
+      });
+      hideHandoff();
+      view.awaiting = false;
+      setInputEnabled(false);
+      setStatus('building', true);
+      announceStatus('Build started.');
+    } catch (error) {
+      if (errorEl) {
+        errorEl.textContent = error.message;
+      }
+    }
+  }
+
   function hideHandoff() {
     dom.handoff.classList.add('hidden');
     dom.handoff.innerHTML = '';
@@ -2185,69 +2774,42 @@ function createSession(flow) {
   // Merge setup and landing
   // ---------------------------------------------------------------
 
-  function wireNewMerge(button) {
-    button?.addEventListener('click', async () => {
-      resetSession();
-      await loadConfig();
-    });
-  }
-
   function renderMergeSetup(error = '') {
-    if (flow !== 'merge' || view.running) {
-      return;
-    }
-
     view.setup = true;
-    view.setupError = error;
+    view.sessionOpen = false;
     view.finished = false;
-    dom.stage.classList.add('hidden');
+    setSetupVisible(true);
     setComposerVisible(false);
     setInputEnabled(false);
     dom.stop.disabled = true;
-    if (dom.finish) {
-      dom.finish.disabled = true;
-    }
+    if (dom.finish) dom.finish.disabled = true;
     setStatus('ready', false);
-    setScope(copy.scope);
+    setBarVisible(false);
+    hideHandoff();
 
     const git = state.config?.git;
 
-    if (!state.config) {
-      dom.handoff.innerHTML = `
-        <section class="handoff-card merge-setup">
-          <p class="handoff-eyebrow">Merge</p>
-          <h2>Loading workspace…</h2>
-        </section>
-      `;
-      dom.handoff.classList.remove('hidden');
-      return;
-    }
-
     if (!git?.repo) {
-      dom.handoff.innerHTML = `
-        <section class="handoff-card merge-setup">
-          <p class="handoff-eyebrow">Merge</p>
+      dom.setup.innerHTML = `
+        <div class="session-start merge-setup">
           <h2>Open the studio inside a git repository.</h2>
-          <p class="handoff-lede">A merge needs local branches. The current workspace is
-            <code>${escapeText(state.config.cwd)}</code>, and it is not a git checkout.</p>
-        </section>
+          <p class="session-start-lede">A merge needs local branches. The current workspace is
+            <code>${escapeText(state.config?.cwd ?? '')}</code>, and it is not a git checkout.</p>
+        </div>
       `;
-      dom.handoff.classList.remove('hidden');
       return;
     }
 
     const branches = git.branches ?? [];
 
     if (branches.length < 2) {
-      dom.handoff.innerHTML = `
-        <section class="handoff-card merge-setup">
-          <p class="handoff-eyebrow">Merge</p>
+      dom.setup.innerHTML = `
+        <div class="session-start merge-setup">
           <h2>This repository has only one local branch.</h2>
-          <p class="handoff-lede">Create the source branch first. A merge needs a source and a
+          <p class="session-start-lede">Create the source branch first. A merge needs a source and a
             target that are not the same branch.</p>
-        </section>
+        </div>
       `;
-      dom.handoff.classList.remove('hidden');
       return;
     }
 
@@ -2263,15 +2825,13 @@ function createSession(flow) {
       .map((branch) => `<option value="${escapeText(branch)}"${branch === selected ? ' selected' : ''}>${escapeText(branch)}</option>`)
       .join('');
 
-    dom.handoff.innerHTML = `
-      <section class="handoff-card merge-setup" aria-labelledby="merge-setup-title">
-        <p class="handoff-eyebrow">Merge</p>
-        <h2 id="merge-setup-title">Review a branch merge</h2>
-        <p class="handoff-lede">The agent dry-runs the merge, asks one decision at a time, and
-          builds the integration branch. It never touches the target; landing is a separate,
-          explicit step.</p>
-        <p class="hint">With Claude Code, the studio also blocks pushes and any command that
-          touches the target. Other agents use their own permission prompts.</p>
+    dom.setup.innerHTML = `
+      <div class="session-start merge-setup" aria-label="Merge setup">
+        <p class="session-start-lede">The live Claude process dry-runs the merge in a worktree opened from the target,
+          asks one decision at a time, and builds the integration branch. It never touches the target; landing is a
+          separate, explicit step.</p>
+
+        ${selectionMarkup()}
 
         <div class="merge-fields">
           <label class="merge-field">
@@ -2286,21 +2846,22 @@ function createSession(flow) {
         </div>
 
         <p class="merge-ref">Integration branch <code data-role="merge-ref"></code></p>
-        ${git.dirty && !error ? '<p class="merge-warning">The working tree has changes. Commit or stash them before starting; the studio will refuse otherwise.</p>' : ''}
+        ${git.dirty && !error ? '<p class="merge-warning">The working tree has changes. Commit or stash them before landing; the merge itself uses a worktree.</p>' : ''}
 
         <div class="actions handoff-actions">
           <button type="button" class="btn primary" data-role="merge-start">Review merge</button>
-          <span class="handoff-error" data-role="merge-error" role="alert"></span>
+          <span class="handoff-error" data-role="merge-error" role="alert">${escapeText(error)}</span>
         </div>
-      </section>
+      </div>
     `;
-    dom.handoff.classList.remove('hidden');
 
-    const sourceEl = dom.handoff.querySelector('[data-role="merge-source"]');
-    const targetEl = dom.handoff.querySelector('[data-role="merge-target"]');
-    const refEl = dom.handoff.querySelector('[data-role="merge-ref"]');
-    const errorEl = dom.handoff.querySelector('[data-role="merge-error"]');
-    const startBtn = dom.handoff.querySelector('[data-role="merge-start"]');
+    wireSelection();
+
+    const sourceEl = dom.setup.querySelector('[data-role="merge-source"]');
+    const targetEl = dom.setup.querySelector('[data-role="merge-target"]');
+    const refEl = dom.setup.querySelector('[data-role="merge-ref"]');
+    const errorEl = dom.setup.querySelector('[data-role="merge-error"]');
+    const startBtn = dom.setup.querySelector('[data-role="merge-start"]');
 
     const update = () => {
       const from = sourceEl.value;
@@ -2320,52 +2881,40 @@ function createSession(flow) {
       });
     }
 
-    startBtn.addEventListener('click', () => {
-      startMergeSession(sourceEl.value, targetEl.value);
-    });
-
+    startBtn.addEventListener('click', () => startMergeSession(sourceEl.value, targetEl.value));
     update();
   }
 
   async function startMergeSession(source, target) {
-    const { agentPreset, agentCmd } = selectedAgent();
-    const errorEl = dom.handoff.querySelector('[data-role="merge-error"]');
+    const selection = selectedFromSetup();
 
-    if (agentPreset === 'custom' && !agentCmd) {
-      if (errorEl) {
-        errorEl.textContent = 'Add an agent command in Settings, or pick a preset.';
-      }
-      return;
-    }
-
+    rememberWorkflow(flow, selection);
     resetSession({ setup: false });
     view.running = true;
     view.setup = false;
     view.mergeMeta = null;
+    setSetupVisible(false);
     dom.stage.classList.remove('hidden');
     setComposerVisible(true);
     dom.stop.disabled = false;
     setInputEnabled(false);
     setStatus('starting', true);
-    setScope('merge session running');
+    paintLock(selection);
     render();
 
     try {
       const { job } = await api(copy.endpoint, {
         method: 'POST',
-        body: JSON.stringify({ source, target, agentPreset, agentCmd })
+        body: JSON.stringify({ source, target, merge: { source, target }, ...selection })
       });
 
-      view.mergeMeta = job.request?.merge ?? {
-        source,
-        target,
-        ref: `merge/${source}-into-${target}`
-      };
+      view.mergeMeta = job.request?.merge ?? { source, target, ref: `merge/${source}-into-${target}` };
+      paintLock(job.selection ?? selection);
       attach(job.id);
       announceStatus('Merge session started.');
     } catch (error) {
       resetSession();
-      renderMergeSetup(error.message);
+      renderSetup(error.message);
       announceStatus(`The merge could not start: ${error.message}`);
     }
   }
@@ -2382,8 +2931,8 @@ function createSession(flow) {
       </section>
     `;
     dom.handoff.classList.remove('hidden');
-    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
-    setScope('merge not created');
+    dom.handoff.querySelector('[data-role="merge-new"]').addEventListener('click', () => resetSession());
+    setStatus('no merge', false);
   }
 
   function showMergeLanding() {
@@ -2401,8 +2950,8 @@ function createSession(flow) {
         <p class="handoff-eyebrow">Integration branch ready</p>
         <h2 id="merge-landing-title">Land <code>${escapeText(ref)}</code> on <code>${escapeText(target)}</code>?</h2>
         <p class="handoff-lede">Landing is a fast-forward. The studio switches to
-          <code>${escapeText(target)}</code>, fast-forwards it, and stays there. Nothing is
-          pushed, and no merge commit is created.</p>
+          <code>${escapeText(target)}</code>, fast-forwards it, and stays there. Nothing is pushed,
+          and no merge commit is created.</p>
 
         <dl class="merge-facts">
           <div><dt>integration</dt><dd><code>${escapeText(ref)}</code></dd></div>
@@ -2443,8 +2992,8 @@ function createSession(flow) {
       }
     });
 
-    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
-    setScope(`ready to land on ${target}`);
+    dom.handoff.querySelector('[data-role="merge-new"]').addEventListener('click', () => resetSession());
+    setStatus('ready to land', false);
   }
 
   function showMergeLanded(result) {
@@ -2463,420 +3012,28 @@ function createSession(flow) {
       </section>
     `;
     dom.handoff.classList.remove('hidden');
-    wireNewMerge(dom.handoff.querySelector('[data-role="merge-new"]'));
-    setScope(`landed on ${target}`);
+    dom.handoff.querySelector('[data-role="merge-new"]').addEventListener('click', () => resetSession());
+    setStatus('landed', false);
   }
 
-  function buildRequest() {
-    const pipeline = dom.handoff.querySelector('input[name="pipeline"]:checked')?.value ?? 'direct';
-    const verify = dom.handoff.querySelector('[data-role="verify"]')?.checked !== false;
-
-    return { pipeline, verify };
-  }
-
-  async function startBuild() {
-    const request = buildRequest();
-    const errorEl = dom.handoff.querySelector('[data-role="build-error"]');
-
-    if (errorEl) {
-      errorEl.textContent = '';
-    }
-
-    hideHandoff();
-    view.build = {
-      status: 'starting',
-      pipeline: request.pipeline,
-      verify: request.verify,
-      steps: [],
-      log: '',
-      error: '',
-      publish: null
-    };
-    view.buildPainted = false;
-    paintBuild();
-    setInputEnabled(false);
-    announceStatus('Build started.');
-
-    try {
-      await api(`${copy.endpoint}/${view.sessionId}/build`, {
-        method: 'POST',
-        body: JSON.stringify(request)
-      });
-      attachBuild();
-    } catch (error) {
-      view.build.status = 'failed';
-      view.build.error = error.message;
-      paintBuild();
-      showHandoff();
-      const message = dom.handoff.querySelector('[data-role="build-error"]');
-
-      if (message) {
-        message.textContent = error.message;
-      }
-    }
-  }
-
-  function paintBuild() {
-    if (!view.build) {
-      return;
-    }
-
-    const build = view.build;
-    const meta = PIPELINE_COPY[build.pipeline] ?? PIPELINE_COPY.direct;
-
-    if (!view.buildPainted) {
-      dom.handoff.innerHTML = `
-        <section class="build-card" aria-label="Feature build">
-          <header class="build-head">
-            <div>
-              <p class="handoff-eyebrow">Build</p>
-              <h2 data-role="build-title">${meta.label}</h2>
-              <p class="handoff-lede" data-role="build-meta"></p>
-              <p class="build-publish hidden" data-role="build-publish"></p>
-            </div>
-            <span class="badge" data-role="build-badge">starting</span>
-          </header>
-          <ol class="build-steps" data-role="build-steps"></ol>
-          <pre class="build-log" data-role="build-log" aria-label="Build output"></pre>
-          <div class="actions handoff-actions">
-            <button type="button" class="btn quiet-danger sm" data-role="build-stop">Stop build</button>
-          </div>
-        </section>
-      `;
-      dom.handoff.classList.remove('hidden');
-      dom.handoff.querySelector('[data-role="build-stop"]').addEventListener('click', stopBuild);
-      view.buildPainted = true;
-    }
-
-    const badge = dom.handoff.querySelector('[data-role="build-badge"]');
-    const metaEl = dom.handoff.querySelector('[data-role="build-meta"]');
-    const stepsEl = dom.handoff.querySelector('[data-role="build-steps"]');
-    const logEl = dom.handoff.querySelector('[data-role="build-log"]');
-    const stopBtn = dom.handoff.querySelector('[data-role="build-stop"]');
-    const state = build.status;
-
-    badge.className = `badge ${state === 'done' ? 'done' : state === 'failed' ? 'failed' : state === 'stopped' ? 'cancelled' : 'running'}`;
-    badge.textContent = state === 'done' ? 'built' : state === 'failed' ? 'failed' : state === 'stopped' ? 'stopped' : 'running';
-    stopBtn.disabled = !['starting', 'running'].includes(state);
-
-    const verifyText = build.verify ? 'E2E verification on' : 'E2E verification skipped';
-    const changed = build.summary?.changedFiles?.length;
-
-    metaEl.textContent = state === 'done'
-      ? `${verifyText} · ${changed ?? 0} file${changed === 1 ? '' : 's'} changed`
-      : state === 'failed'
-        ? `${verifyText} · ${build.error || 'the build failed'}`
-        : `${verifyText}`;
-
-    const publishEl = dom.handoff.querySelector('[data-role="build-publish"]');
-
-    if (publishEl) {
-      const publish = build.publish;
-      const text = publish ? publishEventText(publish) : '';
-
-      if (!text) {
-        publishEl.classList.add('hidden');
-        publishEl.innerHTML = '';
-      } else {
-        const link = publish?.status === 'published' && publish.prUrl
-          ? ` <a href="${escapeText(publish.prUrl)}" target="_blank" rel="noreferrer">Open merge request</a>`
-          : '';
-
-        publishEl.innerHTML = `${escapeText(text)}${link}`;
-        publishEl.classList.remove('hidden');
-      }
-    }
-
-    stepsEl.innerHTML = build.steps.map((step, index) => `
-      <li data-status="${step.status}">
-        <span class="build-step-index">${index + 1}</span>
-        <span class="build-step-name">${step.skill}</span>
-        <span class="build-step-state">${step.status === 'done' ? 'done' : step.status === 'running' ? 'running' : 'waiting'}</span>
-      </li>
-    `).join('');
-
-    if (logEl) {
-      logEl.textContent = build.log;
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-  }
-
-  function scheduleBuildPaint() {
-    window.clearTimeout(view.buildTimer);
-    view.buildTimer = window.setTimeout(() => {
-      view.buildTimer = null;
-      paintBuild();
-    }, 160);
-  }
-
-  function onBuildEvent(event) {
-    if (!view.build) {
-      return;
-    }
-
-    const build = view.build;
-
-    switch (event.type) {
-      case 'build-started':
-        build.pipeline = event.pipeline ?? build.pipeline;
-        build.verify = event.verify !== false;
-        build.spec = event.spec;
-        build.steps = (event.steps ?? []).map((step) => ({
-          skill: step.skill,
-          status: 'waiting'
-        }));
-        build.status = 'running';
-        paintBuild();
-        break;
-      case 'build-step': {
-        const step = build.steps[event.index];
-
-        if (step) {
-          step.status = event.status;
-        }
-
-        build.status = 'running';
-        paintBuild();
-        break;
-      }
-      case 'output':
-        build.log += event.chunk ?? '';
-        if (build.log.length > 60000) {
-          build.log = build.log.slice(-60000);
-        }
-        scheduleBuildPaint();
-        break;
-      case 'publish':
-        build.publish = { ...event };
-        paintBuild();
-        break;
-      case 'job-done':
-        build.status = 'done';
-        build.summary = event.summary;
-        build.steps = (event.summary?.steps ?? build.steps).map((step, index) => ({
-          skill: step.skill ?? build.steps[index]?.skill ?? 'step',
-          status: 'done'
-        }));
-        build.specPath = event.summary?.specPath || build.specPath;
-        endBuild();
-        paintBuild();
-        break;
-      case 'job-failed':
-        build.status = 'failed';
-        build.error = event.message ?? 'The build failed.';
-        endBuild();
-        paintBuild();
-        break;
-      case 'job-cancelled':
-        build.status = 'stopped';
-        endBuild();
-        paintBuild();
-        break;
-      default:
-        break;
-    }
-  }
-
-  function endBuild() {
-    if (view.buildSource) {
-      view.buildSource.close();
-      view.buildSource = null;
-    }
-
-    setInputEnabled(true, copy.restartPlaceholder);
-    announceStatus(
-      view.build?.status === 'done'
-        ? 'The build finished.'
-        : view.build?.status === 'failed'
-          ? 'The build failed.'
-          : 'The build stopped.'
-    );
-  }
-
-  function attachBuild() {
-    if (view.buildSource || !view.sessionId) {
-      return;
-    }
-
-    const source = new EventSource(`${copy.endpoint}/${view.sessionId}/build/events`);
-
-    view.buildSource = source;
-    source.onmessage = (message) => {
-      try {
-        onBuildEvent(JSON.parse(message.data));
-      } catch {
-        // Ignore malformed events; the stream is best-effort.
-      }
-    };
-  }
-
-  async function stopBuild() {
-    if (!view.sessionId) {
-      return;
-    }
-
-    try {
-      await api(`${copy.endpoint}/${view.sessionId}/build/cancel`, { method: 'POST' });
-    } catch (error) {
-      if (view.build) {
-        view.build.log += `\nCould not stop the build: ${error.message}\n`;
-        paintBuild();
-      }
-    }
-  }
-
-  async function restoreBuild() {
-    if (flow !== 'feature' || !view.sessionId) {
-      return;
-    }
-
-    try {
-      const { build } = await api(`${copy.endpoint}/${view.sessionId}/build`);
-
-      if (!build) {
-        showHandoff();
-        return;
-      }
-
-      view.build = {
-        status: 'starting',
-        pipeline: build.request?.pipeline ?? 'direct',
-        verify: build.request?.verify !== false,
-        steps: [],
-        log: '',
-        error: '',
-        publish: null
-      };
-      view.buildPainted = false;
-
-      for (const event of build.events ?? []) {
-        onBuildEvent(event);
-      }
-
-      if (['running', 'waiting', 'cancelling'].includes(build.status)) {
-        view.build.status = 'running';
-        attachBuild();
-        setInputEnabled(false);
-      }
-
-      paintBuild();
-    } catch {
-      showHandoff();
-    }
-  }
-
-  function attach(jobId) {
-    if (view.source) {
-      view.source.close();
-    }
-
-    view.jobId = jobId;
-    view.sessionId = jobId;
-    view.running = true;
-    view.seq = 0;
-    dom.stop.disabled = false;
-    setStatus('connecting', true);
-
-    const source = new EventSource(`${copy.endpoint}/${jobId}/events`);
-
-    view.source = source;
-    source.onmessage = (message) => {
-      try {
-        onEvent(JSON.parse(message.data));
-      } catch {
-        // Ignore malformed events; the stream is best-effort.
-      }
-    };
-    source.onopen = () => setStatus(view.awaiting ? 'needs your answer' : 'live', true);
-    source.onerror = () => setStatus('reconnecting', false);
-  }
-
-  function resetSession({ setup = true } = {}) {
-    if (view.source) {
-      view.source.close();
-    }
-    if (view.buildSource) {
-      view.buildSource.close();
-    }
-
-    window.clearTimeout(view.renderTimer);
-    window.clearTimeout(view.buildTimer);
-    stopTurnClock();
-    view.jobId = null;
-    view.sessionId = null;
-    view.source = null;
-    view.entries = [];
-    view.active = null;
-    view.awaiting = false;
-    view.running = false;
-    view.finished = false;
-    view.seq = 0;
-    view.build = null;
-    view.buildSource = null;
-    view.buildPainted = false;
-    view.mergeMeta = null;
-    view.setup = false;
-    view.setupError = '';
-    view.sourceIssue = null;
-    view.specIssue = null;
-    hideHandoff();
-    dom.richView.innerHTML = '';
-    dom.rawView.textContent = '';
-    dom.richView.classList.add('hidden');
-    dom.rawView.classList.add('hidden');
-    dom.empty.classList.remove('hidden');
-    dom.stage.classList.remove('hidden');
-    dom.stop.disabled = true;
-    if (dom.finish) {
-      dom.finish.disabled = true;
-    }
-    dom.input.value = '';
-    if (dom.jiraSelect) {
-      dom.jiraSelect.replaceChildren(new Option('Load open issues…', ''));
-      dom.jiraSelect.disabled = true;
-    }
-    if (dom.jiraLoad) {
-      dom.jiraLoad.disabled = false;
-    }
-    if (dom.jiraStatus) {
-      dom.jiraStatus.textContent = '';
-    }
-    if (dom.publish) {
-      dom.publish.checked = true;
-    }
-    setStatus('ready', false);
-    setScope(copy.scope);
-
-    if (flow === 'merge') {
-      setInputEnabled(false);
-      setComposerVisible(false);
-
-      if (setup) {
-        renderMergeSetup();
-      }
-    } else {
-      setInputEnabled(true, copy.placeholder);
-      setComposerVisible(true);
-    }
-
-    autoGrow();
-  }
+  // ---------------------------------------------------------------
+  // Start, answer, finish, stop, attach
+  // ---------------------------------------------------------------
 
   async function start(brief) {
-    const { agentPreset, agentCmd } = selectedAgent();
-    const publishRequested = flow === 'merge' ? false : Boolean(dom.publish?.checked);
-    const sourceIssue = flow === 'merge' ? null : view.sourceIssue;
-    if (agentPreset === 'custom' && !agentCmd) {
-      addEntry('session', 'Add an agent command in Settings, or pick a preset.');
-      return;
-    }
+    const selection = view.setup ? selectedFromSetup() : workflowSettings(flow);
+    const sourceIssue = isMerge ? null : view.sourceIssue;
 
-    resetSession();
+    rememberWorkflow(flow, selection);
+
+    resetSession({ setup: false });
     view.running = true;
     dom.stop.disabled = false;
+    setSetupVisible(false);
+    setComposerVisible(true);
     setInputEnabled(false);
     setStatus('starting', true);
-    setScope('session running');
+    paintLock(selection);
     render();
 
     try {
@@ -2884,19 +3041,14 @@ function createSession(flow) {
         method: 'POST',
         body: JSON.stringify({
           brief,
-          agentPreset,
-          agentCmd,
+          ...selection,
           ...(sourceIssue ? { issue: sourceIssue } : {}),
-          ...(flow === 'specIssue' ? { specIssueSource: dom.issueSource?.value ?? '' } : {}),
-          ...(flow === 'merge' || flow === 'specIssue'
-            ? {}
-            : {
-              publish: publishRequested,
-              closeIssues: Boolean(el.form.closeIssues?.checked)
-            })
+          ...(flow === 'specIssue' ? { specIssueSource: dom.setup.querySelector('[data-role="issue-source"]')?.value ?? '' } : {}),
+          closeIssues: Boolean(el.form.closeIssues?.checked)
         })
       });
 
+      paintLock(job.selection ?? selection);
       attach(job.id);
       announceStatus('Session started.');
     } catch (error) {
@@ -2904,8 +3056,10 @@ function createSession(flow) {
       view.sourceIssue = sourceIssue;
       dom.stop.disabled = true;
       setStatus('failed', false);
-      setScope('session failed');
       addEntry('session', error.message);
+      setSetupVisible(false);
+      setComposerVisible(true);
+      setComposerAction('start');
       setInputEnabled(true, copy.placeholder);
       render();
     }
@@ -2917,7 +3071,7 @@ function createSession(flow) {
     }
 
     view.awaiting = false;
-    dom.finish.disabled = true;
+    if (dom.finish) dom.finish.disabled = true;
     setInputEnabled(false);
     setStatus('sending', true);
     render();
@@ -2929,15 +3083,13 @@ function createSession(flow) {
       });
     } catch (error) {
       view.awaiting = true;
-      dom.finish.disabled = false;
+      if (dom.finish) dom.finish.disabled = false;
       addEntry('session', `Could not send the answer: ${error.message}`);
       setInputEnabled(true, copy.answerPlaceholder);
       render();
     }
   }
 
-  // The human closes the session: after the final report or spec there is
-  // nothing left to answer. No text is inspected to decide this.
   async function finish() {
     if (!view.jobId || !view.awaiting || !dom.finish) {
       return;
@@ -2964,11 +3116,34 @@ function createSession(flow) {
     }
   }
 
+  function disarmStop() {
+    stopArmed = false;
+    window.clearTimeout(stopTimer);
+    stopTimer = null;
+
+    if (dom.stop) {
+      dom.stop.textContent = 'Stop';
+      dom.stop.classList.remove('armed');
+      dom.stop.title = 'Stop the process and delete the worktree';
+    }
+  }
+
   async function stop() {
-    if (!view.jobId) {
+    if (!view.jobId || view.readOnly) {
       return;
     }
 
+    if (!stopArmed) {
+      stopArmed = true;
+      dom.stop.textContent = 'Confirm stop';
+      dom.stop.classList.add('armed');
+      dom.stop.title = 'This kills the process and deletes the worktree. Click again to confirm.';
+      announceStatus('Stop again to kill the process and delete the worktree.');
+      stopTimer = window.setTimeout(disarmStop, 6000);
+      return;
+    }
+
+    disarmStop();
     dom.stop.disabled = true;
     setStatus('stopping', false);
 
@@ -2981,50 +3156,122 @@ function createSession(flow) {
     }
   }
 
+  function attach(jobId) {
+    if (view.source) {
+      view.source.close();
+    }
+
+    view.jobId = jobId;
+    view.sessionId = jobId;
+    view.running = true;
+    view.seq = 0;
+    dom.stop.disabled = false;
+    setStatus('connecting', true);
+    renderSessionList();
+
+    const source = new EventSource(`${copy.endpoint}/${jobId}/events`);
+
+    view.source = source;
+    source.onmessage = (message) => {
+      try {
+        onEvent(JSON.parse(message.data));
+      } catch {
+        // Ignore malformed events; the stream is best-effort.
+      }
+    };
+    source.onopen = () => setStatus(view.awaiting ? 'needs your answer' : 'live', true);
+    source.onerror = () => setStatus('reconnecting', false);
+  }
+
+  function resetSession({ setup = true } = {}) {
+    if (view.source) {
+      view.source.close();
+    }
+
+    window.clearTimeout(view.renderTimer);
+    stopTurnClock();
+    disarmStop();
+    view.jobId = null;
+    view.sessionId = null;
+    view.source = null;
+    view.entries = [];
+    view.raw = [];
+    view.active = null;
+    view.awaiting = false;
+    view.running = false;
+    view.finished = false;
+    view.readOnly = false;
+    view.setup = false;
+    view.sessionOpen = !setup;
+    view.seq = 0;
+    view.working = [];
+    view.build = null;
+    view.mergeMeta = null;
+    view.setupError = '';
+    view.sourceIssue = null;
+    view.specIssue = null;
+    view.branch = '';
+    hideHandoff();
+    paintLock({});
+    dom.empty.classList.remove('hidden');
+    dom.richView.innerHTML = '';
+    dom.rawView.textContent = '';
+    dom.richView.classList.add('hidden');
+    dom.rawView.classList.add('hidden');
+    dom.stop.disabled = true;
+    if (dom.finish) dom.finish.disabled = true;
+    dom.input.value = '';
+    setStatus('ready', false);
+    setBarVisible(false);
+    setComposerVisible(false);
+    setInputEnabled(false);
+    issueChoices = [];
+    render();
+    setListExpanded(false);
+
+    if (setup) {
+      renderSetup();
+    } else {
+      setSetupVisible(false);
+      dom.stage.classList.remove('hidden');
+      setComposerVisible(true);
+      setComposerAction('send');
+      setBarVisible(true);
+    }
+
+    renderSessionList();
+  }
+
   async function restore() {
-    try {
-      const { jobs } = await api(copy.endpoint);
+    await loadSessionList();
 
-      if (!jobs || jobs.length === 0) {
-        resetSession();
-        return;
-      }
+    const active = view.jobs.find((job) => isAlive(job) && !job.readOnly);
 
-      const job = [...jobs].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
-
+    if (active) {
+      paintLock(active.selection ?? {});
+      await openSession(active);
+    } else {
       resetSession();
-      view.sessionId = job.id;
-
-      if (flow === 'merge') {
-        view.mergeMeta = job.request?.merge ?? null;
-
-        if (job.status === 'done' && job.result?.ref && view.mergeMeta) {
-          view.mergeMeta = { ...view.mergeMeta, ref: job.result.ref };
-        }
-      }
-
-      if (['running', 'waiting', 'cancelling'].includes(job.status)) {
-        attach(job.id);
-        return;
-      }
-
-      for (const event of job.events ?? []) {
-        onEvent(event);
-      }
-
-      view.running = false;
-
-      if (view.finished && flow === 'feature') {
-        await restoreBuild();
-      }
-    } catch {
-      // History is a convenience; the studio still works without it.
     }
   }
 
   function autoGrow() {
     dom.input.style.height = 'auto';
     dom.input.style.height = `${Math.min(dom.input.scrollHeight, 200)}px`;
+  }
+
+  function syncConfig() {
+    if (view.setup && !view.running) {
+      renderSetup(view.setupError ?? '');
+    }
+
+    updateSessionListMetadata();
+  }
+
+  function updateSessionListMetadata() {
+    if (view.jobs.length > 0) {
+      renderSessionList();
+    }
   }
 
   dom.inputForm.addEventListener('submit', (event) => {
@@ -3039,7 +3286,7 @@ function createSession(flow) {
     dom.input.value = '';
     autoGrow();
 
-    if (!view.jobId) {
+    if (!view.jobId && !view.readOnly) {
       start(text);
     } else if (view.awaiting) {
       answer(text);
@@ -3056,22 +3303,73 @@ function createSession(flow) {
   dom.rawBtn.addEventListener('click', () => setMode('raw'));
   dom.stop.addEventListener('click', stop);
   dom.finish?.addEventListener('click', finish);
-  dom.issueLoad?.addEventListener('click', loadExternalIssues);
-  dom.issueSelect?.addEventListener('change', importSelectedIssue);
-  dom.issueSource?.addEventListener('change', () => {
-    view.issueChoices = [];
-    view.sourceIssue = null;
-    dom.issueSelect.replaceChildren(new Option('Load open issues…', ''));
-    dom.issueSelect.disabled = true;
-    dom.issueStatus.textContent = '';
-    saveIssueSource();
+  dom.listToggle.addEventListener('click', () => {
+    setListExpanded(!listExpanded);
   });
-  // Approval is a security decision, not an interview answer: it keeps its own
-  // explicit control instead of flowing through the composer.
+  dom.newBtn.addEventListener('click', () => {
+    resetSession();
+    loadSessionList();
+    announceStatus('Ready for a new session.');
+  });
+  dom.list.addEventListener('click', async (event) => {
+    const button = event.target.closest?.('[data-action]');
+    const row = event.target.closest?.('.session-row');
+
+    if (!button || !row) {
+      return;
+    }
+
+    const job = view.jobs.find((entry) => entry.id === row.dataset.id);
+
+    if (!job) {
+      return;
+    }
+
+    const action = button.dataset.action;
+
+    if (action === 'open') {
+      await openSession(job);
+      return;
+    }
+
+    if (action === 'stop') {
+      if (!window.confirm('Stop this session? This kills the process and deletes its worktree.')) {
+        return;
+      }
+
+      try {
+        await api(`${copy.endpoint}/${job.id}/cancel`, { method: 'POST' });
+        announceStatus('Stopping the session.');
+        window.setTimeout(loadSessionList, 300);
+      } catch (error) {
+        announceStatus(`Could not stop the session: ${error.message}`);
+      }
+      return;
+    }
+
+    if (action === 'remove') {
+      if (!window.confirm('Remove this session from history? The files under .sdd/sessions are deleted.')) {
+        return;
+      }
+
+      try {
+        await api(`${copy.endpoint}/${job.id}`, { method: 'DELETE' });
+
+        if (view.sessionId === job.id) {
+          resetSession();
+        }
+
+        await loadSessionList();
+        announceStatus('Session removed from history.');
+      } catch (error) {
+        announceStatus(`Could not remove the session: ${error.message}`);
+      }
+    }
+  });
   dom.richView.addEventListener('click', (event) => {
     const button = event.target.closest?.('[data-permission]');
 
-    if (!button || !view.jobId) {
+    if (!button || !view.jobId || view.readOnly) {
       return;
     }
 
@@ -3088,7 +3386,6 @@ function createSession(flow) {
       method: 'POST',
       body: JSON.stringify({ id: entry.id, behavior: button.dataset.permission })
     }).then((result) => {
-      // The request expired before the click reached the agent.
       if (result?.accepted === false) {
         entry.busy = false;
         entry.state = 'Expired';
@@ -3126,11 +3423,10 @@ function createSession(flow) {
   return {
     reset: resetSession,
     restore,
-    updateAgent,
-    syncPublish,
+    syncConfig,
     syncIssueSource,
     refreshSetup: () => {
-      if (flow === 'merge' && view.setup && !view.running) {
+      if (isMerge && view.setup && !view.running) {
         renderMergeSetup(view.setupError ?? '');
       }
     },
@@ -3145,9 +3441,200 @@ const sessionViews = {
   merge: createSession('merge')
 };
 
-function updateSessionAgents() {
-  for (const session of Object.values(sessionViews)) {
-    session?.updateAgent();
+const WORKFLOW_LABELS = {
+  enhancement: 'Enhancement',
+  feature: 'Feature',
+  specIssue: 'Spec issue',
+  merge: 'Merge',
+  bugSweep: 'Bug fixing'
+};
+
+const SECRET_ENV_KEYS = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN'
+]);
+
+const MODEL_ENV_KEYS = new Set([
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL'
+]);
+
+function envModels() {
+  const env = state.config?.settings?.claudeEnv ?? {};
+
+  return [...new Set([...MODEL_ENV_KEYS].map((key) => env[key]).filter(Boolean))];
+}
+
+function renderModelOptions() {
+  for (const picker of document.querySelectorAll('[data-model-picker]')) {
+    const select = picker.querySelector('select');
+    const input = picker.querySelector('input');
+    const current = select?.value === CUSTOM_MODEL ? input?.value ?? '' : select?.value ?? '';
+
+    fillModelPicker(picker, current);
+  }
+}
+
+async function loadClaudeModels() {
+  try {
+    const result = await api('/api/claude/models');
+    state.models = Array.isArray(result.models) ? result.models : [];
+    state.modelsError = result.error || '';
+  } catch (error) {
+    state.models = [];
+    state.modelsError = error.message;
+  }
+
+  renderModelOptions();
+
+  if (el.modelSource) {
+    el.modelSource.textContent = state.modelsError
+      ? `Using the configured environment model. ${state.modelsError}`
+      : `${state.models.length} model${state.models.length === 1 ? '' : 's'} from Claude Code.`;
+  }
+}
+
+function renderClaudeEnv() {
+  if (!el.claudeEnv) {
+    return;
+  }
+
+  const env = state.config?.settings?.claudeEnv ?? {};
+  const secrets = new Set(state.config?.settings?.claudeEnvSecrets ?? []);
+
+  el.claudeEnv.replaceChildren();
+
+  for (const [key, value] of Object.entries(env)) {
+    const row = document.createElement('div');
+    const secret = secrets.has(key) || SECRET_ENV_KEYS.has(key);
+
+    row.className = 'env-row';
+    row.innerHTML = `
+      <label class="field"><span>Key</span><input data-field="key" value="${escapeText(key)}" placeholder="ANTHROPIC_BASE_URL" autocomplete="off"></label>
+      <label class="field"><span>Value</span><input data-field="value" type="${secret ? 'password' : 'text'}" placeholder="${secret ? 'saved locally' : ''}" autocomplete="off"></label>
+      <button type="button" class="icon-btn env-remove" data-role="remove-env" title="Remove variable" aria-label="Remove ${escapeText(key)}">-</button>
+    `;
+
+    row.querySelector('[data-field="value"]').value = secret ? '' : value;
+    row.querySelector('[data-field="key"]').addEventListener('change', () => {
+      const input = row.querySelector('[data-field="value"]');
+      input.type = SECRET_ENV_KEYS.has(row.querySelector('[data-field="key"]').value.trim()) ? 'password' : 'text';
+    });
+    el.claudeEnv.append(row);
+  }
+}
+
+function readClaudeEnv() {
+  const env = {};
+
+  for (const row of el.claudeEnv?.querySelectorAll('.env-row') ?? []) {
+    const key = row.querySelector('[data-field="key"]')?.value.trim() ?? '';
+    const value = row.querySelector('[data-field="value"]')?.value ?? '';
+
+    if (key) {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
+function saveClaudeEnv() {
+  if (!state.config) {
+    return;
+  }
+
+  const env = readClaudeEnv();
+
+  state.config.settings = state.config.settings ?? {};
+  state.config.settings.claudeEnv = { ...env };
+  state.config.settings.claudeEnvSecrets = Object.entries(env)
+    .filter(([key, value]) => SECRET_ENV_KEYS.has(key) && value)
+    .map(([key]) => key);
+
+  api('/api/settings', {
+    method: 'POST',
+    body: JSON.stringify({ claudeEnv: env })
+  }).catch(() => {});
+
+  loadClaudeModels();
+  renderWorkflowDefaults();
+}
+
+function addClaudeEnvRow() {
+  if (!el.claudeEnv) {
+    return;
+  }
+
+  const row = document.createElement('div');
+
+  row.className = 'env-row';
+  row.innerHTML = `
+    <label class="field"><span>Key</span><input data-field="key" placeholder="ANTHROPIC_BASE_URL" autocomplete="off"></label>
+    <label class="field"><span>Value</span><input data-field="value" type="text" autocomplete="off"></label>
+    <button type="button" class="icon-btn env-remove" data-role="remove-env" title="Remove variable" aria-label="Remove variable">-</button>
+  `;
+  el.claudeEnv.append(row);
+  row.querySelector('[data-field="key"]').focus();
+}
+function renderWorkflowDefaults() {
+  if (!el.workflowDefaults) {
+    return;
+  }
+
+  el.workflowDefaults.replaceChildren();
+
+  for (const flow of state.config?.workflowsAvailable ?? Object.keys(WORKFLOW_LABELS)) {
+    const selection = workflowSettings(flow);
+    const row = document.createElement('div');
+
+    row.className = 'workflow-default';
+    row.dataset.flow = flow;
+    row.innerHTML = `
+      <p class="workflow-name">${escapeText(WORKFLOW_LABELS[flow] ?? flow)}</p>
+      <label class="field workflow-model"><span>Model</span>
+        <span class="model-picker" data-model-picker>
+          <select data-field="model-select" aria-label="Model"></select>
+          <input data-field="model" class="model-custom hidden" placeholder="Model id" autocomplete="off" aria-label="Custom model id">
+        </span>
+      </label>
+      <label class="field workflow-effort"><span>Effort</span><select data-field="effort"></select></label>
+      <label class="toggle workflow-mr"><input type="checkbox" data-field="mr" ${selection.mr !== false ? 'checked' : ''}><span>MR</span></label>
+    `;
+
+    const modelPicker = row.querySelector('[data-model-picker]');
+    const effortSelect = row.querySelector('[data-field="effort"]');
+
+    fillModelPicker(modelPicker, selection.model);
+    fillEffortSelect(effortSelect, selection.effort);
+    wireModelPicker(modelPicker, () => updateWorkflowFromRow(row));
+    effortSelect.addEventListener('change', () => updateWorkflowFromRow(row));
+    row.querySelector('[data-field="mr"]').addEventListener('change', () => updateWorkflowFromRow(row));
+    el.workflowDefaults.append(row);
+  }
+}
+
+function updateWorkflowFromRow(row) {
+  const flow = row.dataset.flow;
+
+  if (!flow) {
+    return;
+  }
+
+  const selection = {
+    model: modelPickerValue(row.querySelector('[data-model-picker]')),
+    effort: row.querySelector('[data-field="effort"]').value,
+    mr: row.querySelector('[data-field="mr"]').checked
+  };
+
+  rememberWorkflow(flow, selection);
+
+  if (flow === 'bugSweep') {
+    renderSweepSelection();
   }
 }
 
@@ -3281,6 +3768,8 @@ async function hydrateMermaid(container) {
 }
 
 function switchView(view) {
+  document.body.classList.toggle('live-mode', view !== 'sweep');
+
   for (const item of $$('.nav-item')) {
     const active = item.dataset.view === view;
 
@@ -3350,23 +3839,11 @@ async function loadConfig() {
         : '••••••••';
     updateTrackerStatus();
 
-    el.form.agentPreset.innerHTML = '';
-    for (const agent of agentPresets()) {
-      const option = document.createElement('option');
-      option.value = agent.id;
-      option.textContent = agent.label;
-      el.form.agentPreset.append(option);
-    }
+    renderClaudeEnv();
+    renderWorkflowDefaults();
+    renderSweepSelection();
+    loadClaudeModels();
 
-    const savedAgent = settings.agentPreset || inferAgentPreset(settings.agentCmd);
-
-    el.form.agentPreset.value = agentPresets().some((agent) => agent.id === savedAgent)
-      ? savedAgent
-      : (defaults.agentPreset || 'claude');
-    setFormValue('agentCmd', settings.agentCmd);
-    toggleAgentCustom();
-
-    el.form.agentCmd.placeholder = defaults.agentCmd || '';
     el.form.base.placeholder = defaults.base || 'detected';
 
     el.form.prPreset.innerHTML = '';
@@ -3392,11 +3869,10 @@ async function loadConfig() {
     }
 
     updatePlan();
-    sessionViews.enhancement?.syncPublish?.();
-    sessionViews.feature?.syncPublish?.();
-    sessionViews.enhancement?.syncIssueSource?.();
-    sessionViews.feature?.syncIssueSource?.();
-    sessionViews.specIssue?.syncIssueSource?.();
+    for (const set of Object.values(sessionViews)) {
+      set?.syncConfig?.();
+      set?.syncIssueSource?.();
+    }
     // The merge setup reads local branches from this config, so it refreshes
     // after a landing or a retry without leaving the tab.
     sessionViews.merge?.refreshSetup?.();
@@ -3534,8 +4010,31 @@ function init() {
     }
   });
   el.copyLog.addEventListener('click', copyLog);
-  el.form.agentPreset.addEventListener('change', toggleAgentCustom);
   el.form.prPreset.addEventListener('change', togglePrCustom);
+  const rememberSweep = () => {
+    rememberWorkflow('bugSweep', selectionFrom({
+      modelPicker: el.sweepModelPicker,
+      effort: el.sweepEffort,
+      mr: null
+    }));
+    renderWorkflowDefaults();
+  };
+
+  wireModelPicker(el.sweepModelPicker, rememberSweep);
+  el.sweepEffort.addEventListener('change', rememberSweep);
+  el.claudeEnv?.addEventListener('change', saveClaudeEnv);
+  el.claudeEnv?.addEventListener('click', (event) => {
+    const button = event.target.closest?.('[data-role="remove-env"]');
+
+    if (!button) {
+      return;
+    }
+
+    button.closest('.env-row')?.remove();
+    saveClaudeEnv();
+  });
+  el.addClaudeEnv?.addEventListener('click', addClaudeEnvRow);
+  el.refreshModels?.addEventListener('click', loadClaudeModels);
   el.form.jiraType?.addEventListener('change', () => {
     updateJiraTypeSettings();
     queueSettingsSave();
@@ -3553,7 +4052,6 @@ function init() {
 
   loadConfig();
   loadLatestJob();
-  updateSessionAgents();
 
   for (const session of Object.values(sessionViews)) {
     session?.restore();

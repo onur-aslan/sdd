@@ -131,6 +131,20 @@
               </select>
             </label>
 
+            <div class="grid-3 sweep-model">
+              <label class="field">
+                <span>Model</span>
+                <span class="model-picker" id="sweep-model-picker" data-model-picker>
+                  <select form="sweep-form" id="sweep-model-select" aria-label="Model"></select>
+                  <input form="sweep-form" name="model" id="sweep-model" class="model-custom hidden" placeholder="Model id" autocomplete="off" aria-label="Custom model id">
+                </span>
+              </label>
+              <label class="field">
+                <span>Effort</span>
+                <select form="sweep-form" name="effort" id="sweep-effort"></select>
+              </label>
+            </div>
+
             <div class="bug-picker" id="bug-picker" tabindex="0" aria-label="Open bugs">
               <p class="bug-picker-empty">Pick a project in Settings to load its bugs.</p>
             </div>
@@ -199,49 +213,65 @@
         </div>
       </section>
 
-      <section class="view hidden" data-view="enhancement">
+      <section class="view hidden live-view" data-view="enhancement">
         <header class="page-head">
           <div class="page-title">
             <h1>Enhance</h1>
             <p>Interview the agent, approve the plan, then let it implement, verify, and publish.</p>
           </div>
-          <p class="scope" id="enhancement-scope">plan → implement → publish</p>
+          <ol class="flow-steps" aria-label="Workflow steps">
+            <li>Plan</li>
+            <li>Implement</li>
+            <li>Verify</li>
+            <li>Publish</li>
+          </ol>
         </header>
 
         <div class="session-wrap" data-session-flow="enhancement"></div>
       </section>
 
-      <section class="view hidden" data-view="feature">
+      <section class="view hidden live-view" data-view="feature">
         <header class="page-head">
           <div class="page-title">
             <h1>Build a feature</h1>
             <p>A design interview, a spec to approve, then the build path you choose and publish.</p>
           </div>
-          <p class="scope" id="feature-scope">spec → build → publish</p>
+          <ol class="flow-steps" aria-label="Workflow steps">
+            <li>Spec</li>
+            <li>Build</li>
+            <li>Publish</li>
+          </ol>
         </header>
 
         <div class="session-wrap" data-session-flow="feature"></div>
       </section>
 
-      <section class="view hidden" data-view="specIssue">
+      <section class="view hidden live-view" data-view="specIssue">
         <header class="page-head">
           <div class="page-title">
             <h1>Spec to issue</h1>
             <p>Run the design interview, approve the spec, and file it as one tracker issue.</p>
           </div>
-          <p class="scope" id="spec-issue-scope">spec → issue</p>
+          <ol class="flow-steps" aria-label="Workflow steps">
+            <li>Spec</li>
+            <li>Issue</li>
+          </ol>
         </header>
 
         <div class="session-wrap" data-session-flow="specIssue"></div>
       </section>
 
-      <section class="view hidden" data-view="merge">
+      <section class="view hidden live-view" data-view="merge">
         <header class="page-head">
           <div class="page-title">
             <h1>Merge branches</h1>
             <p>Review a branch merge, decide each conflict, then land the integration branch.</p>
           </div>
-          <p class="scope" id="merge-scope">review → integrate</p>
+          <ol class="flow-steps" aria-label="Workflow steps">
+            <li>Review</li>
+            <li>Integrate</li>
+            <li>Land</li>
+          </ol>
         </header>
 
         <div class="session-wrap" data-session-flow="merge"></div>
@@ -306,25 +336,32 @@
               <input form="sweep-form" name="base" placeholder="main" autocomplete="off">
             </label>
             <label class="field">
-              <span>Agent</span>
-              <select form="sweep-form" name="agentPreset" id="agent-preset"></select>
+              <span>Publish</span>
+              <select form="sweep-form" name="publish" id="publish-mode">
+                <option value="pr" selected>Push + pull request</option>
+                <option value="push">Push branch</option>
+              </select>
             </label>
           </div>
 
-          <label class="field hidden" id="agent-custom-field">
-            <span>Custom agent command <em>(blank = default)</em></span>
-            <input form="sweep-form" name="agentCmd" placeholder='["claude","-p"]' autocomplete="off">
-          </label>
+          <p class="hint">Every session runs in its own worktree from the selected base branch. Dates, the owner branch, work directory, limits, and timeouts are computed at run time; per-run tags are opt-in.</p>
+        </section>
 
-          <label class="field">
-            <span>Publish</span>
-            <select form="sweep-form" name="publish" id="publish-mode">
-              <option value="pr" selected>Push + pull request</option>
-              <option value="push">Push branch</option>
-            </select>
-          </label>
+        <section class="settings-section">
+          <h3>Claude environment</h3>
+          <p class="hint">These variables are passed only to the Claude child process. Model ids are not built in; use <code>ANTHROPIC_MODEL</code> and the <code>ANTHROPIC_DEFAULT_*_MODEL</code> aliases, or add a gateway-specific id. Secret values stay on this machine.</p>
+          <div id="claude-env" class="env-list"></div>
+          <div class="settings-actions">
+            <button type="button" class="btn quiet sm" id="add-claude-env">Add variable</button>
+            <button type="button" class="btn quiet sm" id="refresh-models">Refresh models</button>
+            <span class="check-result" id="model-source"></span>
+          </div>
+        </section>
 
-          <p class="hint">Every run uses an isolated worktree, fetches the base branch, resumes the single per-user bug-fix branch, and retries failed bugs automatically. Dates, the owner branch, work directory, limits, and timeouts are computed at run time; per-run tags are opt-in.</p>
+        <section class="settings-section">
+          <h3>Workflow defaults</h3>
+          <p class="hint">Model, effort, and the merge-request checkbox are remembered per workflow. Choose Default to use the Claude environment. A session locks the selection shown in its header.</p>
+          <div id="workflow-defaults" class="workflow-defaults"></div>
         </section>
 
         <section class="settings-section">

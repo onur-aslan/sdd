@@ -464,6 +464,32 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* Workflow lifecycle: orientation, not status. The badge carries state. */
+.flow-steps {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 2px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font: 11px/1.5 var(--mono);
+  white-space: nowrap;
+}
+
+.flow-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flow-steps li + li::before {
+  content: "→";
+  color: var(--line-strong);
+  font-size: 10px;
+}
+
 /* ------------------------------------------------------------
    Workbench
    ------------------------------------------------------------ */
@@ -684,6 +710,22 @@ main {
   font-weight: 400;
 }
 
+/* One model per session: a picker for the known ids, a field for the rest. */
+.model-picker {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-picker > * {
+  min-width: 0;
+}
+
+.model-picker .model-custom {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 input:not([type="checkbox"]),
 select,
 textarea {
@@ -772,6 +814,10 @@ input[type="checkbox"]:disabled {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.sweep-model {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
 }
 
 .input-row {
@@ -1297,13 +1343,6 @@ input[type="checkbox"]:disabled {
    Raw view and the diagrams — so Rich and Raw are two different materials.
    ------------------------------------------------------------ */
 
-.session-wrap {
-  height: calc(100vh - var(--topbar) - 192px);
-  /* The floor yields on short viewports, so the page never grows a second
-     scrollbar around the conversation. */
-  min-height: min(440px, calc(100vh - var(--topbar) - 192px));
-}
-
 .session {
   display: flex;
   flex-direction: column;
@@ -1425,8 +1464,8 @@ input[type="checkbox"]:disabled {
 .session-import {
   display: grid;
   gap: 7px;
-  width: min(540px, 100%);
-  margin: 22px auto 0;
+  width: 100%;
+  margin: 14px 0 0;
   text-align: left;
 }
 
@@ -1438,10 +1477,8 @@ input[type="checkbox"]:disabled {
 
 .session-import-label {
   flex: none;
-  color: var(--muted);
-  font: 600 9.5px/1 var(--mono);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  color: var(--ink-2);
+  font: 500 12px/1 var(--sans);
 }
 
 .session-import select {
@@ -1474,7 +1511,7 @@ input[type="checkbox"]:disabled {
    ------------------------------------------------------------ */
 
 .session-rich {
-  max-width: 820px;
+  max-width: 100%;
   margin: 0 auto;
   color: var(--ink-2);
   font: 400 14px/1.7 var(--sans);
@@ -1700,7 +1737,7 @@ input[type="checkbox"]:disabled {
   position: relative;
   flex: none;
   width: 100%;
-  max-width: 780px;
+  max-width: 100%;
   margin: 0 auto;
   padding: 0;
   border: 0;
@@ -1775,6 +1812,28 @@ input[type="checkbox"]:disabled {
   height: 17px;
 }
 
+.session-send-label {
+  display: none;
+  font: 600 12px/1 var(--sans);
+}
+
+.session-input.is-start .session-send {
+  width: auto;
+  padding: 0 15px;
+}
+
+.session-input.is-start .session-send-label {
+  display: inline;
+}
+
+.session-input.is-start .session-send svg {
+  display: none;
+}
+
+.session-input.is-start textarea {
+  padding-right: 92px;
+}
+
 /* ------------------------------------------------------------
    Handoff — the feature workflow continues after the spec
    ------------------------------------------------------------ */
@@ -1782,7 +1841,7 @@ input[type="checkbox"]:disabled {
 .handoff {
   flex: none;
   width: 100%;
-  max-width: 780px;
+  max-width: 100%;
   margin: 16px auto 0;
 }
 
@@ -1999,10 +2058,8 @@ input[type="checkbox"]:disabled {
 }
 
 .merge-field > span {
-  color: var(--muted);
-  font: 600 9.5px/1 var(--mono);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  color: var(--ink-2);
+  font: 500 12px/1 var(--sans);
 }
 
 .merge-field select {
@@ -2673,11 +2730,6 @@ input[type="checkbox"]:disabled {
     min-height: auto;
   }
 
-  .session-wrap {
-    height: min(78vh, 720px);
-    min-height: 460px;
-  }
-
   .queue {
     padding: 0 0 20px;
     border-right: 0;
@@ -2740,11 +2792,6 @@ input[type="checkbox"]:disabled {
 
   .scope {
     text-align: left;
-  }
-
-  .session-wrap {
-    height: 74vh;
-    min-height: 400px;
   }
 
   .session-agent {
@@ -2831,6 +2878,480 @@ input[type="checkbox"]:disabled {
     right: 10px;
     bottom: 10px;
     width: calc(100vw - 20px);
+  }
+}
+
+/* ------------------------------------------------------------
+   Live sessions: list, setup, locked header, build markers
+   ------------------------------------------------------------ */
+
+.session-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The live workflows are one column end to end. The page head, Sessions
+   strip, status bar, start panel, composer, and transcript share the same
+   900px axis instead of floating over a full-width page. The inner blocks
+   fill that axis; the column is the single width control. */
+.live-view {
+  --live-col: 900px;
+}
+
+.live-view .page-head,
+.live-view .session-wrap {
+  width: 100%;
+  max-width: var(--live-col);
+  margin-inline: auto;
+}
+
+.live-view .session {
+  padding-inline: 0;
+}
+
+/* While a live workflow is open, the page is exactly the viewport under the
+   top bar. The rail becomes a row below 1040px, so the layout gives it one
+   row and the page the rest. The transcript is the only scroll region. */
+body.live-mode .layout {
+  height: calc(100vh - var(--topbar));
+  min-height: 0;
+}
+
+body.live-mode main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+body.live-mode .live-view:not(.hidden) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+
+body.live-mode .live-view:not(.hidden) .session-wrap {
+  flex: 1;
+  height: auto;
+  min-height: 320px;
+}
+
+@media (max-width: 1040px) {
+  body.live-mode .layout {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+}
+
+.session-home {
+  flex: none;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.session-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+}
+
+.session-list-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: 500 12px/1.4 var(--sans);
+  cursor: pointer;
+}
+
+.session-list-toggle:hover {
+  color: var(--ink);
+}
+
+.session-list-title {
+  letter-spacing: 0.01em;
+}
+
+.session-list-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--muted);
+  font: 10.5px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.session-list-chevron {
+  width: 13px;
+  height: 13px;
+  color: var(--muted);
+  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.session-list-toggle[aria-expanded="true"] .session-list-chevron {
+  transform: rotate(180deg);
+}
+
+.session-list-body {
+  max-height: 280px;
+  overflow: auto;
+  padding: 4px 0 2px;
+}
+
+.session-list-body[hidden] {
+  display: none;
+}
+
+.session-list-note {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-row + .session-row {
+  border-top: 1px solid var(--line);
+}
+
+.session-list-empty {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 6px;
+  border-radius: calc(var(--r) - 1px);
+}
+
+.session-row:hover,
+.session-row.current {
+  background: var(--paper-2);
+}
+
+.session-row-main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-row-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-row-brief {
+  overflow: hidden;
+  color: var(--ink);
+  font: 500 12px/1.4 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font: 11px/1.4 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.session-row .badge {
+  flex: none;
+  min-width: 56px;
+  text-align: center;
+}
+
+.badge.waiting {
+  background: #fff4d6;
+  color: #7a5300;
+}
+
+.badge.stopped,
+.badge.cancelled {
+  background: var(--paper-2);
+  color: var(--muted);
+}
+
+.session {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+.session-setup {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 0 18px;
+}
+
+.session-start {
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 2px 0 0;
+}
+
+.session-start h2 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font: 400 20px/1.25 var(--serif);
+}
+
+.session-start-lede {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.session-lock {
+  overflow: hidden;
+  max-width: 52ch;
+  color: var(--muted);
+  font: 11px/1 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: start;
+  gap: 10px;
+  margin: 16px 0 8px;
+}
+
+.selection-row-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.selection-mr {
+  align-self: start;
+  padding-top: 23px;
+  white-space: nowrap;
+}
+
+.session-start .session-import {
+  margin-top: 14px;
+}
+
+.session-marker,
+.session-step {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 18px auto;
+  padding: 6px 12px;
+  max-width: 100%;
+  border: 1px dashed var(--line);
+  border-radius: var(--r);
+  color: var(--muted);
+  font: 11px/1.5 var(--mono);
+}
+
+.session-marker::before {
+  content: "──";
+  color: var(--line-strong, var(--line));
+}
+
+.session-marker::after {
+  content: "──";
+  color: var(--line-strong, var(--line));
+}
+
+.session-step {
+  justify-content: space-between;
+  border-style: solid;
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.session-step[data-status="done"] {
+  color: var(--muted);
+}
+
+.session-step[data-status="done"] .session-step-state::after {
+  content: " ✓";
+  color: var(--ok, #2e7d4f);
+}
+
+.session-step-index {
+  flex: none;
+  color: var(--muted);
+}
+
+.session-step-state {
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.session-working {
+  max-width: 100%;
+  margin: 10px auto 18px;
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 12px;
+  color: var(--muted);
+  font: 11px/1.6 var(--mono);
+}
+
+.session-working summary {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-working ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+
+.session-working-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-right: 6px;
+}
+
+.session-working-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: session-think 1.1s var(--ease) infinite;
+}
+
+.session-working-dots i:nth-child(2) {
+  animation-delay: .16s;
+}
+
+.session-working-dots i:nth-child(3) {
+  animation-delay: .32s;
+}
+
+.btn.armed {
+  border-color: var(--danger, #b42318);
+  color: var(--danger, #b42318);
+}
+
+.env-list,
+.workflow-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.env-row {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper-2);
+}
+
+.env-remove {
+  margin-bottom: 1px;
+}
+
+.workflow-default {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name name mr"
+    "model effort mr";
+  align-items: start;
+  gap: 8px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper-2);
+}
+
+.workflow-name {
+  grid-area: name;
+  margin: 0;
+  color: var(--ink);
+  font: 600 12px/1 var(--sans);
+}
+
+.workflow-model {
+  grid-area: model;
+}
+
+.workflow-effort {
+  grid-area: effort;
+}
+
+.workflow-mr {
+  grid-area: mr;
+  align-self: end;
+  white-space: nowrap;
+}
+
+.sweep-model {
+  margin-top: 2px;
+}
+
+@media (max-width: 900px) {
+  .selection-row,
+  .env-row,
+  .sweep-model,
+  .workflow-default {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-default {
+    grid-template-areas:
+      "name"
+      "model"
+      "effort"
+      "mr";
+  }
+
+  .workflow-mr,
+  .selection-mr {
+    align-self: start;
+    padding-top: 0;
   }
 }
 

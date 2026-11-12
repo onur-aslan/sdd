@@ -6,10 +6,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  beginSessionPublish,
   commitSessionWork,
   createSessionPublishPlan,
-  publishSessionWork
+  publishSessionWork,
+  sessionBranchName,
+  sessionSlug
 } from '../cli/session-publish.js';
 
 function git(cwd, args) {
@@ -36,43 +37,76 @@ function createRepo() {
   return root;
 }
 
-function planFor(root, overrides = {}) {
+function planFor(overrides = {}) {
   return createSessionPublishPlan({
     flow: 'enhancement',
     brief: 'Add a command palette',
     id: '11111111-2222-3333-4444-555555555555',
-    request: { publish: true, push: false, pr: false, ...overrides }
+    request: { publish: true, mr: false, ...overrides }
   });
 }
 
-test('session publishing refuses a dirty checkout before creating a branch', async (t) => {
-  const root = createRepo();
-  const before = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+// A session worktree is created before the agent starts. The tests do the same
+// work in the checkout: cut the session branch and tag its starting point.
+function beginOnBranch(root, publish) {
+  const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
 
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(root, ['checkout', '-q', '-b', publish.branch]);
+  publish.base = base;
+  publish.startedSha = git(root, ['rev-parse', 'HEAD']);
+  publish.status = 'branch';
 
-  fs.writeFileSync(path.join(root, 'scratch.txt'), 'dirty\n', 'utf8');
+  return publish;
+}
 
-  const publish = planFor(root);
-
-  await beginSessionPublish({ cwd: root, publish });
-
-  assert.equal(publish.status, 'skipped');
-  assert.match(publish.reason, /uncommitted changes/);
-  assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), before);
+test('the session branch name carries the flow, a brief slug, the date, and a short id', () => {
+  assert.equal(
+    sessionBranchName({
+      flow: 'enhancement',
+      brief: 'Add a command palette!',
+      id: '11111111-2222-3333-4444-555555555555',
+      date: new Date(2026, 9, 19)
+    }),
+    'sdd/enhancement/add-a-command-palette-20261019-111111'
+  );
+  assert.equal(sessionSlug('  ***  '), 'change');
+  assert.match(
+    sessionBranchName({ flow: 'feature', brief: 'Saved searches', date: new Date(2026, 9, 19) }),
+    /^sdd\/feature\/saved-searches-20261019$/
+  );
 });
 
-test('session publishing creates the branch up front and commits on finish', async (t) => {
+test('the publish plan is plain data and defaults to a push with an MR', () => {
+  const plan = createSessionPublishPlan({
+    flow: 'feature',
+    brief: 'Add saved searches',
+    id: 'abcdef12-0000-0000-0000-000000000000',
+    request: {},
+    saved: { mr: true, prPreset: 'gitlab', prCommand: 'glab mr create' }
+  });
+
+  assert.equal(plan.enabled, true);
+  assert.equal(plan.flow, 'feature');
+  assert.equal(plan.push, true);
+  assert.equal(plan.pr, true);
+  assert.equal(plan.status, 'idle');
+  assert.equal(plan.prPreset, 'gitlab');
+  assert.equal(plan.prCommand, 'glab mr create');
+  assert.match(plan.branch, /^sdd\/feature\/add-saved-searches-\d{8}-abcdef$/);
+
+  const noMr = planFor({ mr: true });
+  const withoutMr = planFor({ mr: false });
+
+  assert.equal(noMr.pr, true);
+  assert.equal(withoutMr.pr, false);
+});
+
+test('the session commits its work on the branch it started from', async (t) => {
   const root = createRepo();
-  const base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  const publish = planFor(root);
+  const publish = beginOnBranch(root, planFor());
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  await beginSessionPublish({ cwd: root, publish });
-
-  assert.equal(publish.status, 'branch');
-  assert.equal(publish.base, base);
   assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), publish.branch);
 
   fs.writeFileSync(path.join(root, 'palette.txt'), 'Search everything.\n', 'utf8');
@@ -88,24 +122,25 @@ test('session publishing creates the branch up front and commits on finish', asy
   assert.match(git(root, ['log', '-1', '--format=%s']), /command palette/);
   assert.equal(git(root, ['status', '--porcelain']), '');
 
+  publish.push = false;
+
   const pushed = await publishSessionWork({
     cwd: root,
     publish,
     title: 'feat: add a command palette',
     body: 'Body',
-    dir: path.join(root, '.sdd', 'sessions', publish.sessionId)
+    dir: path.join(root, '.sdd', 'sessions', 'enhancement', publish.sessionId)
   });
 
   assert.equal(pushed.status, 'committed');
 });
 
-test('session publishing keeps a commit the agent made on its own branch', async (t) => {
+test('the session keeps a commit the agent made on its own branch', async (t) => {
   const root = createRepo();
-  const publish = planFor(root);
+  const publish = beginOnBranch(root, planFor());
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  await beginSessionPublish({ cwd: root, publish });
   fs.writeFileSync(path.join(root, 'palette.txt'), 'Search everything.\n', 'utf8');
   git(root, ['add', '-A']);
   git(root, ['commit', '-q', '-m', 'agent: implement palette']);
@@ -124,7 +159,25 @@ test('session publishing keeps a commit the agent made on its own branch', async
   assert.equal(git(root, ['rev-parse', '--abbrev-ref', 'HEAD']), publish.branch);
 });
 
-test('session publishing pushes the branch and runs the merge request command', async (t) => {
+test('an idle session reports that there was nothing to commit', async (t) => {
+  const root = createRepo();
+  const publish = beginOnBranch(root, planFor());
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  await commitSessionWork({
+    cwd: root,
+    publish,
+    title: 'feat: add a command palette',
+    body: 'Body'
+  });
+
+  assert.equal(publish.status, 'no-changes');
+  assert.match(publish.reason, /nothing to commit/i);
+  assert.equal(publish.commits.length, 0);
+});
+
+test('the session pushes the branch and runs the merge request command', async (t) => {
   const root = createRepo();
   const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-session-remote-'));
   const tools = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-session-tools-'));
@@ -140,11 +193,10 @@ test('session publishing pushes the branch and runs the merge request command', 
 
   fs.writeFileSync(mrScript, "console.log('https://forge.example/mr/1');\n", 'utf8');
 
-  const publish = planFor(root, { push: true, pr: true });
+  const publish = beginOnBranch(root, planFor({ mr: true }));
 
   publish.prCommand = JSON.stringify([process.execPath, mrScript]);
 
-  await beginSessionPublish({ cwd: root, publish });
   fs.writeFileSync(path.join(root, 'palette.txt'), 'Search everything.\n', 'utf8');
 
   await commitSessionWork({
@@ -159,7 +211,7 @@ test('session publishing pushes the branch and runs the merge request command', 
     publish,
     title: 'feat: add a command palette',
     body: 'Body',
-    dir: path.join(root, '.sdd', 'sessions', publish.sessionId)
+    dir: path.join(root, '.sdd', 'sessions', 'enhancement', publish.sessionId)
   });
 
   assert.equal(publish.status, 'published');

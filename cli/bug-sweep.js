@@ -5,7 +5,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { assertNativeSkillAvailable, buildNativeSkillCall, resolveNativeSkillAgent } from './native-skills.js';
+import { assertNativeSkillAvailable, buildNativeSkillCall } from './native-skills.js';
 import { fetchGitLabIssues, normalizeGitLabProject, parseGitLabIssueKeys } from './gitlab-issues.js';
 import { closeTrackerIssue } from './issue-tracker.js';
 
@@ -2663,14 +2663,28 @@ async function processBug({
   fs.writeFileSync(promptFile, renderBugPrompt({ bug, maxTurns: options.maxTurns, resultFile }), 'utf8');
 
   // The skill reads the task file named in the invocation; the task file holds
-  // the bug, the attempt limit, and the result path.
-  const skillCall = buildNativeSkillCall('bug-sweep', options.agentPreset);
+  // the bug, the attempt limit, and the result path. Studio always runs Claude
+  // Code, and the model/effort flags apply to this one child process.
+  const skillCall = buildNativeSkillCall('bug-sweep');
   const shortPrompt = `${skillCall}\n\n${promptFile}`;
-  const invocation = buildAgentInvocation(options.agentCommand, { prompt: shortPrompt, promptFile });
+  const modelArgs = [];
+
+  if (options.model && !options.agentCommand.argv.includes('--model')) {
+    modelArgs.push('--model', options.model);
+  }
+  if (options.effort && !options.agentCommand.argv.includes('--effort')) {
+    modelArgs.push('--effort', options.effort);
+  }
+
+  const invocation = buildAgentInvocation(
+    { ...options.agentCommand, argv: [...options.agentCommand.argv, ...modelArgs] },
+    { prompt: shortPrompt, promptFile }
+  );
   const spec = buildSpawnSpec(invocation);
   const logStream = fs.createWriteStream(logFile, { flags: 'w' });
   const env = {
     ...process.env,
+    ...(options.agentEnv ?? {}),
     SDD_BUG_KEY: key,
     SDD_BUG_RESULT_FILE: resultFile,
     SDD_BUG_PROMPT_FILE: promptFile,
@@ -3024,8 +3038,7 @@ export async function runBugSweep(argv, dependencies = {}) {
 
     if (!preflight.dryRun) {
       const cwd = dependencies.cwd ?? process.cwd();
-      const agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, preflight.agentCommand);
-      assertNativeSkillAvailable(cwd, agentPreset, 'bug-sweep');
+      assertNativeSkillAvailable(cwd, 'bug-sweep');
     }
 
     return runScheduledSweep(schedule, dependencies);
@@ -3046,8 +3059,10 @@ async function runSingleSweep(argv, dependencies = {}) {
   }
 
   const cwd = dependencies.cwd ?? process.cwd();
-  options.agentPreset = resolveNativeSkillAgent(dependencies.agentPreset, options.agentCommand);
-  if (!options.dryRun) assertNativeSkillAvailable(cwd, options.agentPreset, 'bug-sweep');
+  options.model = dependencies.model ?? '';
+  options.effort = dependencies.effort ?? '';
+  options.agentEnv = dependencies.agentEnv ?? {};
+  if (!options.dryRun) assertNativeSkillAvailable(cwd, 'bug-sweep');
   if (!options.branch) {
     options.branch = await resolveSweepBranch(cwd, options);
   }

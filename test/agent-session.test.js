@@ -12,33 +12,33 @@ import {
   buildLiveCommand,
   buildSessionInstructions,
   buildSessionOpening,
-  buildTurnPrompt,
-  detectAgentEngine,
   findSessionArtifact,
   mergePermissionDecision,
-  parseAgentReply,
   permissionHookSettings,
   readSessionSkill,
   refExists,
   resolveSessionFlow,
   runInterviewSession,
   snapshotArtifacts,
-  stripAnsi,
   validateBrief,
   validateSessionSkillArguments
 } from '../cli/agent-session.js';
-import { DEFAULT_AGENT_COMMAND, normalizeAgentCommand } from '../cli/bug-sweep.js';
+import { normalizeAgentCommand } from '../cli/bug-sweep.js';
 
-function installFixtureSkill(root, agent, flow) {
-  const directories = {
-    claude: '.claude/skills',
-    cursor: '.cursor/skills',
-    codex: '.agents/skills',
-    opencode: '.opencode/skills'
-  };
-  const target = path.join(root, directories[agent], resolveSessionFlow(flow).skillName, 'SKILL.md');
+function installFixtureSkill(root, flow) {
+  const target = path.join(root, '.claude', 'skills', resolveSessionFlow(flow).skillName, 'SKILL.md');
+
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(resolveSessionFlow(flow).skillPath, target);
+}
+
+function installSkills(root, names) {
+  for (const name of names) {
+    const file = path.join(root, '.claude', 'skills', name, 'SKILL.md');
+
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `---\nname: ${name}\ndescription: Test fixture skill.\n---\n`, 'utf8');
+  }
 }
 
 test('findSessionArtifact ignores flows without an artifact and specs that predate the session', (t) => {
@@ -109,7 +109,7 @@ test('each flow resolves to its own skill and final artifact', () => {
   assert.ok(readSessionSkill('merge').length > 100);
 });
 
-test('every flow sends its request straight to the native skill with no second contract', () => {
+test('every flow sends its request straight to the native Claude skill with no second contract', () => {
   const calls = {
     enhancement: '/enhancement',
     feature: '/deep-spec',
@@ -118,12 +118,10 @@ test('every flow sends its request straight to the native skill with no second c
   };
 
   for (const [flow, call] of Object.entries(calls)) {
-    const instructions = buildSessionInstructions(flow, { agentPreset: 'claude' });
-
-    assert.equal(instructions, call);
-    assert.equal(buildSessionOpening(flow, '  Do the thing.  ', { agentPreset: 'claude' }), `${call}\n\nDo the thing.`);
+    assert.equal(buildSessionInstructions(flow), call);
+    assert.equal(buildSessionOpening(flow, '  Do the thing.  '), `${call}\n\nDo the thing.`);
     assert.doesNotMatch(
-      buildSessionOpening(flow, 'Do the thing.', { agentPreset: 'claude' }),
+      buildSessionOpening(flow, 'Do the thing.'),
       /What the final|## Rules for this session|## How this session works|## Diagrams|Open Questions|first single question/
     );
   }
@@ -137,128 +135,17 @@ test('every flow sends its request straight to the native skill with no second c
 test('the spec-issue flow forwards the request to deep-spec without a second contract', () => {
   // The skill owns the interview and its spec-format.md output rules, so the
   // flow must not add a competing outline.
-  assert.equal(buildSessionInstructions('specIssue', { agentPreset: 'claude' }), '/deep-spec');
-  assert.equal(buildSessionOpening('specIssue', '  Add saved searches.  ', { agentPreset: 'claude' }), '/deep-spec\n\nAdd saved searches.');
-  assert.equal(
-    buildSessionOpening('specIssue', 'Add saved searches.', { agentPreset: 'opencode' }),
-    "Load the deep-spec skill by exact name using OpenCode's native skill tool, then follow it.\n\nAdd saved searches."
-  );
+  assert.equal(buildSessionInstructions('specIssue'), '/deep-spec');
+  assert.equal(buildSessionOpening('specIssue', '  Add saved searches.  '), '/deep-spec\n\nAdd saved searches.');
 
-  const firstTurn = buildTurnPrompt('specIssue', { brief: 'Add saved searches.', agentPreset: 'cursor' });
-  assert.equal(firstTurn, '/deep-spec\n\nAdd saved searches.');
+  const opening = buildSessionOpening('specIssue', 'Add saved searches.');
 
-  const opening = buildSessionOpening('specIssue', 'Add saved searches.', { agentPreset: 'claude' });
   assert.doesNotMatch(opening, /What the final spec must contain/);
   assert.doesNotMatch(opening, /Markdown feature spec/);
   assert.doesNotMatch(opening, /Open Questions/);
 
   // The Feature tab now forwards to the same skill without a competing outline.
-  assert.equal(buildSessionInstructions('feature', { agentPreset: 'claude' }), '/deep-spec');
-});
-
-test('Codex session instructions explicitly invoke the native skill without overriding its limits', () => {
-  const instructions = buildSessionInstructions('enhancement', {
-    agentPreset: 'codex',
-    skillText: '# Should not be embedded'
-  });
-
-  assert.match(instructions, /^Use the \$enhancement skill\./);
-  assert.doesNotMatch(instructions, /Studio arguments:.*max_turns|Bound the implementation-and-verification loop/);
-  assert.doesNotMatch(instructions, /Should not be embedded/);
-});
-
-test('every supported preset uses its own native skill call, with no embedded-skill fallback', () => {
-  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'claude' }), /^\/enhancement/);
-  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'cursor' }), /^\/enhancement/);
-  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'codex' }), /^Use the \$enhancement skill/);
-  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'opencode' }), /native skill tool/);
-  assert.match(buildSessionInstructions('enhancement', { agentPreset: 'antigravity' }), /^\/enhancement/);
-  assert.throws(() => buildSessionInstructions('enhancement'), /native skill-capable agent/);
-  assert.throws(() => buildSessionInstructions('enhancement', { agentPreset: 'custom', skillText: '# silently embedded' }), /native skill-capable agent/);
-});
-
-test('the opening message carries the request, and turn prompts replay the transcript', () => {
-  const opening = buildSessionOpening('enhancement', '  Add a command palette.  ', { agentPreset: 'claude' });
-
-  assert.equal(opening, '/enhancement\n\nAdd a command palette.');
-
-  const firstTurn = buildTurnPrompt('feature', { brief: 'Add saved searches.', agentPreset: 'cursor' });
-  assert.equal(firstTurn, '/deep-spec\n\nAdd saved searches.');
-
-  const prompt = buildTurnPrompt('feature', {
-    brief: 'Add saved searches.',
-    agentPreset: 'cursor',
-    turns: [
-      { role: 'assistant', text: 'Which storage?' },
-      { role: 'user', text: 'Local disk.' }
-    ]
-  });
-
-  assert.match(prompt, /^\/deep-spec/);
-  assert.match(prompt, /Add saved searches\./);
-  assert.match(prompt, /Which storage\?/);
-  assert.match(prompt, /Local disk\./);
-  assert.match(prompt, /Continue the interview\./);
-
-  // The skill decides when the plan is approved; the replay only carries the
-  // conversation forward.
-  const enhancement = buildTurnPrompt('enhancement', {
-    brief: 'Add a command palette.',
-    agentPreset: 'cursor',
-    turns: [
-      { role: 'assistant', text: '# Plan\n\nUse local disk.' },
-      { role: 'user', text: 'Approved. Implement it.' }
-    ]
-  });
-
-  assert.match(enhancement, /^\/enhancement/);
-  assert.match(enhancement, /Approved\. Implement it\./);
-  assert.match(enhancement, /Continue the interview\./);
-});
-
-test('the engine follows the executable, and the live command asks before writing', () => {
-  const claude = normalizeAgentCommand(DEFAULT_AGENT_COMMAND);
-
-  assert.equal(detectAgentEngine(claude, 'claude'), 'live');
-  assert.equal(detectAgentEngine(normalizeAgentCommand('["cursor-agent","-p"]'), 'cursor'), 'turn');
-  assert.equal(detectAgentEngine(normalizeAgentCommand('["claude","-p"]'), 'custom'), 'live');
-
-  const live = buildLiveCommand(claude);
-
-  assert.deepEqual(live.args.slice(0, 7), [
-    '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'
-  ]);
-  // Reads are pre-approved; nothing is hard-denied, because a denied tool can
-  // never become a PermissionRequest the human could answer.
-  assert.ok(live.args.includes('--allowedTools'));
-  assert.equal(live.args.includes('--disallowedTools'), false);
-
-  // Flags the user already set are not duplicated.
-  const custom = buildLiveCommand(normalizeAgentCommand('["claude","-p","--output-format","stream-json"]'));
-
-  assert.equal(custom.args.filter((arg) => arg === '--output-format').length, 1);
-
-  const hooked = buildLiveCommand(claude, { settings: '{"hooks":{}}' });
-
-  assert.deepEqual(hooked.args.slice(-2), ['--settings', '{"hooks":{}}']);
-
-  const ownSettings = buildLiveCommand(
-    normalizeAgentCommand('["claude","-p","--settings","{}"]'),
-    { settings: '{"hooks":{}}' }
-  );
-
-  assert.equal(ownSettings.args.filter((arg) => arg === '--settings').length, 1);
-});
-
-test('the permission hook settings point at the shipped hook script', () => {
-  const settings = JSON.parse(permissionHookSettings(path.join(os.tmpdir(), 'session')));
-
-  const hook = settings.hooks.PermissionRequest[0].hooks[0];
-
-  assert.equal(hook.type, 'command');
-  assert.match(hook.command, /session-hook\.js/);
-  assert.match(hook.command, /permission\.json/);
-  assert.equal(hook.timeout, 60);
+  assert.equal(buildSessionInstructions('feature'), '/deep-spec');
 });
 
 test('the flows stay separate and cover every skill', () => {
@@ -274,24 +161,11 @@ test('the merge skill owns the target protection and the integration branch', ()
   assert.match(skill, /Never push/);
   assert.match(skill, /merge\/<source>-into-<target>/);
 
-  assert.equal(buildSessionInstructions('merge', { agentPreset: 'claude' }), '/merge');
+  assert.equal(buildSessionInstructions('merge'), '/merge');
   assert.equal(
-    buildSessionOpening('merge', 'Merge "feat/x" into "main".', { agentPreset: 'claude' }),
+    buildSessionOpening('merge', 'Merge "feat/x" into "main".'),
     '/merge\n\nMerge "feat/x" into "main".'
   );
-
-  const turn = buildTurnPrompt('merge', {
-    brief: 'Merge "feat/x" into "main".',
-    agentPreset: 'codex',
-    turns: [
-      { role: 'assistant', text: 'Resolve auth.ts by keeping both guards?' },
-      { role: 'user', text: 'Yes, keep both.' }
-    ]
-  });
-
-  assert.match(turn, /Resolve auth\.ts by keeping both guards\?/);
-  assert.match(turn, /Yes, keep both\./);
-  assert.match(turn, /Continue the interview\./);
 });
 
 test('the merge guard allows edits and safe git but refuses the target and a push', () => {
@@ -318,52 +192,54 @@ test('the merge guard allows edits and safe git but refuses the target and a pus
   assert.equal(decide('Read', 'src/app.js'), null);
 });
 
-test('a live merge session ends when the integration branch exists', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-merge-'));
-  const ref = 'merge/feat-into-main';
+test('the live command allows reads, pre-approves nothing else, and carries the model and effort', () => {
+  const claude = normalizeAgentCommand('["claude","-p"]');
+  const live = buildLiveCommand(claude);
 
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.deepEqual(live.args.slice(0, 7), [
+    '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'
+  ]);
+  // Reads are pre-approved; nothing is hard-denied, because a denied tool can
+  // never become a PermissionRequest the human could answer.
+  assert.ok(live.args.includes('--allowedTools'));
+  assert.equal(live.args.includes('--disallowedTools'), false);
 
-  spawnSync('git', ['init', '-q'], { cwd: root });
-  spawnSync('git', ['config', 'user.email', 'merge@example.com'], { cwd: root });
-  spawnSync('git', ['config', 'user.name', 'Merge Bot'], { cwd: root });
-  fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
-  spawnSync('git', ['add', '-A'], { cwd: root });
-  spawnSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
-  installFixtureSkill(root, 'claude', 'merge');
+  // Flags the user already set are not duplicated.
+  const custom = buildLiveCommand(normalizeAgentCommand('["claude","-p","--output-format","stream-json"]'));
 
-  let questions = 0;
+  assert.equal(custom.args.filter((arg) => arg === '--output-format').length, 1);
 
-  const summary = await runInterviewSession(
-    {
-      flow: 'merge',
-      brief: 'Merge "feat" into "main".',
-      agentPreset: 'claude',
-      agentCmd: DEFAULT_AGENT_COMMAND,
-      merge: { source: 'feat', target: 'main', ref, baseSha: '' }
-    },
-    {
-      cwd: root,
-      id: 'merge-live-1',
-      spawnProcess: fakeLiveSpawn(() => {
-        // The branch is the structural end of the session, not a phrase.
-        spawnSync('git', ['branch', ref], { cwd: root });
+  const selected = buildLiveCommand(claude, { model: 'claude-sonnet-4-5', effort: 'high' });
 
-        return '# Merge report\n\nClean merge; the integration branch is ready.';
-      }),
-      terminate: (child) => child.kill?.(),
-      emit: () => {},
-      waitForAnswer: async () => {
-        questions += 1;
-        return { cancelled: true };
-      }
-    }
+  assert.deepEqual(selected.args.slice(-4), ['--model', 'claude-sonnet-4-5', '--effort', 'high']);
+
+  // Default means "do not send the flag".
+  const defaults = buildLiveCommand(claude, { model: 'Default', effort: 'default' });
+
+  assert.equal(defaults.args.includes('--model'), false);
+  assert.equal(defaults.args.includes('--effort'), false);
+
+  const hooked = buildLiveCommand(claude, { settings: '{"hooks":{}}' });
+
+  assert.deepEqual(hooked.args.slice(-2), ['--settings', '{"hooks":{}}']);
+
+  const ownSettings = buildLiveCommand(
+    normalizeAgentCommand('["claude","-p","--settings","{}"]'),
+    { settings: '{"hooks":{}}' }
   );
 
-  assert.equal(questions, 0);
-  assert.equal(summary.ref, ref);
-  assert.equal(refExists(root, ref), true);
-  assert.match(summary.output, /Clean merge/);
+  assert.equal(ownSettings.args.filter((arg) => arg === '--settings').length, 1);
+});
+
+test('the permission hook settings point at the shipped hook script', () => {
+  const settings = JSON.parse(permissionHookSettings(path.join(os.tmpdir(), 'session')));
+
+  const hook = settings.hooks.PermissionRequest[0].hooks[0];
+
+  assert.equal(hook.type, 'command');
+  assert.match(hook.command, /session-hook\.js/);
+  assert.match(hook.command, /permission\.json/);
+  assert.equal(hook.timeout, 60);
 });
 
 // A stand-in for Claude Code in stream-json mode: it answers each user message
@@ -422,18 +298,64 @@ function fakeLiveSpawn(reply) {
   };
 }
 
+test('a live merge session ends when the integration branch exists', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-merge-'));
+  const ref = 'merge/feat-into-main';
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  spawnSync('git', ['init', '-q'], { cwd: root });
+  spawnSync('git', ['config', 'user.email', 'merge@example.com'], { cwd: root });
+  spawnSync('git', ['config', 'user.name', 'Merge Bot'], { cwd: root });
+  fs.writeFileSync(path.join(root, 'app.txt'), 'v1\n', 'utf8');
+  spawnSync('git', ['add', '-A'], { cwd: root });
+  spawnSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+  installFixtureSkill(root, 'merge');
+
+  let questions = 0;
+
+  const summary = await runInterviewSession(
+    {
+      flow: 'merge',
+      brief: 'Merge "feat" into "main".',
+      merge: { source: 'feat', target: 'main', ref, baseSha: '' }
+    },
+    {
+      cwd: root,
+      id: 'merge-live-1',
+      spawnProcess: fakeLiveSpawn(() => {
+        // The branch is the structural end of the session, not a phrase.
+        spawnSync('git', ['branch', ref], { cwd: root });
+
+        return '# Merge report\n\nClean merge; the integration branch is ready.';
+      }),
+      terminate: (child) => child.kill?.(),
+      emit: () => {},
+      waitForAnswer: async () => {
+        questions += 1;
+        return { cancelled: true };
+      }
+    }
+  );
+
+  assert.equal(questions, 0);
+  assert.equal(summary.ref, ref);
+  assert.equal(refExists(root, ref), true);
+  assert.match(summary.output, /Clean merge/);
+});
+
 test('a live session asks, waits, then finishes at the plan', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-live-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'claude', 'enhancement');
+  installFixtureSkill(root, 'enhancement');
 
   const asked = [];
   const outputs = [];
   let replies = 0;
 
   const summary = await runInterviewSession(
-    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
+    { flow: 'enhancement', brief: 'Add a command palette.' },
     {
       cwd: root,
       id: 'live-1',
@@ -464,7 +386,7 @@ test('a live session asks, waits, then finishes at the plan', async (t) => {
   assert.equal(summary.engine, 'live');
   assert.match(summary.output, /# Plan/);
   assert.match(outputs.join(''), /# Plan/);
-  assert.ok(fs.existsSync(path.join(root, '.sdd', '.gitignore')));
+  assert.ok(fs.existsSync(path.join(root, '.sdd', 'sessions', 'enhancement', 'live-1', 'session.md')));
 });
 
 test('a live session implements after the plan is approved and ends at the report', async (t) => {
@@ -472,10 +394,10 @@ test('a live session implements after the plan is approved and ends at the repor
   const asked = [];
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'claude', 'enhancement');
+  installFixtureSkill(root, 'enhancement');
 
   const summary = await runInterviewSession(
-    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
+    { flow: 'enhancement', brief: 'Add a command palette.' },
     {
       cwd: root,
       id: 'implement-1',
@@ -514,17 +436,110 @@ test('a live session implements after the plan is approved and ends at the repor
   assert.equal(summary.output, '# Report\n\nAdded palette.js and verified it.');
 });
 
+test('a live session starts the claude child with the selected model, effort, and Claude environment', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-select-'));
+  let spawned = null;
+  const spawn = fakeLiveSpawn(() => '# Plan\n\nLocal disk.');
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'enhancement');
+
+  await runInterviewSession(
+    { flow: 'enhancement', brief: 'Add a command palette.' },
+    {
+      cwd: root,
+      id: 'select-1',
+      spawnProcess: (command, args, options) => {
+        spawned = { command, args, options };
+        return spawn(command, args, options);
+      },
+      model: 'nim-model',
+      effort: 'high',
+      agentEnv: { ANTHROPIC_MODEL: 'nim-model', ANTHROPIC_BASE_URL: 'https://proxy.example' },
+      terminate: (child) => child.kill?.(),
+      emit: () => {},
+      waitForAnswer: async () => ({ done: true })
+    }
+  );
+
+  assert.ok(spawned.args.includes('--model'));
+  assert.ok(spawned.args.includes('nim-model'));
+  assert.ok(spawned.args.includes('--effort'));
+  assert.ok(spawned.args.includes('high'));
+  assert.equal(spawned.options.env.ANTHROPIC_MODEL, 'nim-model');
+  assert.equal(spawned.options.env.ANTHROPIC_BASE_URL, 'https://proxy.example');
+  assert.equal(spawned.options.env.SDD_SESSION_ID, 'select-1');
+  assert.equal(spawned.options.env.SDD_SESSION_FLOW, 'enhancement');
+});
+
+test('a feature session writes the spec and runs the chosen build in the same process', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-build-'));
+  const specRelative = path.join('docs', 'sdd', 'features', 'saved-searches', 'spec.md');
+  const featureRelative = path.join('docs', 'sdd', 'features', 'saved-searches', 'feature.md');
+  const events = [];
+
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  installFixtureSkill(root, 'feature');
+  installSkills(root, ['sdd-developer', 'spec-to-task', 'feature-tdd']);
+
+  const summary = await runInterviewSession(
+    { flow: 'feature', brief: 'Add saved searches.' },
+    {
+      cwd: root,
+      id: 'build-1',
+      spawnProcess: fakeLiveSpawn((turn) => {
+        if (turn === 1) {
+          fs.mkdirSync(path.dirname(path.join(root, specRelative)), { recursive: true });
+          fs.writeFileSync(path.join(root, specRelative), '# Spec\n\nSaved searches live in the sidebar.\n', 'utf8');
+          return '# Spec written.';
+        }
+
+        if (turn === 2) {
+          assert.match(fs.readFileSync(path.join(root, specRelative), 'utf8'), /Saved searches/);
+          fs.writeFileSync(path.join(root, featureRelative), '# Tasks\n', 'utf8');
+          return 'Tasks written.';
+        }
+
+        return '# Report\n\nImplemented and verified.';
+      }),
+      terminate: (child) => child.kill?.(),
+      emit: (event) => events.push(event),
+      waitForBuild: async (request) => {
+        assert.match(request.spec, /spec\.md$/);
+        return { pipeline: 'tdd', verify: false };
+      },
+      waitForAnswer: async () => {
+        throw new Error('A feature build must not ask for an interview answer.');
+      }
+    }
+  );
+
+  const types = events.map((event) => event.type);
+
+  assert.ok(types.includes('build-ready'));
+  assert.ok(types.includes('build-started'));
+  assert.ok(types.includes('build-done'));
+  assert.deepEqual(
+    events.filter((event) => event.type === 'build-step' && event.status === 'done').map((event) => event.skill),
+    ['spec-to-task', 'feature-tdd']
+  );
+  assert.deepEqual(summary.build.steps.map((step) => step.skill), ['spec-to-task', 'feature-tdd']);
+  assert.equal(summary.build.verify, false);
+  assert.equal(summary.build.verified, false);
+  assert.match(summary.output, /# Spec/);
+});
+
 test('a live session answers a permission request through the studio', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-perm-'));
-  const dir = path.join(root, '.sdd', 'enhancements', 'perm-1');
+  const dir = path.join(root, '.sdd', 'sessions', 'enhancement', 'perm-1');
   const decisions = [];
   const spawnAgent = fakeLiveSpawn(() => '# Plan\n\nLocal disk.');
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'claude', 'enhancement');
+  installFixtureSkill(root, 'enhancement');
 
   const summary = await runInterviewSession(
-    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
+    { flow: 'enhancement', brief: 'Add a command palette.' },
     {
       cwd: root,
       id: 'perm-1',
@@ -572,71 +587,19 @@ test('a live session answers a permission request through the studio', async (t)
   assert.equal(JSON.parse(fs.readFileSync(answerFile, 'utf8')).behavior, 'allow');
 });
 
-test('a turn-based session replays the transcript and ends at the written spec', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-turn-'));
-
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'cursor', 'feature');
-
-  const prompts = [];
-  const asked = [];
-
-  const summary = await runInterviewSession(
-    { flow: 'feature', brief: 'Add saved searches.', agentPreset: 'cursor', agentCmd: '["cursor-agent","-p"]' },
-    {
-      cwd: root,
-      id: 'turn-1',
-      spawnImpl: async (command, args, options) => {
-        prompts.push(fs.readFileSync(path.join(root, '.sdd', 'features', 'turn-1', 'prompt.md'), 'utf8'));
-
-        let text;
-
-        if (prompts.length === 1) {
-          text = 'Where do saved searches live?';
-        } else {
-          // deep-spec writes the spec only when the interview is over.
-          const specDir = path.join(root, 'docs', 'sdd', 'features', 'saved-searches');
-
-          fs.mkdirSync(specDir, { recursive: true });
-          fs.writeFileSync(path.join(specDir, 'spec.md'), '# Spec\n\nSaved searches live in the sidebar.\n', 'utf8');
-          text = '# Spec written.';
-        }
-
-        options.onStdout(text);
-
-        return { code: 0, stdout: text, stderr: '' };
-      },
-      emit: () => {},
-      waitForAnswer: async (question) => {
-        asked.push(question.text);
-        return { answer: 'In the sidebar.' };
-      }
-    }
-  );
-
-  assert.deepEqual(asked, ['Where do saved searches live?']);
-  assert.equal(summary.engine, 'turn');
-  // The written spec is the preview, not the one-line confirmation.
-  assert.match(summary.output, /Saved searches live in the sidebar/);
-  assert.match(summary.artifact, /spec\.md$/);
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[0], /Add saved searches\./);
-  assert.match(prompts[1], /In the sidebar\./);
-});
-
 test('a cancelled session reports a cancellation instead of a failure', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-cancel-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'claude', 'enhancement');
+  installFixtureSkill(root, 'enhancement');
 
   await assert.rejects(
     runInterviewSession(
-      { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'claude', agentCmd: DEFAULT_AGENT_COMMAND },
+      { flow: 'enhancement', brief: 'Add a command palette.' },
       {
         cwd: root,
         id: 'cancel-1',
-        spawnProcess: fakeLiveSpawn(() => '```interview\nStill going?\n```'),
+        spawnProcess: fakeLiveSpawn(() => 'Still going?'),
         terminate: (child) => child.kill?.(),
         emit: () => {},
         waitForAnswer: async () => ({ cancelled: true })
@@ -646,115 +609,41 @@ test('a cancelled session reports a cancellation instead of a failure', async (t
   );
 });
 
-test('structured agent output is read as text, not echoed as JSON', () => {
-  const stdout = [
-    JSON.stringify({ type: 'step_start', part: { type: 'step-start' } }),
-    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Where are saved searches stored?' } }),
-    JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'read' } }),
-    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Pick one.' } }),
-    JSON.stringify({ type: 'step_finish', part: { type: 'step-finish' } })
-  ].join('\n');
-
-  const parsed = parseAgentReply(stdout);
-
-  assert.equal(parsed.structured, true);
-  assert.equal(parsed.error, '');
-  assert.equal(parsed.text, 'Where are saved searches stored?\n\nPick one.');
-});
-
-test('Codex JSON output exposes assistant messages and hides tool results', () => {
-  const stdout = [
-    JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'cat secret.txt', aggregated_output: 'SECRET_FILE_CONTENT' } }),
-    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'I read the file. What should happen next?' } })
-  ].join('\n');
-  const parsed = parseAgentReply(stdout);
-
-  assert.equal(parsed.structured, true);
-  assert.equal(parsed.text, 'I read the file. What should happen next?');
-  assert.doesNotMatch(parsed.text, /SECRET_FILE_CONTENT/);
-});
-
-test('a structured error event fails the turn instead of becoming the reply', () => {
-  const parsed = parseAgentReply(JSON.stringify({
-    type: 'error',
-    error: {
-      name: 'APIError',
-      data: { message: "model 'llama3.2:3b' not found" }
-    }
-  }));
-
-  assert.equal(parsed.text, '');
-  assert.match(parsed.error, /llama3\.2:3b' not found/);
-
-  // OpenCode's abort shape has no top-level `type` at all.
-  const aborted = parseAgentReply(JSON.stringify({
-    error: { type: 'aborted', message: 'Tool execution interrupted' },
-    content: []
-  }));
-
-  assert.equal(aborted.structured, true);
-  assert.match(aborted.error, /Tool execution interrupted/);
-
-  assert.equal(stripAnsi('\u001b[0m> build \u00b7 qwen\u001b[0m\r\nPONG'), '> build \u00b7 qwen\nPONG');
-});
-
-test('a turn-based session displays only assistant text from structured output', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-json-'));
+test('an unexpected exit fails the session instead of parking it', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-exit-'));
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'opencode', 'enhancement');
-
-  const stdout = [
-    JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'read', output: 'SECRET_FILE_CONTENT' } }),
-    JSON.stringify({ type: 'text', part: { type: 'text', text: 'Which layout?' } }),
-    JSON.stringify({ type: 'step_finish', part: { type: 'step-finish' } })
-  ].join('\n');
-  let asked = '';
-  const events = [];
-  const stderr = '\u001b[0m> build \u00b7 llama\u001b[0m\n';
-
-  await runInterviewSession(
-    { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'opencode', agentCmd: '["opencode","run"]' },
-    {
-      cwd: root,
-      id: 'json-1',
-      spawnImpl: async (command, args, options) => {
-        options.onStdout(stdout);
-        options.onStderr(stderr);
-        return { code: 0, stdout, stderr };
-      },
-      emit: (event) => events.push(event),
-      waitForAnswer: async (question) => {
-        asked = question.text;
-
-        return { done: true };
-      }
-    }
-  );
-
-  assert.equal(asked, 'Which layout?');
-  const shown = events.filter((event) => event.type === 'output').map((event) => event.chunk).join('');
-  assert.equal(shown, 'Which layout?');
-  assert.doesNotMatch(shown, /SECRET_FILE_CONTENT|llama/);
-});
-
-test('a turn-based session reports a non-zero agent exit', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-agent-session-fail-'));
-
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  installFixtureSkill(root, 'cursor', 'enhancement');
+  installFixtureSkill(root, 'enhancement');
 
   await assert.rejects(
     runInterviewSession(
-      { flow: 'enhancement', brief: 'Add a command palette.', agentPreset: 'cursor', agentCmd: '["cursor-agent","-p"]' },
+      { flow: 'enhancement', brief: 'Add a command palette.' },
       {
         cwd: root,
-        id: 'fail-1',
-        spawnImpl: async () => ({ code: 2, stdout: '', stderr: 'boom' }),
+        id: 'exit-1',
+        spawnProcess: () => {
+          const child = new EventEmitter();
+
+          child.pid = 4343;
+          child.killed = false;
+          child.exitCode = null;
+          child.stdin = new PassThrough();
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          child.kill = () => true;
+
+          setTimeout(() => {
+            child.stderr.write('provider authentication failed\n');
+            child.emit('close', 2);
+          }, 20);
+
+          return child;
+        },
+        terminate: (child) => child.kill?.(),
         emit: () => {},
-        waitForAnswer: async () => ({ answer: 'nope' })
+        waitForAnswer: async () => ({ done: true })
       }
     ),
-    /exited with code 2/
+    /closed the session .*provider authentication failed/
   );
 });

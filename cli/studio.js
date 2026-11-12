@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEFAULT_AGENT_COMMAND,
   DEFAULT_FETCH_LIMIT,
   DEFAULT_GITHUB_API_URL,
   DEFAULT_GITHUB_STATE,
@@ -21,7 +20,6 @@ import {
   fetchGitHubBugs,
   fetchJiraBugs,
   fetchJiraProjects,
-  normalizeAgentCommand,
   normalizeGitHubRepo,
   probeGitHub,
   probeJira,
@@ -32,116 +30,40 @@ import {
 import { fetchGitLabIssues, normalizeGitLabProject } from './gitlab-issues.js';
 import { closeTrackerIssue, createTrackerIssue, normalizeSourceIssue, specIssueTitle } from './issue-tracker.js';
 import { runInterviewSession, resolveSessionFlow, validateBrief, validateSessionSkillArguments } from './agent-session.js';
-import { FEATURE_PIPELINES, resolveFeaturePipeline, runFeatureBuild } from './feature-build.js';
+import { FEATURE_PIPELINES } from './feature-build.js';
 import {
-  abandonSessionPublish,
-  beginSessionPublish,
-  commitSessionWork,
   createSessionPublishPlan,
+  commitSessionWork,
   publishSessionWork,
   sessionSlug
 } from './session-publish.js';
+import {
+  STUDIO_EFFORTS,
+  STUDIO_WORKFLOWS,
+  isSecretClaudeEnvKey,
+  modelOptionsFromEnv,
+  normalizeClaudeEnv,
+  normalizeWorkflowSettings,
+  parseClaudeModelList,
+  resolveWorkflowSelection
+} from './agent-config.js';
+import {
+  SESSION_HISTORY_LIMIT,
+  listSessionHistory,
+  readSessionMarkdown,
+  readSessionRecord,
+  removeSessionHistory,
+  writeSessionRecord
+} from './session-history.js';
+import {
+  cleanupOrphanWorktrees,
+  copySpecToMainCheckout,
+  createSessionWorktree,
+  removeSessionWorktree
+} from './session-worktree.js';
 
 export const STUDIO_DEFAULT_PORT = 4321;
 export const STUDIO_DEFAULT_HOST = '127.0.0.1';
-
-// The dashboard offers a one-click agent choice. The command is still passed
-// through --agent-cmd, so the sweep itself stays agent-agnostic.
-export const STUDIO_AGENT_PRESETS = [
-  { id: 'claude', label: 'Claude Code', command: DEFAULT_AGENT_COMMAND },
-  { id: 'cursor', label: 'Cursor', command: '["cursor-agent","-p","--force","--output-format","stream-json"]' },
-  { id: 'opencode', label: 'OpenCode', command: '["opencode","run","--format","json","--agent","build"]' },
-  { id: 'codex', label: 'Codex', command: '["codex","exec","--json","--skip-git-repo-check"]' },
-  { id: 'antigravity', label: 'Antigravity', command: '["agy","--dangerously-skip-permissions","-p"]' },
-  { id: 'custom', label: 'Custom command', command: '' }
-];
-
-function findCodexExecutable(env = process.env) {
-  const candidates = [];
-  const add = (candidate) => {
-    if (!candidate || !fs.existsSync(candidate)) return;
-    try {
-      const stat = fs.statSync(candidate);
-      if (stat.isFile()) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs });
-    } catch {
-      // A stale PATH entry or an install being updated should not block startup.
-    }
-  };
-
-  for (const directory of String(env.PATH ?? '').split(path.delimiter)) {
-    if (directory) {
-      for (const name of ['codex.exe', 'codex.cmd', 'codex.bat']) {
-        add(path.join(directory.replace(/^"|"$/g, ''), name));
-      }
-    }
-  }
-
-  // The desktop installer stores Codex in a versioned directory under this
-  // location. Studio may have been launched before that directory was added
-  // to PATH, so check the install location directly as well.
-  const localAppData = env.LOCALAPPDATA
-    || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Local') : '');
-  const codexBin = localAppData ? path.join(localAppData, 'OpenAI', 'Codex', 'bin') : '';
-  if (codexBin && fs.existsSync(codexBin)) {
-    add(path.join(codexBin, 'codex.exe'));
-    try {
-      for (const entry of fs.readdirSync(codexBin, { withFileTypes: true })) {
-        if (entry.isDirectory()) add(path.join(codexBin, entry.name, 'codex.exe'));
-      }
-    } catch {
-      // PATH candidates above remain usable if the install directory is unreadable.
-    }
-  }
-
-  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  return candidates[0]?.path ?? '';
-}
-
-function findAntigravityExecutable(env = process.env) {
-  const candidates = [];
-  const add = (candidate) => {
-    if (!candidate || !fs.existsSync(candidate)) return;
-    try {
-      const stat = fs.statSync(candidate);
-      if (stat.isFile()) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs });
-    } catch {
-      // A stale PATH entry or an install being updated should not block startup.
-    }
-  };
-
-  for (const directory of String(env.PATH ?? '').split(path.delimiter)) {
-    if (directory) {
-      for (const name of ['agy.exe', 'agy.cmd', 'agy.bat', 'agy', 'antigravity.exe', 'antigravity.cmd', 'antigravity.bat', 'antigravity']) {
-        add(path.join(directory.replace(/^"|"$/g, ''), name));
-      }
-    }
-  }
-
-  const localAppData = env.LOCALAPPDATA
-    || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Local') : '');
-  if (localAppData) {
-    add(path.join(localAppData, 'agy', 'bin', 'agy.exe'));
-    add(path.join(localAppData, 'Programs', 'Antigravity', 'bin', 'agy.exe'));
-  }
-
-  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  return candidates[0]?.path ?? '';
-}
-
-function studioAgentPresets() {
-  const codexExecutable = process.platform === 'win32' ? findCodexExecutable() : '';
-  const agyExecutable = findAntigravityExecutable();
-
-  return STUDIO_AGENT_PRESETS.map((preset) => {
-    if (preset.id === 'codex' && codexExecutable) {
-      return { ...preset, command: JSON.stringify([codexExecutable, 'exec', '--json', '--skip-git-repo-check']) };
-    }
-    if (preset.id === 'antigravity' && agyExecutable) {
-      return { ...preset, command: JSON.stringify([agyExecutable, '--dangerously-skip-permissions', '-p']) };
-    }
-    return preset;
-  });
-}
 
 // One-click forge choices. GitHub uses the built-in gh path (an empty command).
 // The other presets are JSON argv, so `--pr-cmd` runs them without a shell and
@@ -341,7 +263,6 @@ export function buildSweepArgs(request = {}) {
   value('--base', request.base);
   value('--branch', request.branch);
   value('--tag', request.tag);
-  value('--agent-cmd', request.agentCmd);
   value('--verify-cmd', request.verifyCmd);
   value('--max-turns', request.maxTurns);
   value('--limit', request.limit);
@@ -404,6 +325,7 @@ function isAlive(job) {
     job.status === 'queued'
     || job.status === 'running'
     || job.status === 'waiting'
+    || job.status === 'stopping'
     || job.status === 'cancelling'
   );
 }
@@ -435,8 +357,9 @@ async function localBranches(cwd) {
     .filter(Boolean);
 }
 
-// A merge starts only from a clean tree with two real local branches. The
-// integration branch is created by the agent, never by this validation.
+// A merge starts from two real local branches. The worktree is created from the
+// target, so the main checkout does not need to be clean or on the target; the
+// explicit land action is what requires a clean tree.
 async function validateMergeRequest(cwd, request = {}) {
   const source = String(request.source ?? '').trim();
   const target = String(request.target ?? '').trim();
@@ -463,21 +386,6 @@ async function validateMergeRequest(cwd, request = {}) {
 
   if (!branches.includes(target)) {
     throw mergeError(400, `The target branch "${target}" does not exist.`);
-  }
-
-  const dirty = (await runProcess('git', ['status', '--porcelain'], { cwd })).stdout.trim();
-
-  if (dirty) {
-    const changed = dirty
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .slice(0, 6)
-      .map((line) => line.trim());
-
-    throw mergeError(
-      409,
-      `The working tree has changes. Commit or stash them before a merge: ${changed.join(', ')}.`
-    );
   }
 
   const ref = `merge/${source}-into-${target}`;
@@ -507,8 +415,8 @@ function mergeBrief(merge) {
   ].join('\n');
 }
 
-function sessionWorkDir(cwd, id) {
-  return path.join(path.resolve(cwd, DEFAULT_WORK_DIR), 'sessions', id);
+function sessionStateDir(cwd, flow, id) {
+  return path.join(path.resolve(cwd, DEFAULT_WORK_DIR), 'sessions', String(flow), String(id));
 }
 
 function sessionChangeTitle(flow, brief) {
@@ -710,17 +618,90 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
   const jobs = new Map();
   const pendingInputs = new Map();
   const pendingPermissions = new Map();
-  let activeJobId = null;
+  const pendingBuilds = new Map();
+  let activeSweepId = null;
 
-  function snapshot(job) {
-    const request = { ...job.request };
+  // Sessions left on disk by an earlier Studio process are read-only history.
+  // Any status that was still alive is honestly closed as failed; nothing is
+  // resumed automatically.
+  for (const flow of STUDIO_WORKFLOWS.filter((entry) => entry !== 'bugSweep')) {
+    for (const record of listSessionHistory(cwd, flow, { limit: 500 })) {
+      const status = ['queued', 'running', 'waiting', 'stopping', 'cancelling'].includes(record.status)
+        ? 'failed'
+        : String(record.status ?? 'done');
+      const job = {
+        id: String(record.id),
+        type: flow,
+        flow,
+        status,
+        createdAt: record.createdAt ?? new Date(0).toISOString(),
+        updatedAt: record.updatedAt ?? record.createdAt ?? new Date(0).toISOString(),
+        request: publicRequest(record.request ?? { brief: record.brief ?? '' }),
+        publish: record.publish ?? null,
+        specIssue: record.specIssue ?? null,
+        result: record.result ?? null,
+        error: record.error ?? (status === 'failed' ? 'The Studio restarted before this session finished.' : null),
+        events: Array.isArray(record.events) ? record.events : [],
+        turns: Array.isArray(record.turns) ? record.turns : [],
+        selection: publicSelection(record.selection) ?? {
+          model: record.model ?? '',
+          effort: record.effort ?? '',
+          mr: true
+        },
+        branch: record.branch ?? '',
+        base: record.base ?? '',
+        worktree: record.worktree ?? '',
+        historical: true,
+        readOnly: true,
+        listeners: new Set(),
+        cancelled: false
+      };
 
-    // Never echo the saved token back through the API.
+      jobs.set(job.id, job);
+    }
+  }
+
+  // Remove worktrees that no active session owns. Startup is the only moment
+  // when every worktree on disk is guaranteed to be an orphan.
+  const ready = cleanupOrphanWorktrees(cwd, { run: runProcess }).catch(() => []);
+
+  function publicRequest(request = {}) {
+    const copy = { ...request };
+
+    // Never echo saved tracker or Claude credentials through the API or into
+    // session history.
     for (const key of SECRET_SETTINGS_KEYS) {
-      if (request[key]) {
-        request[key] = '***';
+      if (copy[key]) {
+        copy[key] = '***';
       }
     }
+
+    if (copy.claudeEnv && typeof copy.claudeEnv === 'object') {
+      copy.claudeEnv = Object.fromEntries(
+        Object.entries(copy.claudeEnv).map(([key, value]) => [
+          key,
+          isSecretClaudeEnvKey(key) ? '' : value
+        ])
+      );
+    }
+
+    return copy;
+  }
+
+  function publicSelection(selection) {
+    if (!selection) {
+      return null;
+    }
+
+    return {
+      model: selection.model ?? '',
+      effort: selection.effort ?? '',
+      mr: selection.mr !== false
+    };
+  }
+
+  function snapshot(job) {
+    const request = publicRequest(job.request);
 
     return {
       id: job.id,
@@ -734,7 +715,15 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       specIssue: job.specIssue ?? null,
       result: job.result,
       error: job.error,
-      events: job.events
+      events: job.events,
+      selection: publicSelection(job.selection),
+      model: job.selection?.model ?? '',
+      effort: job.selection?.effort ?? '',
+      branch: job.branch ?? '',
+      base: job.base ?? '',
+      worktree: job.worktree ?? '',
+      historical: job.historical === true,
+      readOnly: job.readOnly === true
     };
   }
 
@@ -752,6 +741,63 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       } catch {
         // A disconnected client must not break the run.
       }
+    }
+  }
+
+  // session.json/session.md are written after each turn and on every terminal
+  // transition, not on every token, so a long reply does not thrash the disk.
+  function persist(job) {
+    if (job.historical) {
+      return;
+    }
+
+    const result = job.result && typeof job.result === 'object' ? { ...job.result } : job.result ?? null;
+
+    if (result && typeof result === 'object') {
+      delete result.turns;
+    }
+
+    try {
+      writeSessionRecord(cwd, {
+        id: job.id,
+        flow: job.flow ?? job.type,
+        brief: job.request?.brief ?? '',
+        status: job.status,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        model: job.selection?.model ?? '',
+        effort: job.selection?.effort ?? '',
+        branch: job.branch ?? job.publish?.branch ?? '',
+        base: job.base ?? '',
+        worktree: job.worktree ?? '',
+        request: publicRequest(job.request),
+        selection: publicSelection(job.selection),
+        publish: job.publish ?? null,
+        specIssue: job.specIssue ?? null,
+        result,
+        error: job.error ?? null,
+        events: job.events,
+        turns: job.turns ?? []
+      });
+    } catch {
+      // History is a convenience; the live session must not fail on it.
+    }
+  }
+
+  function rememberWorkflow(flow, selection) {
+    const store = readStore(cwd);
+    const workflows = normalizeWorkflowSettings(store.workflows);
+
+    workflows[flow] = {
+      model: selection.model,
+      effort: selection.effort,
+      mr: selection.mr !== false
+    };
+
+    try {
+      writeSettings(cwd, { ...store, workflows });
+    } catch {
+      // Remembering the selection must never block a start.
     }
   }
 
@@ -831,26 +877,26 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     }
   }
 
-  function assertIdle() {
-    const active = activeJobId ? jobs.get(activeJobId) : null;
+  // Only bug-sweep is serial. Live sessions run in their own worktrees and do
+  // not compete for the main checkout.
+  function assertSweepIdle() {
+    const active = activeSweepId ? jobs.get(activeSweepId) : null;
 
     if (active && isAlive(active)) {
-      const label = active.type === 'bug-sweep'
-        ? 'sweep'
-        : active.type === 'feature-build'
-          ? 'build'
-          : 'session';
-      const error = new Error(`A ${label} is already running (${active.id}). Wait for it or cancel it first.`);
+      const error = new Error(`A sweep is already running (${active.id}). Wait for it or stop it first.`);
       error.statusCode = 409;
       throw error;
     }
   }
 
   function startSweep(request = {}) {
-    assertIdle();
+    assertSweepIdle();
+
+    const store = readStore(cwd);
+    const selection = resolveWorkflowSelection(store, 'bugSweep', request);
 
     // A minimal request inherits the choices the user already made once.
-    const effective = applySettings(request, readStore(cwd));
+    const effective = applySettings(request, store);
 
     try {
       writeSettings(cwd, effective);
@@ -858,14 +904,23 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       // Remembering settings is a convenience; never block a sweep on it.
     }
 
+    // Write the workflow selection after the merged settings, or the older
+    // store snapshot would overwrite it again.
+    rememberWorkflow('bugSweep', selection);
+
     const id = randomUUID();
     const job = {
       id,
       type: 'bug-sweep',
+      flow: 'bugSweep',
       status: 'running',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       request: effective,
+      selection,
+      branch: effective.branch ?? '',
+      base: effective.base ?? '',
+      worktree: '',
       events: [],
       listeners: new Set(),
       result: null,
@@ -875,7 +930,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     };
 
     jobs.set(id, job);
-    activeJobId = id;
+    activeSweepId = id;
 
     emit(job, { type: 'job-started', jobId: id, kind: 'bug-sweep' });
 
@@ -888,7 +943,9 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
           cwd,
           fetchImpl,
           spawnImpl,
-          agentPreset: effective.agentPreset,
+          model: selection.model,
+          effort: selection.effort,
+          agentEnv: selection.environment,
           now,
           signal: job.controller.signal,
           logger: (line) => emit(job, { type: 'log', line }),
@@ -912,69 +969,146 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         emit(job, { type: 'job-failed', message: error.message });
       })
       .finally(() => {
-        if (activeJobId === id) {
-          activeJobId = null;
+        if (activeSweepId === id) {
+          activeSweepId = null;
         }
       });
 
     return job;
   }
 
-  // An interview session with the agent: one question at a time, then a plan
-  // that the enhancement flow implements after approval, a spec (feature), or a
-  // spec that the studio files as a tracker issue (specIssue). The skill files
-  // stay untouched on disk.
-  function startSession(flow, request = {}) {
+  async function disposeWorktree(job, { deleteBranch }) {
+    const worktreePath = job.worktree;
+
+    if (!worktreePath) {
+      return;
+    }
+
+    try {
+      await removeSessionWorktree({
+        cwd,
+        worktreePath,
+        branch: job.branch,
+        deleteBranch,
+        run: runProcess
+      });
+    } catch {
+      // The outcome is already decided; a locked directory is retried by the
+      // next startup orphan sweep.
+    }
+
+    job.worktree = '';
+    emit(job, { type: 'worktree-removed', branch: job.branch ?? '', deleted: deleteBranch });
+  }
+
+  async function publishJob(job, summary) {
+    const publish = job.publish;
+
+    if (!publish || !job.worktree) {
+      return;
+    }
+
+    const flow = job.flow ?? job.type;
+    const spec = summary?.artifact
+      ? path.relative(job.worktree, summary.artifact).split(path.sep).join('/')
+      : '';
+    const slug = flow === 'feature'
+      ? featureNameFromSpec(summary?.artifact ?? '')
+      : sessionSlug(job.request?.brief, flow);
+    const title = flow === 'feature'
+      ? `feat: implement ${slug}`
+      : sessionChangeTitle(flow, job.request?.brief);
+    const body = sessionChangeBody({
+      flow,
+      id: job.id,
+      brief: job.request?.brief,
+      extra: spec ? `Spec: ${spec}` : ''
+    });
+
+    await commitSessionWork({
+      cwd: job.worktree,
+      publish,
+      title,
+      body,
+      emit: (event) => emit(job, event),
+      run: runProcess
+    });
+
+    if (publish.commits.length > 0 && publish.status !== 'failed') {
+      await publishSessionWork({
+        cwd: job.worktree,
+        publish,
+        title,
+        body,
+        dir: sessionStateDir(cwd, flow, job.id),
+        emit: (event) => emit(job, event),
+        run: runProcess
+      });
+    }
+  }
+
+  // A live session with the agent. Every flow uses one long-lived process; the
+  // worktree is created before the process starts and removed when it ends.
+  async function startSession(flow, request = {}) {
+    await ready;
+
     const config = resolveSessionFlow(flow);
+    const store = readStore(cwd);
+    const selection = resolveWorkflowSelection(store, config.id, request);
 
-    assertIdle();
+    rememberWorkflow(config.id, selection);
 
-    const brief = validateBrief(request.brief);
-    const merge = request.merge && typeof request.merge === 'object' ? request.merge : null;
+    // A merge needs branches, not a written brief; its prompt is derived from
+    // the two branch names. Every other workflow still needs a brief. Validation
+    // always runs, even when the dashboard sends a prebuilt merge object.
+    const merge = config.id === 'merge'
+      ? await validateMergeRequest(cwd, {
+        source: request.source ?? request.merge?.source,
+        target: request.target ?? request.merge?.target
+      })
+      : null;
+    const brief = merge ? mergeBrief(merge) : validateBrief(request.brief);
     const skillArguments = validateSessionSkillArguments(config.id, request.skillArguments);
-    const saved = readStore(cwd);
-    const agentPreset = request.agentPreset ?? saved.agentPreset;
-    const agentCmd = request.agentCmd ?? saved.agentCmd;
     const isSpecIssue = config.id === 'specIssue';
     const sourceIssue = config.id === 'merge' ? null : normalizeSourceIssue(request.issue);
     const closeIssues = config.id !== 'merge'
       && !isSpecIssue
-      && (request.closeIssues === undefined ? saved.closeIssues === true : request.closeIssues === true);
-    const specIssueTarget = isSpecIssue ? resolveSpecIssueTarget({ request, saved }) : null;
+      && (request.closeIssues === undefined ? store.closeIssues === true : request.closeIssues === true);
+    const specIssueTarget = isSpecIssue ? resolveSpecIssueTarget({ request, saved: store }) : null;
+    const id = randomUUID();
 
-    // Validate before the job exists, so a bad agent command is a 400 instead of
-    // a session that fails with no useful output.
+    let worktree;
+
     try {
-      normalizeAgentCommand(agentCmd ?? DEFAULT_AGENT_COMMAND);
+      worktree = await createSessionWorktree({
+        cwd,
+        id,
+        flow: config.id,
+        brief: brief,
+        base: config.id === 'merge' ? merge.target : (request.base ?? store.base ?? '')
+      });
     } catch (error) {
-      error.statusCode = 400;
+      error.statusCode = error.statusCode ?? 400;
       throw error;
     }
 
-    try {
-      // Remember the agent for next time without dropping the rest of the store
-      // (project, base branch, toggles, and the saved Jira credential).
-      writeSettings(cwd, { ...saved, agentPreset, agentCmd });
-    } catch {
-      // Remembering the agent is a convenience; never block a session on it.
+    const publish = ['enhancement', 'feature'].includes(config.id)
+      ? createSessionPublishPlan({
+        flow: config.id,
+        brief: brief,
+        id,
+        request: { mr: request.mr ?? selection.mr },
+        saved: store
+      })
+      : null;
+
+    if (publish) {
+      publish.branch = worktree.branch;
+      publish.base = worktree.base;
+      publish.startedSha = worktree.startedSha;
+      publish.status = 'branch';
     }
 
-    const id = randomUUID();
-    const publishChoice = normalizePublish(saved.publish, saved);
-    const publish = config.id === 'merge' || isSpecIssue
-      ? null
-      : createSessionPublishPlan({
-        flow: config.id,
-        brief,
-        id,
-        request: {
-          publish: request.publish,
-          base: request.base,
-          push: request.push ?? true,
-          pr: request.pr ?? (publishChoice === 'pr')
-        },
-        saved
-      });
     const job = {
       id,
       type: config.id,
@@ -983,145 +1117,116 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       request: {
-        brief,
-        agentPreset,
-        agentCmd,
+        brief: brief,
         skillArguments,
+        ...(selection.model ? { model: selection.model } : {}),
+        ...(selection.effort ? { effort: selection.effort } : {}),
+        mr: selection.mr,
         ...(sourceIssue ? { issue: sourceIssue } : {}),
         closeIssues,
-        ...(publish ? { publish: publish.enabled } : {}),
         ...(specIssueTarget ? { specIssueTarget } : {}),
         ...(merge ? { merge } : {})
+      },
+      selection: {
+        model: selection.model,
+        effort: selection.effort,
+        mr: selection.mr
       },
       issue: sourceIssue,
       closeIssues,
       specIssueTarget,
       publish,
+      branch: worktree.branch,
+      base: worktree.base,
+      worktree: worktree.path,
       events: [],
       listeners: new Set(),
+      turns: [],
       result: null,
       error: null,
       cancelled: false,
+      historical: false,
+      readOnly: false,
       controller: new AbortController()
     };
 
     jobs.set(id, job);
-    activeJobId = id;
 
     emit(job, { type: 'job-started', jobId: id, kind: config.id });
+    emit(job, {
+      type: 'worktree',
+      path: worktree.path,
+      branch: worktree.branch,
+      base: worktree.base
+    });
 
     (async () => {
-      if (publish) {
-        try {
-          ensureWorkDir(path.resolve(cwd, DEFAULT_WORK_DIR));
-        } catch {
-          // The session still runs; publish will report a clear git error if it must.
-        }
+      try {
+        const summary = await runInterviewSession(
+          {
+            flow: config.id,
+            brief: brief,
+            skillArguments,
+            ...(merge ? { merge } : {})
+          },
+          {
+            cwd: worktree.path,
+            stateCwd: cwd,
+            id,
+            spawnProcess,
+            terminate,
+            signal: job.controller.signal,
+            emit: (event) => emit(job, event),
+            waitForAnswer: (question) => askInput(job, question),
+            waitForPermission: (permission) => askPermission(job, permission),
+            waitForBuild: (build) => askBuild(job, build),
+            model: selection.model,
+            effort: selection.effort,
+            agentEnv: selection.environment,
+            merge,
+            onTurn: ({ turns }) => {
+              job.turns = turns;
+              persist(job);
+            }
+          }
+        );
 
-        await beginSessionPublish({
-          cwd,
-          publish,
-          emit: (event) => emit(job, event)
-        });
-      }
-
-      return runInterviewSession(
-        { flow: config.id, brief, agentPreset, agentCmd, skillArguments, ...(merge ? { merge } : {}) },
-        {
-          cwd,
-          id,
-          spawnImpl,
-          spawnProcess,
-          terminate,
-          signal: job.controller.signal,
-          emit: (event) => emit(job, event),
-          waitForAnswer: (question) => askInput(job, question),
-          waitForPermission: (request) => askPermission(job, request),
-          logger: (line) => emit(job, { type: 'log', line })
-        }
-      );
-    })()
-      .then(async (summary) => {
         job.result = summary;
+        job.turns = summary.turns ?? job.turns;
 
         if (job.cancelled) {
-          if (publish) {
-            await abandonSessionPublish({
-              cwd,
-              publish,
-              emit: (event) => emit(job, event),
-              reason: 'The session was stopped before it finished, so its changes were not published.'
-            });
-          }
-
-          job.status = 'cancelled';
-          emit(job, { type: 'job-cancelled', summary });
+          await disposeWorktree(job, { deleteBranch: true });
+          job.status = 'stopped';
+          persist(job);
+          emit(job, { type: 'job-stopped', summary });
           return;
         }
 
-        if (publish?.status === 'branch' && config.id === 'enhancement') {
-          const title = sessionChangeTitle('enhancement', brief);
-          const body = sessionChangeBody({ flow: 'enhancement', id, brief });
-
-          await commitSessionWork({
-            cwd,
-            publish,
-            title,
-            body,
-            emit: (event) => emit(job, event)
-          });
-
-          if (publish.commits.length > 0) {
-            await publishSessionWork({
-              cwd,
-              publish,
-              title,
-              body,
-              dir: sessionWorkDir(cwd, id),
-              emit: (event) => emit(job, event)
-            });
-          }
+        if (publish) {
+          await publishJob(job, summary);
         }
 
-        if (publish?.status === 'branch' && config.id === 'feature') {
-          const slug = sessionSlug(brief, 'feature');
-          const spec = summary.artifact
-            ? path.relative(cwd, summary.artifact).split(path.sep).join('/')
-            : '';
-          const title = `docs: add ${slug} spec`;
-          const body = sessionChangeBody({
-            flow: 'feature',
-            id,
-            brief,
-            extra: spec ? `Spec: ${spec}` : ''
-          });
-
-          // The spec is committed on the session branch now; the build adds its
-          // own commit and only then pushes the branch and opens the MR.
-          await commitSessionWork({
-            cwd,
-            publish,
-            title,
-            body,
-            emit: (event) => emit(job, event),
-            cleanupWhenEmpty: false
-          });
-        }
-
-        // The spec issue flow has no branch and no build: once deep-spec writes
-        // the spec, the studio files it as one tracker issue.
         if (config.id === 'specIssue' && summary.artifact) {
-          await publishSpecIssue(job, summary.artifact);
+          const destination = copySpecToMainCheckout({
+            cwd,
+            source: summary.artifact,
+            featureName: featureNameFromSpec(summary.artifact)
+          });
+
+          summary.artifact = destination;
+          await publishSpecIssue(job, destination);
         }
 
-        // Every workflow uses the same closing rule: push (or push + merge
-        // request) must succeed first. A feature session only commits the spec;
-        // its issue closes after the build publishes the implementation.
-        if (config.id === 'enhancement' && publishCompleted(publish)) {
+        if ((config.id === 'enhancement' || config.id === 'feature') && publishCompleted(publish)) {
           await closeJobIssue(job);
         }
 
+        // specIssue never publishes, so its throwaway branch goes with the
+        // worktree. Published enhancement/feature branches stay for the MR.
+        await disposeWorktree(job, { deleteBranch: config.id === 'specIssue' });
+
         job.status = 'done';
+        persist(job);
         emit(job, {
           type: 'job-done',
           summary: {
@@ -1129,36 +1234,27 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
             engine: summary.engine,
             flow: summary.flow,
             ...(summary.ref ? { ref: summary.ref } : {}),
+            ...(summary.build ? { build: summary.build } : {}),
             ...(publish ? { publish } : {}),
             ...(job.specIssue ? { issue: job.specIssue } : {})
           }
         });
-      })
-      .catch(async (error) => {
+      } catch (error) {
         job.error = error.message;
 
-        if (publish) {
-          await abandonSessionPublish({
-            cwd,
-            publish,
-            emit: (event) => emit(job, event),
-            reason: 'The session failed, so its changes were not published.'
-          });
-        }
-
-        if (job.cancelled) {
-          job.status = 'cancelled';
-          emit(job, { type: 'job-cancelled', summary: job.result });
+        if (job.cancelled || error.cancelled) {
+          await disposeWorktree(job, { deleteBranch: true });
+          job.status = 'stopped';
+          persist(job);
+          emit(job, { type: 'job-stopped', summary: job.result });
         } else {
+          await disposeWorktree(job, { deleteBranch: true });
           job.status = 'failed';
+          persist(job);
           emit(job, { type: 'job-failed', message: error.message });
         }
-      })
-      .finally(() => {
-        if (activeJobId === id) {
-          activeJobId = null;
-        }
-      });
+      }
+    })();
 
     return job;
   }
@@ -1171,21 +1267,16 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     return startSession('feature', request);
   }
 
-  // The separate planning workflow: deep-spec writes the spec, then the studio
-  // files it as one tracker issue. It never branches, builds, or closes issues.
+  // The separate planning workflow: deep-spec writes the spec, then the Studio
+  // copies it into the main checkout and files it as one tracker issue.
   function startSpecIssue(request = {}) {
     return startSession('specIssue', request);
   }
 
-  // A merge session is the same interview engine with a branch-based end. The
-  // source and target are validated before the job exists, so a dirty tree or a
-  // taken integration branch is a clear 409 instead of a session that fails.
-  async function startMerge(request = {}) {
-    assertIdle();
-
-    const merge = await validateMergeRequest(cwd, request);
-
-    return startSession('merge', { ...request, brief: mergeBrief(merge), merge });
+  // A merge session uses the same live engine. Its worktree is created from the
+  // target branch, so the main checkout can stay wherever it is until "land".
+  function startMerge(request = {}) {
+    return startSession('merge', request);
   }
 
   // Landing is explicit and local: fast-forward the target, never push, never
@@ -1299,162 +1390,46 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     };
   }
 
-  function findBuild(sessionId) {
-    return [...jobs.values()]
-      .filter((job) => job.type === 'feature-build' && job.sessionId === sessionId)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-      .at(-1);
+  // The feature build is a turn in the same job. The human's choice resumes the
+  // waiting live process instead of creating a separate feature-build job.
+  function askBuild(job, request) {
+    job.status = 'waiting';
+    emit(job, {
+      type: 'build-choice',
+      artifact: request?.artifact ?? '',
+      spec: request?.spec ?? ''
+    });
+
+    return new Promise((resolve) => {
+      pendingBuilds.set(job.id, { job, resolve });
+    });
   }
 
-  // After the spec exists the human decides how it gets built. The build is a
-  // job like a sweep: it streams each skill step and can be stopped.
-  function startFeatureBuild(sessionId, request = {}) {
-    const session = jobs.get(sessionId);
+  function submitBuild(jobId, payload = {}) {
+    const pending = pendingBuilds.get(jobId);
 
-    if (!session || session.type !== 'feature') {
-      const error = new Error('Unknown feature session.');
-      error.statusCode = 404;
-      throw error;
+    if (!pending) {
+      return false;
     }
 
-    if (!session.result?.artifact) {
-      const error = new Error('This session has no spec yet. Finish the interview first.');
-      error.statusCode = 400;
-      throw error;
-    }
+    pendingBuilds.delete(jobId);
+    pending.job.status = 'running';
+    pending.resolve({
+      pipeline: payload.pipeline,
+      verify: payload.verify !== false
+    });
 
-    const pipeline = resolveFeaturePipeline(request.pipeline);
-    const verify = request.verify !== false;
-
-    assertIdle();
-
-    const id = randomUUID();
-    const job = {
-      id,
-      type: 'feature-build',
-      flow: 'feature-build',
-      sessionId,
-      status: 'running',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      request: {
-        pipeline: pipeline.id,
-        verify,
-        specPath: session.result.artifact,
-        ...(session.issue ? { issue: session.issue } : {})
-      },
-      issue: session.issue ?? null,
-      closeIssues: session.closeIssues === true,
-      publish: session.publish ?? null,
-      events: [],
-      listeners: new Set(),
-      result: null,
-      error: null,
-      cancelled: false,
-      controller: new AbortController()
-    };
-
-    jobs.set(id, job);
-    activeJobId = id;
-
-    emit(job, { type: 'job-started', jobId: id, kind: 'feature-build' });
-
-    runFeatureBuild(
-      {
-        pipeline: pipeline.id,
-        verify,
-        specPath: session.result.artifact,
-        agentCmd: session.request.agentCmd ?? readStore(cwd).agentCmd,
-        agentPreset: session.request.agentPreset ?? readStore(cwd).agentPreset
-      },
-      {
-        cwd,
-        spawnImpl,
-        signal: job.controller.signal,
-        emit: (event) => emit(job, event)
-      }
-    )
-      .then(async (summary) => {
-        job.result = summary;
-
-        if (job.cancelled) {
-          job.status = 'cancelled';
-          emit(job, { type: 'job-cancelled', summary });
-          return;
-        }
-
-        const publish = job.publish;
-
-        if (publish?.enabled && ['branch', 'committed', 'no-changes'].includes(publish.status)) {
-          const slug = featureNameFromSpec(summary.specPath);
-          const spec = path.relative(cwd, summary.specPath).split(path.sep).join('/');
-          const title = `feat: implement ${slug}`;
-          const body = sessionChangeBody({
-            flow: 'feature',
-            id: session.id,
-            brief: session.request.brief,
-            extra: `Spec: ${spec}`
-          });
-
-          if (['branch', 'committed'].includes(publish.status)) {
-            await commitSessionWork({
-              cwd,
-              publish,
-              title,
-              body,
-              emit: (event) => emit(job, event)
-            });
-          }
-
-          if (publish.commits.length > 0 && publish.status !== 'failed') {
-            await publishSessionWork({
-              cwd,
-              publish,
-              title,
-              body,
-              dir: sessionWorkDir(cwd, session.id),
-              emit: (event) => emit(job, event)
-            });
-          }
-        }
-
-        // The feature issue closes after the build pushed the branch, exactly
-        // like bug fix and enhancement. The spec session itself never closes it.
-        if (publishCompleted(publish)) {
-          await closeJobIssue(job);
-        }
-
-        job.status = 'done';
-        emit(job, { type: 'job-done', summary: { ...summary, ...(publish ? { publish } : {}) } });
-      })
-      .catch((error) => {
-        job.error = error.message;
-
-        if (job.cancelled || error.cancelled) {
-          job.status = 'cancelled';
-          emit(job, { type: 'job-cancelled', summary: job.result });
-        } else {
-          job.status = 'failed';
-          emit(job, { type: 'job-failed', message: error.message });
-        }
-      })
-      .finally(() => {
-        if (activeJobId === id) {
-          activeJobId = null;
-        }
-      });
-
-    return job;
+    return true;
   }
 
   function cancelJob(id) {
     const job = jobs.get(id);
 
-    if (!job || !isAlive(job)) {
+    if (!job || !isAlive(job) || job.readOnly) {
       return false;
     }
 
-    job.status = 'cancelling';
+    job.status = 'stopping';
     job.cancelled = true;
 
     // A session that is waiting for an answer must wake up before it can stop.
@@ -1470,6 +1445,13 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     if (permission) {
       pendingPermissions.delete(id);
       permission.resolve({ behavior: 'deny' });
+    }
+
+    const build = pendingBuilds.get(id);
+
+    if (build) {
+      pendingBuilds.delete(id);
+      build.resolve({ cancelled: true });
     }
 
     job.controller.abort();
@@ -1550,8 +1532,53 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     return true;
   }
 
+  function listSessions(flow) {
+    const matching = [...jobs.values()].filter((job) => (job.flow ?? job.type) === flow);
+    const active = matching
+      .filter((job) => isAlive(job))
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+    const history = matching
+      .filter((job) => !isAlive(job))
+      .sort((left, right) => String(right.updatedAt ?? right.createdAt).localeCompare(String(left.updatedAt ?? left.createdAt)));
+
+    return [...active, ...history].slice(0, SESSION_HISTORY_LIMIT);
+  }
+
+  function sessionDetail(flow, id) {
+    const job = jobs.get(id);
+
+    if (!job || (job.flow ?? job.type) !== flow) {
+      return null;
+    }
+
+    return {
+      job: snapshot(job),
+      markdown: readSessionMarkdown(cwd, flow, id)
+    };
+  }
+
+  function deleteSession(flow, id) {
+    const job = jobs.get(id);
+
+    if (!job || (job.flow ?? job.type) !== flow) {
+      return false;
+    }
+
+    if (isAlive(job)) {
+      const error = new Error('Stop the session before removing it from history.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    removeSessionHistory(cwd, flow, id);
+    jobs.delete(id);
+
+    return true;
+  }
+
   return {
     jobs,
+    ready,
     startSweep,
     startSession,
     startEnhancement,
@@ -1559,13 +1586,15 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     startSpecIssue,
     startMerge,
     landMerge,
-    startFeatureBuild,
-    findBuild,
+    submitBuild,
     cancelJob,
     askInput,
     submitInput,
     askPermission,
     submitPermission,
+    listSessions,
+    sessionDetail,
+    deleteSession,
     snapshot,
     emit
   };
@@ -1763,8 +1792,10 @@ const SETTINGS_KEYS = [
   'source',
   'project',
   'base',
-  'agentPreset',
-  'agentCmd',
+  // Claude Code's environment and workflow-scoped model/effort selections.
+  // Model ids are not stored in a built-in catalog.
+  'claudeEnv',
+  'workflows',
   // One publishing choice replaced the push/pr toggles. The old booleans stay
   // readable so an existing settings file keeps its behaviour on upgrade.
   'publish',
@@ -1856,9 +1887,55 @@ export function readStore(cwd) {
   }
 }
 
-// The public view: safe to return to the dashboard.
+function mergeClaudeEnv(requestValue, savedValue) {
+  const saved = normalizeClaudeEnv(savedValue);
+
+  if (requestValue === undefined || requestValue === null) {
+    return saved;
+  }
+
+  const requestedRaw = requestValue && typeof requestValue === 'object' && !Array.isArray(requestValue)
+    ? requestValue
+    : {};
+  const requested = normalizeClaudeEnv(requestValue);
+  const merged = { ...requested };
+
+  // A blank secret field means "keep the saved value". Removing the row
+  // removes the key entirely, which is the only way to clear a secret.
+  for (const [key, value] of Object.entries(saved)) {
+    if (
+      isSecretClaudeEnvKey(key) &&
+      Object.prototype.hasOwnProperty.call(requestedRaw, key) &&
+      !requestedRaw[key]
+    ) {
+      merged[key] = value;
+    }
+  }
+
+  return merged;
+}
+
+// The public view: safe to return to the dashboard. Workflow selections are
+// normalized so a partial settings file still drives the UI, and secret
+// environment values are removed before the response leaves the server.
+export function publicSettings(store = {}) {
+  const settings = cleanKeys(store, SETTINGS_KEYS);
+
+  settings.claudeEnv = normalizeClaudeEnv(settings.claudeEnv);
+  settings.claudeEnvSecrets = Object.keys(settings.claudeEnv).filter(isSecretClaudeEnvKey);
+  settings.claudeEnv = Object.fromEntries(
+    Object.entries(settings.claudeEnv).map(([key, value]) => [
+      key,
+      isSecretClaudeEnvKey(key) ? '' : value
+    ])
+  );
+  settings.workflows = normalizeWorkflowSettings(settings.workflows);
+
+  return settings;
+}
+
 export function readSettings(cwd) {
-  return cleanKeys(readStore(cwd), SETTINGS_KEYS);
+  return publicSettings(readStore(cwd));
 }
 
 export function hasSavedToken(cwd) {
@@ -1871,6 +1948,14 @@ export function hasSavedGitHubToken(cwd) {
 
 export function writeSettings(cwd, settings = {}) {
   const clean = cleanKeys(settings, STORE_KEYS);
+
+  if (clean.claudeEnv !== undefined) {
+    clean.claudeEnv = normalizeClaudeEnv(clean.claudeEnv);
+  }
+
+  if (clean.workflows !== undefined) {
+    clean.workflows = normalizeWorkflowSettings(clean.workflows);
+  }
 
   ensureWorkDir(path.resolve(cwd, STUDIO_STATE_DIR));
 
@@ -1903,6 +1988,8 @@ export function applySettings(request = {}, settings = {}) {
       merged[key] = settings[key];
     }
   }
+
+  merged.claudeEnv = mergeClaudeEnv(request.claudeEnv, settings.claudeEnv);
 
   return merged;
 }
@@ -2331,6 +2418,52 @@ export async function checkJiraHealth(input = {}, saved = {}) {
   };
 }
 
+// `claude -p "/model"` is a local command, not a model call. It returns the
+// same alias list the interactive picker shows, so Studio never has to ship a
+// stale model catalog. A custom gateway can still add model ids through
+// ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL in the environment editor.
+export async function readClaudeModels({ cwd, claudeEnv = {}, run = runProcess } = {}) {
+  const env = { ...process.env, ...normalizeClaudeEnv(claudeEnv) };
+  const fallback = modelOptionsFromEnv(claudeEnv);
+  let result;
+
+  try {
+    result = await run(
+      'claude',
+      ['-p', '/model', '--output-format', 'json', '--no-session-persistence'],
+      { cwd, env, timeoutMs: 20000 }
+    );
+  } catch (error) {
+    return { models: fallback, available: [], current: '', error: error.message };
+  }
+
+  const stdout = String(result?.stdout ?? '').trim();
+  let parsed = null;
+
+  try {
+    parsed = stdout ? JSON.parse(stdout) : null;
+  } catch {
+    // Older builds may print plain text. Parse it below.
+  }
+
+  const text = parsed?.result ?? stdout;
+  const list = parseClaudeModelList(text, claudeEnv);
+  const models = [...new Set([...list.models, ...fallback])];
+
+  if (models.length === 0) {
+    const detail = String(result?.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ');
+
+    return {
+      models,
+      available: [],
+      current: '',
+      error: detail || `Claude Code returned no model list (exit ${result?.code ?? 'unknown'}).`
+    };
+  }
+
+  return { ...list, models, error: '' };
+}
+
 async function buildConfig({ cwd, version }) {
   const git = await describeGit(cwd);
   const branch = await resolveSweepBranch(cwd);
@@ -2361,12 +2494,13 @@ async function buildConfig({ cwd, version }) {
       usesCliAuth: true
     },
     settings: readSettings(cwd),
-    agents: studioAgentPresets(),
+    workflows: normalizeWorkflowSettings(readStore(cwd).workflows),
+    efforts: STUDIO_EFFORTS,
+    workflowsAvailable: STUDIO_WORKFLOWS,
     prPresets: STUDIO_PR_PRESETS,
     featurePipelines: FEATURE_PIPELINES,
+    sessionHistoryLimit: SESSION_HISTORY_LIMIT,
     defaults: {
-      agentCmd: DEFAULT_AGENT_COMMAND,
-      agentPreset: 'claude',
       prPreset: 'github',
       workDir: DEFAULT_WORK_DIR,
       maxTurns: DEFAULT_MAX_TURNS,
@@ -2417,6 +2551,21 @@ async function handleRequest(req, res, context) {
     return;
   }
 
+  // The interactive `/model` picker is not exposed as a stream-json event.
+  // A short local `claude -p "/model"` probe returns the same list without a
+  // model call, and can be refreshed from Settings.
+  if (req.method === 'GET' && pathname === '/api/claude/models') {
+    const store = readStore(context.cwd);
+    const result = await readClaudeModels({
+      cwd: context.cwd,
+      claudeEnv: store.claudeEnv,
+      run: runProcess
+    });
+
+    sendJson(res, 200, result);
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/settings') {
     sendJson(res, 200, {
       settings: readSettings(context.cwd),
@@ -2425,16 +2574,21 @@ async function handleRequest(req, res, context) {
     });
     return;
   }
-
   if (req.method === 'POST' && pathname === '/api/settings') {
     const body = await readJsonBody(req);
     const patch = body.settings ?? body;
 
-    // Merge so saving the form never drops the token; an explicit "" clears a key.
-    const stored = writeSettings(context.cwd, { ...readStore(context.cwd), ...patch });
+    // Merge so saving the form never drops unrelated values. An explicit ""
+    // clears a tracker token; for Claude environment secrets a blank field
+    // keeps the saved value and removing the row is the explicit clear.
+    const saved = readStore(context.cwd);
+    const merged = { ...saved, ...patch };
+
+    merged.claudeEnv = mergeClaudeEnv(patch.claudeEnv, saved.claudeEnv);
+    const stored = writeSettings(context.cwd, merged);
 
     sendJson(res, 200, {
-      settings: cleanKeys(stored, SETTINGS_KEYS),
+      settings: publicSettings(stored),
       hasSavedToken: Boolean(stored.jiraToken),
       hasSavedGitHubToken: false
     });
@@ -2547,13 +2701,11 @@ async function handleRequest(req, res, context) {
     return;
   }
 
-  // Enhancement and feature sessions share one interview engine; only the skill
-  // and the final artifact differ.
+  // Every session flow exposes the same shape under its own prefix. Sessions in
+  // different flows, and multiple sessions in the same flow, run in parallel.
   for (const route of SESSION_ROUTE_PREFIXES) {
     if (req.method === 'GET' && pathname === route.prefix) {
-      const jobs = [...context.jobManager.jobs.values()]
-        .filter((job) => job.type !== 'feature-build' && (job.flow ?? job.type) === route.flow)
-        .map(context.jobManager.snapshot);
+      const jobs = context.jobManager.listSessions(route.flow).map(context.jobManager.snapshot);
 
       sendJson(res, 200, { jobs });
       return;
@@ -2563,7 +2715,7 @@ async function handleRequest(req, res, context) {
       const body = await readJsonBody(req);
       const job = route.flow === 'merge'
         ? await context.jobManager.startMerge(body)
-        : context.jobManager.startSession(route.flow, body);
+        : await context.jobManager.startSession(route.flow, body);
 
       sendJson(res, 202, { job: context.jobManager.snapshot(job) });
       return;
@@ -2574,7 +2726,7 @@ async function handleRequest(req, res, context) {
     if (req.method === 'GET' && eventsMatch) {
       const job = context.jobManager.jobs.get(eventsMatch[1]);
 
-      if (!job || job.type === 'feature-build' || (job.flow ?? job.type) !== route.flow) {
+      if (!job || (job.flow ?? job.type) !== route.flow) {
         sendJson(res, 404, { error: 'Unknown session.' });
         return;
       }
@@ -2593,14 +2745,21 @@ async function handleRequest(req, res, context) {
     const sessionMatch = new RegExp(`^${route.prefix}/([^/]+)$`).exec(pathname);
 
     if (req.method === 'GET' && sessionMatch) {
-      const job = context.jobManager.jobs.get(sessionMatch[1]);
+      const detail = context.jobManager.sessionDetail(route.flow, sessionMatch[1]);
 
-      if (!job || job.type === 'feature-build' || (job.flow ?? job.type) !== route.flow) {
+      if (!detail) {
         sendJson(res, 404, { error: 'Unknown session.' });
         return;
       }
 
-      sendJson(res, 200, { job: context.jobManager.snapshot(job) });
+      sendJson(res, 200, detail);
+      return;
+    }
+
+    if (req.method === 'DELETE' && sessionMatch) {
+      const deleted = context.jobManager.deleteSession(route.flow, sessionMatch[1]);
+
+      sendJson(res, deleted ? 200 : 404, { deleted });
       return;
     }
   }
@@ -2616,48 +2775,19 @@ async function handleRequest(req, res, context) {
     return;
   }
 
-  // The feature build: the human picks a pipeline after the spec is approved and
-  // the studio runs the workflow's skills one at a time.
-  const buildEventsMatch = /^\/api\/features\/([^/]+)\/build\/events$/.exec(pathname);
-
-  if (req.method === 'GET' && buildEventsMatch) {
-    const build = context.jobManager.findBuild(buildEventsMatch[1]);
-
-    if (!build) {
-      sendJson(res, 404, { error: 'No build for this feature.' });
-      return;
-    }
-
-    streamEvents(req, res, build);
-    return;
-  }
-
-  const buildCancelMatch = /^\/api\/features\/([^/]+)\/build\/cancel$/.exec(pathname);
-
-  if (req.method === 'POST' && buildCancelMatch) {
-    const build = context.jobManager.findBuild(buildCancelMatch[1]);
-
-    sendJson(res, 200, { cancelled: build ? context.jobManager.cancelJob(build.id) : false });
-    return;
-  }
-
+  // The feature build is a turn in the same job: the waiting process receives
+  // the start-build choice on its own stdin. There is no separate build job.
   const buildMatch = /^\/api\/features\/([^/]+)\/build$/.exec(pathname);
 
-  if (buildMatch) {
-    if (req.method === 'GET') {
-      const build = context.jobManager.findBuild(buildMatch[1]);
+  if (req.method === 'POST' && buildMatch) {
+    const body = await readJsonBody(req);
+    const accepted = context.jobManager.submitBuild(buildMatch[1], body);
 
-      sendJson(res, 200, { build: build ? context.jobManager.snapshot(build) : null });
-      return;
-    }
-
-    if (req.method === 'POST') {
-      const body = await readJsonBody(req);
-      const build = context.jobManager.startFeatureBuild(buildMatch[1], body);
-
-      sendJson(res, 202, { build: context.jobManager.snapshot(build) });
-      return;
-    }
+    sendJson(res, accepted ? 202 : 409, {
+      accepted,
+      ...(accepted ? {} : { error: 'No build is waiting for a start choice in this session.' })
+    });
+    return;
   }
 
   if (req.method === 'POST' && pathname === '/api/sweeps') {

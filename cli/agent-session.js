@@ -3,61 +3,47 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { DEFAULT_AGENT_COMMAND, buildSpawnSpec, normalizeAgentCommand } from './bug-sweep.js';
+import { assertNativeSkillAvailable, buildNativeSkillCall } from './native-skills.js';
 import {
-  DEFAULT_AGENT_COMMAND,
-  DEFAULT_WORK_DIR,
-  buildAgentInvocation,
-  buildSpawnSpec,
-  normalizeAgentCommand,
-  prepareWorkDir,
-  runProcess
-} from './bug-sweep.js';
-import {
-  NATIVE_SKILL_AGENTS,
-  assertNativeSkillAvailable,
-  buildNativeSkillCall
-} from './native-skills.js';
+  buildFeatureSteps,
+  buildStepPrompt,
+  changedFiles,
+  describeFeatureBuild,
+  resolveFeaturePipeline
+} from './feature-build.js';
+import { renderSessionMarkdown, sessionRecordDir } from './session-history.js';
 
 const MAX_BRIEF_LENGTH = 4000;
 const DEFAULT_TURN_TIMEOUT_SECONDS = 1800;
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// A session is an interview with one human, driven by one skill. The skill file
-// itself is never modified; the studio only wraps it in an interaction contract.
+// A session is an interview with one human, driven by one skill. Every flow now
+// runs on the same long-lived Claude Code stream-json process.
 export const SESSION_FLOWS = {
   enhancement: {
     id: 'enhancement',
     label: 'Enhancement',
     skillName: 'enhancement',
     skillPath: path.resolve(here, '..', 'sdd', 'skills', 'enhancement', 'SKILL.md'),
-    workDir: 'enhancements',
-    // The plan is an approved checkpoint; the report is the final reply.
     planLabel: 'plan',
     finalLabel: 'report',
-    // The enhancement skill changes the repository after the plan is approved
-    // and has no artifact, so the human closes the session after the report.
-    artifact: null,
+    artifact: null
   },
   feature: {
     id: 'feature',
     label: 'Feature',
     skillName: 'deep-spec',
     skillPath: path.resolve(here, '..', 'sdd', 'skills', 'deep-spec', 'SKILL.md'),
-    workDir: 'features',
     finalLabel: 'spec',
-    // deep-spec writes the spec only when the interview is over, so a new or
-    // touched spec file is the structural end-of-interview signal.
-    artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' }
+    artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' },
+    build: true
   },
-  // A separate planning flow: the same deep-spec interview, but its output is a
-  // tracker issue created by the studio after the spec is written. It does not
-  // build, publish, or close anything.
   specIssue: {
     id: 'specIssue',
     label: 'Spec issue',
     skillName: 'deep-spec',
     skillPath: path.resolve(here, '..', 'sdd', 'skills', 'deep-spec', 'SKILL.md'),
-    workDir: 'spec-issues',
     finalLabel: 'spec',
     artifact: { root: path.join('docs', 'sdd', 'features'), name: 'spec.md' }
   },
@@ -66,10 +52,7 @@ export const SESSION_FLOWS = {
     label: 'Merge',
     skillName: 'merge',
     skillPath: path.resolve(here, '..', 'vibecoding', 'skills', 'merge', 'SKILL.md'),
-    workDir: 'merges',
     finalLabel: 'merge report',
-    // A merge ends structurally when the integration branch exists. No file is
-    // the signal, and the human never "finishes" the interview by hand.
     mode: 'merge',
     artifact: null
   }
@@ -108,11 +91,13 @@ export function validateBrief(value) {
 export function validateSessionSkillArguments(flow, value = {}) {
   const config = resolveSessionFlow(flow);
   const schema = config.skillArguments ?? {};
+
   if (value !== undefined && value !== null && (typeof value !== 'object' || Array.isArray(value))) {
     const error = new Error('Skill arguments must be an object.');
     error.statusCode = 400;
     throw error;
   }
+
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const unknown = Object.keys(input).filter((key) => !Object.hasOwn(schema, key));
 
@@ -136,10 +121,6 @@ export function validateSessionSkillArguments(flow, value = {}) {
   }));
 }
 
-function isNativeSkillAgent(agentPreset) {
-  return NATIVE_SKILL_AGENTS.has(String(agentPreset ?? '').trim().toLowerCase());
-}
-
 export function readSessionSkill(flow) {
   const config = resolveSessionFlow(flow);
 
@@ -151,21 +132,14 @@ export function readSessionSkill(flow) {
 }
 
 // Every flow forwards the request straight to its skill. The skill owns the
-// interview, the approval rules, and the output format; the studio owns the
-// repository and tracker side effects.
-export function buildSessionInstructions(flow, { agentPreset, skillArguments = {} } = {}) {
+// interview, approval rules, and output format; Studio owns side effects.
+export function buildSessionInstructions(flow, { skillArguments = {} } = {}) {
   const config = resolveSessionFlow(flow);
 
-  if (!isNativeSkillAgent(agentPreset)) {
-    const error = new Error('A native skill-capable agent must be selected; embedded skill text is disabled in Studio sessions.');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  return buildNativeSkillCall(config.skillName, agentPreset, skillArguments);
+  return buildNativeSkillCall(config.skillName, skillArguments);
 }
 
-// The first message of a live session: the skill call plus the request.
+// The first user message: the skill call plus the human's brief.
 export function buildSessionOpening(flow, brief, options = {}) {
   return [
     buildSessionInstructions(flow, options),
@@ -174,35 +148,10 @@ export function buildSessionOpening(flow, brief, options = {}) {
   ].join('\n');
 }
 
-// A self-contained prompt for agents that cannot hold a live conversation: the
-// skill call, the request, and the transcript replayed so far.
-export function buildTurnPrompt(flow, { brief, turns = [], ...options } = {}) {
-  const lines = [buildSessionInstructions(flow, options)];
-
-  if (turns.length === 0) {
-    lines.push('', validateBrief(brief));
-    return lines.join('\n');
-  }
-
-  lines.push(
-    '## Conversation so far',
-    '',
-    `**Human:** ${validateBrief(brief)}`
-  );
-
-  for (const turn of turns) {
-    lines.push('', turn.role === 'assistant' ? '**You:**' : '**Human:**', '', String(turn.text ?? ''));
-  }
-
-  lines.push('', '## Now', '', 'Continue the interview.');
-
-  return lines.join('\n');
-}
-
-// The interview ends structurally, never by reading the prose. A flow with an
+// The interview ends structurally, never by reading prose. A flow with an
 // artifact is over when that file is written; a flow without one is over when
-// the human closes the session. Taking a snapshot before the first turn is what
-// keeps a spec from a past session from ending a new one.
+// the human closes the session or the integration ref exists. Taking the
+// snapshot before the first turn keeps an old spec from ending a new session.
 export function snapshotArtifacts(cwd, config) {
   const snapshot = new Map();
 
@@ -211,7 +160,6 @@ export function snapshotArtifacts(cwd, config) {
   }
 
   const root = path.resolve(cwd, config.artifact.root);
-
   let entries;
 
   try {
@@ -243,7 +191,6 @@ export function findSessionArtifact(cwd, config, before = new Map()) {
   }
 
   const root = path.resolve(cwd, config.artifact.root);
-
   let entries;
 
   try {
@@ -260,7 +207,6 @@ export function findSessionArtifact(cwd, config, before = new Map()) {
     }
 
     const file = path.join(root, entry.name, config.artifact.name);
-
     let stat;
 
     try {
@@ -294,7 +240,7 @@ function readArtifact(file, fallback) {
 }
 
 // A merge ends when its integration branch exists. That is a structural signal,
-// not a phrase in the agent's reply, so the studio never has to interpret prose.
+// not a phrase in the agent's reply.
 export function refExists(cwd, ref) {
   if (!ref) {
     return false;
@@ -312,35 +258,14 @@ export function refExists(cwd, ref) {
 }
 
 // The merge skill may run git and edit conflict files, but never the target
-// branch and never a remote. This is the studio-side half of that contract: the
-// Claude Code hook asks, and this decides before a human is interrupted. Other
-// agents keep their own permission model.
+// branch and never a remote. The Claude hook asks; this decides before a human
+// is interrupted.
 const MERGE_FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const MERGE_GIT_SAFE = new Set([
-  'status',
-  'diff',
-  'log',
-  'show',
-  'rev-parse',
-  'merge-base',
-  'merge-tree',
-  'ls-files',
-  'ls-tree',
-  'cat-file',
-  'for-each-ref',
-  'show-ref',
-  'rev-list',
-  'diff-tree',
-  'name-rev',
-  'describe',
-  'add',
-  'commit',
-  'merge',
-  'restore',
-  'branch',
-  'checkout',
-  'switch',
-  'stash'
+  'status', 'diff', 'log', 'show', 'rev-parse', 'merge-base', 'merge-tree',
+  'ls-files', 'ls-tree', 'cat-file', 'for-each-ref', 'show-ref', 'rev-list',
+  'diff-tree', 'name-rev', 'describe', 'add', 'commit', 'merge', 'restore',
+  'branch', 'checkout', 'switch', 'stash'
 ]);
 
 function gitCommandParts(command) {
@@ -418,9 +343,8 @@ export function mergePermissionDecision(request = {}, { target = '' } = {}) {
     return deny('amend');
   }
 
-  // The target branch is the one thing the agent must never move to. Creating a
-  // new branch from the target is the normal way to start the integration, so
-  // `checkout -b merge/... <target>` stays allowed; `checkout <target>` does not.
+  // Creating a branch from the target stays allowed; checking the target out
+  // does not.
   if (sub === 'checkout' || sub === 'switch') {
     const createFlags = ['-b', '-B', '-c', '-C'];
     const createAt = args.findIndex((arg) => createFlags.includes(arg));
@@ -454,29 +378,9 @@ export function mergePermissionDecision(request = {}, { target = '' } = {}) {
   return null;
 }
 
-// The executable decides whether the agent can hold one live conversation. Only
-// Claude Code exposes the stream-json protocol the studio drives; everything
-// else uses the replay-per-turn engine with the same UI.
-export function agentExecutable(command) {
-  const token = command?.argv?.[0] ?? '';
-
-  return path
-    .basename(String(token))
-    .toLowerCase()
-    .replace(/\.(cmd|exe|bat|ps1|sh)$/, '');
-}
-
-export function detectAgentEngine(command, agentPreset) {
-  if (agentPreset && agentPreset !== 'claude' && agentPreset !== 'custom') {
-    return 'turn';
-  }
-
-  return agentExecutable(command) === 'claude' ? 'live' : 'turn';
-}
-
 // The user's argv plus the streaming flags. Reads are pre-approved; every other
-// tool becomes a PermissionRequest, which the studio forwards to the human.
-export function buildLiveCommand(command, { settings } = {}) {
+// tool becomes a PermissionRequest, which the Studio forwards to the human.
+export function buildLiveCommand(command, { settings, model = '', effort = '' } = {}) {
   const argv = [...command.argv];
   const has = (flag) => argv.includes(flag);
   const hasSettings = argv.some((arg) => arg === '--settings' || arg.startsWith('--settings='));
@@ -499,6 +403,12 @@ export function buildLiveCommand(command, { settings } = {}) {
   }
   if (!has('--permission-mode') && !has('--allowedTools') && !has('--dangerously-skip-permissions')) {
     live.push('--allowedTools', 'Read,Grep,Glob');
+  }
+  if (model && !has('--model') && model.toLowerCase() !== 'default') {
+    live.push('--model', model);
+  }
+  if (effort && !has('--effort') && effort.toLowerCase() !== 'default') {
+    live.push('--effort', effort);
   }
   if (settings && !hasSettings) {
     live.push('--settings', settings);
@@ -526,24 +436,12 @@ export function permissionHookSettings(dir) {
   });
 }
 
-function sessionDir(cwd, id, config) {
-  const workDir = path.resolve(cwd, DEFAULT_WORK_DIR);
-
-  prepareWorkDir(workDir);
-
-  const dir = path.join(workDir, config.workDir, id);
+function sessionDir(cwd, config, id) {
+  const dir = sessionRecordDir(cwd, config.id, id);
 
   fs.mkdirSync(dir, { recursive: true });
 
   return dir;
-}
-
-function writeFile(dir, name, text) {
-  try {
-    fs.writeFileSync(path.join(dir, name), `${text}\n`, 'utf8');
-  } catch {
-    // The session on disk is a convenience; the run must not fail on it.
-  }
 }
 
 function cancelledError() {
@@ -644,6 +542,8 @@ function liveTurnController(emit) {
 }
 
 function parseLiveLine(line, { controller, emit }) {
+  emit({ type: 'raw', line });
+
   let event;
 
   try {
@@ -691,7 +591,7 @@ function parseLiveLine(line, { controller, emit }) {
 // messages and each `result` marks the end of a turn.
 const PERMISSION_WAIT_MS = 52_000;
 
-// The hook gives up at 50s. The studio must give up first, or a request nobody
+// The hook gives up at 50s. The Studio must give up first, or a request nobody
 // answered would leave the session parked forever.
 function permissionDecision(pending) {
   return new Promise((resolve) => {
@@ -720,7 +620,11 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   fs.rmSync(permissionFile, { force: true });
   fs.rmSync(permissionAnswer, { force: true });
 
-  const spec = buildSpawnSpec(buildLiveCommand(command, { settings: permissionHookSettings(dir) }));
+  const spec = buildSpawnSpec(buildLiveCommand(command, {
+    settings: permissionHookSettings(dir),
+    model: deps.model,
+    effort: deps.effort
+  }));
   const spawnProcess = deps.spawnProcess ?? spawn;
   const timeoutSeconds = Number(deps.turnTimeoutSeconds) > 0
     ? Number(deps.turnTimeoutSeconds)
@@ -728,6 +632,17 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   const timeoutMs = timeoutSeconds * 1000;
   const controller = liveTurnController(emit);
   const turns = [];
+  const writeTranscript = () => {
+    try {
+      fs.writeFileSync(
+        path.join(dir, 'session.md'),
+        renderSessionMarkdown({ flow: config.id, brief, status: 'running', turns }),
+        'utf8'
+      );
+    } catch {
+      // The transcript is a convenience; the run must not fail on it.
+    }
+  };
 
   let child;
 
@@ -738,6 +653,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...(deps.agentEnv ?? {}),
         SDD_SESSION_ID: id,
         SDD_SESSION_FLOW: config.id
       }
@@ -750,6 +666,11 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
   let stderr = '';
   let buffer = '';
   let exited = null;
+  let exitError = null;
+  let resolveExit;
+  const exitSignal = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
   let runs = 0;
   const terminate = deps.terminate ?? terminateProcess;
   const seenPermissions = new Set();
@@ -831,8 +752,6 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       // The hook falls back to denying when it cannot read an answer.
     }
 
-    // Record the decision either way, so a replayed session never shows an
-    // answerable plate for a request that has already expired.
     emit({
       type: 'permission-answer',
       id: request.id,
@@ -854,10 +773,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
 
   const writeUserMessage = (text) => {
     if (child.stdin?.destroyed || child.exitCode !== null) {
-      throw new Error(
-        'The agent closed the session early. This agent may not support interactive streaming;'
-        + ' pick Claude Code, or use the replay-per-turn engine by choosing another agent.'
-      );
+      throw new Error('The agent closed the session early.');
     }
 
     const payload = JSON.stringify({
@@ -865,6 +781,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       message: { role: 'user', content: [{ type: 'text', text }] }
     });
 
+    emit({ type: 'raw', direction: 'in', line: payload });
     child.stdin.write(`${payload}\n`);
   };
 
@@ -906,23 +823,33 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
     // the user-facing transcript (stderr can contain provider/tool details).
     stderr += chunk.toString();
   });
-  child.stdin?.on?.('error', (error) => controller.fail(error));
-  child.on?.('error', (error) => controller.fail(error));
+  child.stdin?.on?.('error', (error) => {
+    exitError = error;
+    controller.fail(error);
+  });
+  child.on?.('error', (error) => {
+    exitError = error;
+    controller.fail(error);
+    resolveExit?.();
+  });
   child.on?.('close', (code) => {
     exited = code;
 
     if (controller.hasPending()) {
       controller.fail(
         new Error(
-          `The agent closed the session (exit ${code ?? 'unknown'}).${stderr.trim() ? ` ${stderr.trim()}` : ''}`
+          `The agent closed the session (exit ${code ?? 'unknown'}).${stderr.trim() ? ` ${stderr.trim().split('\n').slice(-3).join(' ')}` : ''}`
         )
       );
     }
+
+    resolveExit?.({ code, stderr });
   });
 
   const onAbort = () => {
     controller.fail(cancelledError());
     terminate(child);
+    resolveExit?.({ aborted: true });
   };
 
   if (deps.signal) {
@@ -932,6 +859,29 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       deps.signal.addEventListener('abort', onAbort, { once: true });
     }
   }
+
+  // An idle process that exits (for example a provider error while waiting for
+  // a human) fails the session; it is never resumed automatically.
+  const whileAlive = async (promise) => {
+    const outcome = await Promise.race([
+      Promise.resolve(promise).then((value) => ({ value })),
+      exitSignal.then((exit) => ({ exit }))
+    ]);
+
+    if (outcome.exit) {
+      if (deps.signal?.aborted || outcome.exit.aborted) {
+        throw cancelledError();
+      }
+
+      const detail = String(outcome.exit.stderr ?? stderr).trim().split('\n').slice(-3).join(' ');
+
+      throw new Error(
+        `The agent closed the session unexpectedly (exit ${outcome.exit.code ?? 'unknown'}).${detail ? ` ${detail}` : ''}`
+      );
+    }
+
+    return outcome.value;
+  };
 
   try {
     // A turn that ends without any assistant text is a broken agent call, not
@@ -954,15 +904,116 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
     };
 
     let turnText = await nextTurn(buildSessionOpening(config.id, brief, {
-      agentPreset: deps.agentPreset,
       skillArguments: deps.skillArguments
     }));
 
     while (true) {
       clearWatchdog();
       turns.push({ role: 'assistant', text: turnText });
+      writeTranscript();
+      deps.onTurn?.({ turns: [...turns], text: turnText });
 
       const artifact = findSessionArtifact(cwd, config, artifactsBefore);
+
+      if (artifact && config.id === 'feature') {
+        const specRelative = path.relative(cwd, artifact).split(path.sep).join('/');
+
+        turns.push({ role: 'marker', text: 'spec.md yazıldı' });
+        emit({ type: 'build-ready', artifact, spec: specRelative });
+        writeTranscript();
+
+        if (!deps.waitForBuild) {
+          throw new Error('This feature session cannot start a build.');
+        }
+
+        const choice = await whileAlive(deps.waitForBuild({
+          sessionId: id,
+          artifact,
+          spec: specRelative,
+          text: turnText
+        }));
+
+        if (choice?.cancelled || deps.signal?.aborted) {
+          throw cancelledError();
+        }
+
+        const pipeline = resolveFeaturePipeline(choice?.pipeline);
+        const verify = choice?.verify !== false;
+        const described = describeFeatureBuild({ specPath: artifact, cwd });
+        const steps = buildFeatureSteps({
+          pipeline: pipeline.id,
+          specRelative: described.specRelative,
+          featureRelative: described.featureRelative,
+          verify
+        });
+
+        turns.push({ role: 'marker', text: `build · ${pipeline.label}` });
+        emit({
+          type: 'build-started',
+          pipeline: pipeline.id,
+          verify,
+          spec: described.specRelative,
+          steps: steps.map((step) => ({ skill: step.skill, args: step.args }))
+        });
+        writeTranscript();
+
+        const results = [];
+
+        for (const [index, step] of steps.entries()) {
+          emit({ type: 'build-step', index, skill: step.skill, status: 'running' });
+          turns.push({ role: 'marker', text: `step ${index + 1}/${steps.length}  ${step.skill}` });
+          writeTranscript();
+
+          try {
+            turnText = await nextTurn(buildStepPrompt(step));
+
+            if (step.produces && !fs.existsSync(described.featurePath)) {
+              throw new Error(`${step.skill} finished without writing ${step.produces}.`);
+            }
+          } catch (error) {
+            // A failed step is reported where it happened, not only on the job.
+            emit({
+              type: 'build-step',
+              index,
+              skill: step.skill,
+              status: 'failed',
+              error: error.message
+            });
+            turns.push({ role: 'marker', text: `step ${index + 1}/${steps.length} failed` });
+            writeTranscript();
+            throw error;
+          }
+
+          turns.push({ role: 'assistant', text: turnText });
+          emit({ type: 'build-step', index, skill: step.skill, status: 'done' });
+          writeTranscript();
+          deps.onTurn?.({ turns: [...turns], text: turnText });
+          results.push({ skill: step.skill, args: step.args });
+        }
+
+        const changed = await changedFiles(cwd);
+
+        turns.push({ role: 'marker', text: 'build done' });
+        emit({ type: 'build-done', changed: changed.length });
+        writeTranscript();
+
+        return {
+          output: readArtifact(artifact, turnText),
+          turns,
+          engine: 'live',
+          stderr,
+          artifact,
+          build: {
+            pipeline: pipeline.id,
+            verify,
+            specPath: described.specPath,
+            featurePath: described.featurePath,
+            steps: results,
+            verified: verify,
+            changedFiles: changed
+          }
+        };
+      }
 
       if (artifact) {
         return {
@@ -978,7 +1029,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
         return { output: turnText, turns, engine: 'live', stderr, ref: deps.merge.ref };
       }
 
-      const reply = await deps.waitForAnswer({ text: turnText, flow: config.id });
+      const reply = await whileAlive(deps.waitForAnswer({ text: turnText, flow: config.id }));
 
       if (reply?.cancelled || deps.signal?.aborted) {
         throw cancelledError();
@@ -989,6 +1040,7 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       }
 
       turns.push({ role: 'user', text: reply?.answer ?? '' });
+      writeTranscript();
       turnText = await nextTurn(reply?.answer ?? '');
     }
   } finally {
@@ -1009,281 +1061,13 @@ async function runLiveSession({ config, brief, command, cwd, id, dir, emit, deps
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
-    writeFile(
-      dir,
-      'session.md',
-      turns.map((turn) => `## ${turn.role === 'assistant' ? 'Agent' : 'Human'}\n\n${turn.text}`).join('\n\n')
-    );
+    writeTranscript();
   }
 }
 
-// Replay-per-turn engine: every question is a fresh, self-contained agent call
-// with the transcript so far. Works with any agent command.
-export function stripAnsi(value) {
-  return String(value ?? '')
-    // OSC sequences (window titles, progress) end with BEL or ST.
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
-    // CSI sequences, including the colours and cursor moves progress UIs emit.
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\r/g, '');
-}
-
-// Structured streams contain tool events and sometimes the contents of files
-// the agent read. Only assistant text is eligible for the conversation view.
-export function parseAgentReply(stdout) {
-  const texts = [];
-  let finalText = '';
-  let textFormat = '';
-
-  let structured = false;
-  let error = '';
-
-  for (const line of String(stdout ?? '').split('\n')) {
-    const trimmed = line.trim();
-
-    if (!trimmed.startsWith('{')) {
-      continue;
-    }
-
-    let event;
-
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-
-    if (!event || typeof event !== 'object') {
-      continue;
-    }
-
-    // Some agents report a fatal error as one object with no `type`, e.g.
-    // { "error": { "type": "aborted", ... }, "content": [] }.
-    if (typeof event.type !== 'string' && !event.error) {
-      continue;
-    }
-
-    structured = true;
-
-    if (event.error) {
-      error = event.error?.data?.message
-        || event.error?.message
-        || event.error?.type
-        || event.error?.name
-        || 'The agent reported an error.';
-
-      continue;
-    }
-
-    if (event.type === 'assistant' && event.message?.role === 'assistant') {
-      // Cursor stream-json emits assistant deltas separately from tool calls.
-      textFormat = 'delta';
-      for (const block of event.message.content ?? []) {
-        if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-          texts.push(block.text);
-        }
-      }
-      continue;
-    }
-
-    if (event.type === 'result' && typeof event.result === 'string') {
-      // Cursor's result is the aggregated reply; prefer streamed assistant
-      // deltas when present to avoid rendering it twice.
-      finalText = event.result;
-      continue;
-    }
-
-    if (event.type === 'text') {
-      // OpenCode: { type: "text", part: { text } }.
-      textFormat = 'messages';
-      const text = event.part?.text ?? event.text;
-
-      if (typeof text === 'string' && text.trim()) {
-        texts.push(text);
-      }
-    } else if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
-      // Codex `exec --json`: completed command/tool items are intentionally
-      // ignored; only the final assistant message is shown.
-      textFormat = 'messages';
-      const text = event.item.text;
-
-      if (typeof text === 'string' && text.trim()) {
-        texts.push(text);
-      }
-    } else if (event.type === 'error') {
-      error = event.error?.data?.message
-        || event.error?.message
-        || event.error?.name
-        || 'The agent reported an error.';
-    }
-  }
-
-  return { text: (texts.length ? texts.join(textFormat === 'messages' ? '\n\n' : '') : finalText).trim(), error, structured };
-}
-
-async function runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps, artifactsBefore }) {
-  const spawnImpl = deps.spawnImpl ?? runProcess;
-  const timeoutSeconds = Number(deps.turnTimeoutSeconds) > 0
-    ? Number(deps.turnTimeoutSeconds)
-    : DEFAULT_TURN_TIMEOUT_SECONDS;
-  const turns = [];
-  const promptFile = path.join(dir, 'prompt.md');
-
-  let count = 0;
-
-  while (true) {
-    count += 1;
-
-    const prompt = buildTurnPrompt(config.id, {
-      brief,
-      turns,
-      agentPreset: deps.agentPreset,
-      skillArguments: deps.skillArguments
-    });
-
-    fs.writeFileSync(promptFile, prompt, 'utf8');
-    emit({ type: 'turn-started', turn: count });
-
-    const skillInvocation = `${buildNativeSkillCall(config.skillName, deps.agentPreset, deps.skillArguments)} `;
-    const agentPrompt = count === 1
-      ? `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it.`
-      : `${skillInvocation}Read the interview brief at \`${promptFile}\` and follow it. Continue the interview.`;
-    const invocation = buildAgentInvocation(command, { prompt: agentPrompt, promptFile });
-    const spec = buildSpawnSpec(invocation);
-
-    let result;
-    const structuredAgent = ['codex', 'cursor', 'opencode'].includes(String(deps.agentPreset ?? '').toLowerCase());
-    let structuredBuffer = '';
-    let streamedAssistant = '';
-
-    const emitStructuredLines = (chunk, flush = false) => {
-      structuredBuffer += String(chunk ?? '');
-
-      let boundary;
-      while ((boundary = structuredBuffer.indexOf('\n')) !== -1 || (flush && structuredBuffer.length)) {
-        const line = boundary === -1 ? structuredBuffer : structuredBuffer.slice(0, boundary);
-        structuredBuffer = boundary === -1 ? '' : structuredBuffer.slice(boundary + 1);
-
-        let event;
-        try {
-          event = JSON.parse(line.trim());
-        } catch {
-          continue;
-        }
-
-        // Cursor's terminal result repeats all assistant deltas. Prefer the
-        // streamed text; use the terminal result only when no delta arrived.
-        if (event.type === 'result' && streamedAssistant) continue;
-        const reply = parseAgentReply(line);
-
-        if (reply.text) {
-          const separateMessages = ['codex', 'opencode'].includes(String(deps.agentPreset ?? '').toLowerCase());
-          const separator = separateMessages && streamedAssistant ? '\n\n' : '';
-          const visibleText = `${separator}${reply.text}`;
-
-          streamedAssistant += visibleText;
-          emit({ type: 'output', stream: 'stdout', chunk: visibleText });
-        }
-      }
-    };
-
-    try {
-      result = await spawnImpl(spec.command, spec.args, {
-        cwd,
-        signal: deps.signal,
-        timeoutMs: timeoutSeconds * 1000,
-        onStdout: (chunk) => {
-          // Codex and OpenCode emit protocol events that include tool output.
-          // Their assistant text is emitted after parsing below.
-          if (structuredAgent) emitStructuredLines(chunk);
-          else emit({ type: 'output', stream: 'stdout', chunk });
-        },
-        onStderr: () => {},
-        env: {
-          ...process.env,
-          SDD_SESSION_ID: id,
-          SDD_SESSION_FLOW: config.id
-        }
-      });
-    } catch (error) {
-      if (deps.signal?.aborted) {
-        throw cancelledError();
-      }
-
-      throw new Error(`The agent could not be started: ${error.message}`);
-    }
-
-    if (result.aborted || deps.signal?.aborted) {
-      throw cancelledError();
-    }
-
-    if (result.timedOut) {
-      throw new Error(`The agent did not finish a reply within ${timeoutSeconds} seconds.`);
-    }
-
-    if (result.code !== 0) {
-      const detail = (result.stderr || result.stdout || '').trim();
-
-      throw new Error(`The agent exited with code ${result.code}.${detail ? ` ${detail}` : ''}`);
-    }
-
-    if (structuredAgent) emitStructuredLines('', true);
-
-    // Parse structured output and expose only the assistant reply, never tool
-    // events such as read_file results or command output.
-    const parsed = parseAgentReply(result.stdout ?? '');
-
-    if (parsed.error) {
-      throw new Error(`The agent reported: ${parsed.error}`);
-    }
-
-    const text = (parsed.text || (parsed.structured ? '' : stripAnsi(result.stdout ?? ''))).trim();
-
-    if (!text) {
-      const detail = String(result.stderr ?? '').trim().split('\n').slice(-3).join(' ');
-      throw new Error(`The agent finished without a reply.${detail ? ` ${detail}` : ''}`);
-    }
-
-    if (structuredAgent && !streamedAssistant) emit({ type: 'output', stream: 'stdout', chunk: text });
-
-    turns.push({ role: 'assistant', text });
-
-    const transcript = () => turns
-      .map((turn) => `## ${turn.role === 'assistant' ? 'Agent' : 'Human'}\n\n${turn.text}`)
-      .join('\n\n');
-    const artifact = findSessionArtifact(cwd, config, artifactsBefore);
-
-    if (artifact) {
-      writeFile(dir, 'session.md', transcript());
-
-      return { output: readArtifact(artifact, text), turns, engine: 'turn', artifact };
-    }
-
-    if (deps.merge?.ref && refExists(cwd, deps.merge.ref)) {
-      writeFile(dir, 'session.md', transcript());
-
-      return { output: text, turns, engine: 'turn', ref: deps.merge.ref };
-    }
-
-    const reply = await deps.waitForAnswer({ text, flow: config.id });
-
-    if (reply?.cancelled || deps.signal?.aborted) {
-      throw cancelledError();
-    }
-
-    if (reply?.done) {
-      writeFile(dir, 'session.md', transcript());
-
-      return { output: text, turns, engine: 'turn' };
-    }
-
-    turns.push({ role: 'user', text: reply?.answer ?? '' });
-  }
-}
-
-// Run a full interview session to the final artifact. The caller supplies
-// `waitForAnswer`, which resolves with `{ answer }`, `{ done: true }` when the
-// human ends the interview, or `{ cancelled: true }`.
+// Run a full interview session to its structural end. The caller supplies
+// `waitForAnswer` and, for features, `waitForBuild`. Answers are new user
+// messages in the same process; there is no replay or resume path.
 export async function runInterviewSession(request = {}, dependencies = {}) {
   const config = resolveSessionFlow(request.flow);
   const brief = validateBrief(request.brief);
@@ -1293,40 +1077,49 @@ export async function runInterviewSession(request = {}, dependencies = {}) {
       ? { arguments: [request.merge.source, request.merge.target].filter(Boolean).join(' ') }
       : {})
   };
-  const agentPreset = request.agentPreset;
   const cwd = dependencies.cwd ?? process.cwd();
-  assertNativeSkillAvailable(cwd, agentPreset, config.skillName);
+  const stateCwd = dependencies.stateCwd ?? cwd;
   const id = dependencies.id ?? `session-${Date.now()}`;
   const emit = dependencies.emit ?? (() => {});
-  const command = normalizeAgentCommand(request.agentCmd ?? DEFAULT_AGENT_COMMAND);
-  const engine = detectAgentEngine(command, request.agentPreset);
-  const dir = sessionDir(cwd, id, config);
+  const command = normalizeAgentCommand(DEFAULT_AGENT_COMMAND);
+  const dir = sessionDir(stateCwd, config, id);
   const merge = request.merge ?? dependencies.merge ?? null;
   const sessionDeps = {
     ...dependencies,
-    agentPreset,
     skillArguments,
     ...(merge ? { merge } : {})
   };
   // A spec that exists before the first turn belongs to an earlier session.
   const artifactsBefore = snapshotArtifacts(cwd, config);
 
-  emit({ type: 'session-started', flow: config.id, engine, brief });
+  assertNativeSkillAvailable(stateCwd, config.skillName);
 
-  if (engine === 'live') {
-    writeFile(dir, 'opening.md', buildSessionOpening(config.id, brief, { agentPreset, skillArguments }));
-  }
+  emit({
+    type: 'session-started',
+    flow: config.id,
+    engine: 'live',
+    brief,
+    model: dependencies.model ?? '',
+    effort: dependencies.effort ?? ''
+  });
 
-  const result = engine === 'live'
-    ? await runLiveSession({ config, brief, command, cwd, id, dir, emit, deps: sessionDeps, artifactsBefore })
-    : await runTurnBasedSession({ config, brief, command, cwd, id, dir, emit, deps: sessionDeps, artifactsBefore });
+  const result = await runLiveSession({
+    config,
+    brief,
+    command,
+    cwd,
+    id,
+    dir,
+    emit,
+    deps: sessionDeps,
+    artifactsBefore
+  });
 
   return {
     ...result,
     brief,
     flow: config.id,
     dir,
-    promptFile: path.join(dir, 'prompt.md'),
     skillArguments,
     ...(merge ? { merge } : {})
   };
