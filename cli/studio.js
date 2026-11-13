@@ -357,6 +357,23 @@ async function localBranches(cwd) {
     .filter(Boolean);
 }
 
+async function remoteBranchesList(cwd) {
+  const result = await runProcess(
+    'git',
+    ['branch', '-r', '--format=%(refname:short)'],
+    { cwd }
+  );
+
+  if (result.code !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('origin/HEAD'));
+}
+
 // A merge starts from two real local branches. The worktree is created from the
 // target, so the main checkout does not need to be clean or on the target; the
 // explicit land action is what requires a clean tree.
@@ -511,13 +528,14 @@ async function closeSourceIssueForJob({
 }
 
 // The spec issue flow files the spec itself as one tracker issue. The tracker
-// source follows the tab's "Start from" choice first, then the saved setting.
+// source is the global issue source; the old per-tab setting is only a fallback.
 export function resolveSpecIssueTarget({ request = {}, saved = {} } = {}) {
   const imported = normalizeSourceIssue(request.issue);
-  const requested = String(request.specIssueSource ?? '').toLowerCase();
+  const requested = String(request.source || request.specIssueSource || '').toLowerCase();
+  const stored = String(saved.source || saved.specIssueSource || '').toLowerCase();
   const source = imported?.source
     || (['github', 'gitlab', 'jira'].includes(requested) ? requested : '')
-    || (['github', 'gitlab', 'jira'].includes(saved.specIssueSource) ? saved.specIssueSource : 'jira');
+    || (['github', 'gitlab', 'jira'].includes(stored) ? stored : 'jira');
   const savedTarget = source === 'github'
     ? saved.githubRepo
     : source === 'gitlab'
@@ -787,10 +805,12 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
   function rememberWorkflow(flow, selection) {
     const store = readStore(cwd);
     const workflows = normalizeWorkflowSettings(store.workflows);
+    const current = workflows[flow] ?? {};
 
     workflows[flow] = {
       model: selection.model,
       effort: selection.effort,
+      base: selection.base === undefined ? (current.base ?? '') : selection.base,
       mr: selection.mr !== false
     };
 
@@ -895,8 +915,9 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
     const store = readStore(cwd);
     const selection = resolveWorkflowSelection(store, 'bugSweep', request);
 
-    // A minimal request inherits the choices the user already made once.
-    const effective = applySettings(request, store);
+    // A minimal request inherits the choices the user already made once. The
+    // base is workflow-scoped; an explicit request wins, including a blank one.
+    const effective = applySettings({ ...request, base: request.base ?? selection.base ?? '' }, store);
 
     try {
       writeSettings(cwd, effective);
@@ -1085,7 +1106,7 @@ export function createJobManager({ cwd, fetchImpl, spawnImpl, spawnProcess, term
         id,
         flow: config.id,
         brief: brief,
-        base: config.id === 'merge' ? merge.target : (request.base ?? store.base ?? '')
+        base: config.id === 'merge' ? merge.target : (selection.base ?? '')
       });
     } catch (error) {
       error.statusCode = error.statusCode ?? 400;
@@ -1812,8 +1833,7 @@ const SETTINGS_KEYS = [
   'githubRepo',
   'githubLabel',
   'gitlabProject',
-  'enhancementSource',
-  'featureSource',
+  // Legacy fallback for the CLI's spec-issue command; the Studio uses `source`.
   'specIssueSource',
   'prPreset',
   'prCommand',
@@ -2554,6 +2574,14 @@ async function handleRequest(req, res, context) {
   // The interactive `/model` picker is not exposed as a stream-json event.
   // A short local `claude -p "/model"` probe returns the same list without a
   // model call, and can be refreshed from Settings.
+  if (req.method === 'GET' && pathname === '/api/branches') {
+    const branches = await localBranches(context.cwd);
+    const remoteBranches = await remoteBranchesList(context.cwd);
+
+    sendJson(res, 200, { branches, remoteBranches });
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/claude/models') {
     const store = readStore(context.cwd);
     const result = await readClaudeModels({

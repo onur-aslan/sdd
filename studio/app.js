@@ -40,7 +40,6 @@ const el = {
   addClaudeEnv: $('#add-claude-env'),
   refreshModels: $('#refresh-models'),
   modelSource: $('#model-source'),
-  workflowDefaults: $('#workflow-defaults'),
   prPreset: $('#pr-preset'),
   prCustomField: $('#pr-custom-field'),
   checkJira: $('#check-jira'),
@@ -125,6 +124,14 @@ function currentTarget(source = currentSource()) {
   if (source === 'github') return el.form.githubRepo.value.trim();
   if (source === 'gitlab') return el.form.gitlabProject.value.trim();
   return el.form.project.value.trim();
+}
+
+function syncWorkspaceSource() {
+  const source = currentSource();
+
+  $('#jira-settings')?.classList.toggle('hidden', source !== 'jira');
+  $('#github-settings')?.classList.toggle('hidden', source !== 'github');
+  $('#gitlab-settings')?.classList.toggle('hidden', source !== 'gitlab');
 }
 
 function currentQueryKey() {
@@ -449,6 +456,37 @@ function modelChoices() {
   return choices;
 }
 
+function baseChoices() {
+  const local = state.branches ?? [];
+  const remote = state.remoteBranches ?? [];
+  const seen = new Set();
+  const choices = [];
+
+  // Local branches first (most relevant)
+  for (const branch of local) {
+    if (!branch || !branch.includes('/') || seen.has(branch)) {
+      continue;
+    }
+    seen.add(branch);
+    choices.push(branch);
+  }
+
+  // Remote branches: strip origin/ prefix for display, deduplicate against local
+  for (const branch of remote) {
+    if (!branch || !branch.includes('/')) {
+      continue;
+    }
+    const display = branch.startsWith('origin/') ? branch.slice(7) : branch;
+    if (seen.has(display)) {
+      continue;
+    }
+    seen.add(display);
+    choices.push(display);
+  }
+
+  return choices;
+}
+
 function fillModelPicker(picker, selected) {
   const select = picker?.querySelector('select');
   const input = picker?.querySelector('input');
@@ -486,6 +524,67 @@ function modelPickerValue(picker) {
   }
 
   return (input?.value ?? '').trim();
+}
+
+function fillBasePicker(picker, selected) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
+
+  if (!select || !input) {
+    return;
+  }
+
+  const value = String(selected ?? '').trim();
+  const choices = baseChoices();
+  const custom = value !== '' && !choices.includes(value);
+
+  select.replaceChildren(new Option('Detected (blank)', ''));
+
+  for (const branch of choices) {
+    select.append(new Option(branch, branch));
+  }
+
+  select.append(new Option('Custom…', 'custom'));
+  select.value = custom ? 'custom' : choices.includes(value) ? value : '';
+  input.value = custom ? value : '';
+  input.classList.toggle('hidden', !custom);
+}
+
+function basePickerValue(picker) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
+
+  if (!select) {
+    return '';
+  }
+
+  if (select.value === 'custom') {
+    return (input?.value ?? '').trim();
+  }
+
+  return select.value;
+}
+
+function wireBasePicker(picker, onChange) {
+  const select = picker?.querySelector('select');
+  const input = picker?.querySelector('input');
+
+  if (!select || !input) {
+    return;
+  }
+
+  select.addEventListener('change', () => {
+    const custom = select.value === 'custom';
+
+    input.classList.toggle('hidden', !custom);
+
+    if (custom) {
+      input.focus();
+    }
+
+    onChange?.();
+  });
+  input.addEventListener('input', () => onChange?.());
 }
 
 function wireModelPicker(picker, onChange) {
@@ -530,6 +629,10 @@ function selectionFrom(prefix) {
     effort: prefix.effort?.value || ''
   };
 
+  if (prefix.base) {
+    selection.base = prefix.base.querySelector ? basePickerValue(prefix.base) : prefix.base.value.trim();
+  }
+
   // Workflows without a merge-request control keep their stored choice. Only
   // enhancement and feature render the checkbox.
   if (prefix.mr) {
@@ -544,7 +647,7 @@ function currentSelection(flow) {
 }
 
 // The workflow form is the default, not a one-off: every change is remembered
-// so the next session opens with the same model, effort, and MR choice.
+// so the next session opens with the same base, model, effort, and MR choice.
 let workflowSaveTimer = null;
 
 function rememberWorkflow(flow, selection) {
@@ -554,10 +657,18 @@ function rememberWorkflow(flow, selection) {
 
   const current = state.config.workflows?.[flow] ?? {};
   const mr = selection.mr === undefined ? current.mr !== false : selection.mr !== false;
+  const base = selection.base === undefined ? current.base : selection.base;
+  const next = { ...selection, mr };
+
+  // Settings rows edit model and effort only; keep the base chosen in that
+  // workflow's start screen instead of clearing it.
+  if (base !== undefined) {
+    next.base = base;
+  }
 
   state.config.workflows = {
     ...(state.config.workflows ?? {}),
-    [flow]: { ...selection, mr }
+    [flow]: next
   };
 
   window.clearTimeout(workflowSaveTimer);
@@ -575,6 +686,17 @@ function rememberWorkflow(flow, selection) {
 
 function renderSweepSelection() {
   const selection = workflowSettings('bugSweep');
+  const basePicker = el.form.base?.closest('[data-base-picker]');
+
+  if (basePicker) {
+    fillBasePicker(basePicker, selection.base ?? '');
+  } else if (el.form.base) {
+    el.form.base.value = selection.base ?? '';
+  }
+
+  if (el.form.mr) {
+    el.form.mr.checked = selection.mr !== false;
+  }
 
   fillModelPicker(el.sweepModelPicker, selection.model);
   fillEffortSelect(el.sweepEffort, selection.effort);
@@ -622,7 +744,7 @@ function formRequest({ dryRun = false } = {}) {
   const checked = (name) => data.get(name) === 'on';
   const model = modelPickerValue(el.sweepModelPicker);
   const effort = text('effort');
-  const mr = publishChoice(state.config?.settings ?? {}) === 'pr';
+  const mr = el.form.mr ? checked('mr') : publishChoice(state.config?.settings ?? {}) === 'pr';
   const prPreset = text('prPreset') || 'github';
   const prCommand = prPreset === 'custom' ? text('prCommand') : prPresetCommand(prPreset);
   const gitlabPush = prPreset === 'gitlab-push';
@@ -630,7 +752,7 @@ function formRequest({ dryRun = false } = {}) {
   const jiraAuth = jiraType === 'cloud' ? 'basic' : 'bearer';
   const jiraApiVersion = jiraType === 'cloud' ? '3' : '2';
   const source = ['github', 'gitlab'].includes(text('source')) ? text('source') : 'jira';
-  const publish = text('publish') === 'push' ? 'push' : 'pr';
+  const publish = mr ? 'pr' : 'push';
   const project = text('project');
   const githubRepo = text('githubRepo');
   const gitlabProject = text('gitlabProject');
@@ -723,16 +845,20 @@ function updateBugCount() {
       : state.bugLoadError
         ? 'not loaded'
         : 'no open bugs';
+    el.toggleBugs.checked = false;
+    el.toggleBugs.indeterminate = false;
     el.toggleBugs.disabled = true;
-    el.toggleBugs.textContent = 'Select none';
     return;
   }
 
-  el.bugCount.textContent = selected === total
-    ? `all ${total} selected`
-    : `${selected} of ${total} selected`;
+  el.bugCount.textContent = selected === 0
+    ? 'none selected'
+    : selected === total
+      ? (total === 1 ? '1 selected' : `all ${total} selected`)
+      : `${selected} of ${total} selected`;
+  el.toggleBugs.checked = selected === total;
+  el.toggleBugs.indeterminate = selected > 0 && selected < total;
   el.toggleBugs.disabled = false;
-  el.toggleBugs.textContent = selected === total ? 'Select none' : 'Select all';
 }
 
 function renderBugPicker(error = '') {
@@ -779,10 +905,19 @@ function renderBugPicker(error = '') {
     const meta = document.createElement('span');
     meta.className = 'bug-meta';
     meta.textContent = bug.priority || '';
+    meta.hidden = !bug.priority;
+
+    const line = document.createElement('span');
+    line.className = 'bug-line';
+    line.append(key, meta);
+
+    const body = document.createElement('span');
+    body.className = 'bug-body';
+    body.append(line, summary);
 
     label.title = [bug.key, bug.summary, bug.priority].filter(Boolean).join(' · ');
 
-    label.append(input, key, summary, meta);
+    label.append(input, body);
     el.bugPicker.append(label);
   }
 
@@ -961,7 +1096,7 @@ function updatePlan() {
 
   const base = el.form.base.value.trim() || defaults.base || 'detected';
   const baseBits = [base, 'fetch first', 'isolated worktree'];
-  const publish = el.form.publish?.value === 'push' ? 'push' : 'pr';
+  const publish = el.form.mr?.checked ? 'pr' : 'push';
   const closeIssues = Boolean(el.form.closeIssues?.checked);
   let publishLabel = 'push branch only';
 
@@ -1166,7 +1301,6 @@ function settingsPayload() {
     githubRepo: request.githubRepo,
     gitlabProject: request.gitlabProject,
     project: request.project,
-    base: request.base,
     publish: request.publish,
     closeIssues: request.closeIssues,
     jiraType: request.jiraType,
@@ -1358,7 +1492,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another enhancement…',
     answerPlaceholder: 'Type your answer, or approve the plan…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'One live Claude process runs the interview in its own worktree. When the report is ready, the studio commits and pushes the session branch; the merge request is optional.'
+    emptyBody: 'The agent will ask clarifying questions one at a time. Approve the plan to implement.'
   },
   feature: {
     endpoint: '/api/features',
@@ -1368,7 +1502,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another feature…',
     answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'One live Claude process runs the design interview and writes the spec. You choose the build path next; the build stays in this session.'
+    emptyBody: 'The agent will ask clarifying questions and write the spec. Choose a build path to implement.'
   },
   specIssue: {
     endpoint: '/api/spec-issues',
@@ -1378,7 +1512,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another spec…',
     answerPlaceholder: 'Type your answer…',
     emptyTitle: 'Interview the agent.',
-    emptyBody: 'One live Claude process runs the design interview in a worktree and writes the spec. The studio copies it into the main checkout and files one tracker issue; nothing is committed or pushed.'
+    emptyBody: 'The agent will ask clarifying questions and write the spec. The spec is filed as one tracker issue.'
   },
   merge: {
     endpoint: '/api/merges',
@@ -1388,7 +1522,7 @@ const SESSION_COPY = {
     restartPlaceholder: 'Start another merge…',
     answerPlaceholder: 'Type your answer, or approve the resolution table…',
     emptyTitle: 'Merge two branches.',
-    emptyBody: 'The live Claude process dry-runs the merge in a worktree opened from the target, then builds an integration branch. The target is untouched until you land it.'
+    emptyBody: 'The agent dry-runs the merge in a worktree and builds an integration branch. The target is untouched until you land it.'
   }
 };
 
@@ -1515,6 +1649,7 @@ function createSession(flow) {
     jobs: [],
     mergeMeta: null,
     setupChoice: null,
+    issueSource: '',
     sourceIssue: null,
     specIssue: null,
     branch: ''
@@ -1544,7 +1679,9 @@ function createSession(flow) {
     dom.home.classList.toggle('hidden', count === 0);
     dom.listCount.textContent = String(count);
     dom.listToggle.setAttribute('aria-label', `${copy.title}, ${count} saved ${count === 1 ? 'session' : 'sessions'}`);
-    dom.newBtn.classList.toggle('hidden', !view.sessionOpen);
+    // Show "New session" when a session is running (parallel sessions allowed)
+    // or when a session completed (handoff state). Hide only when no session exists yet.
+    dom.newBtn.classList.toggle('hidden', !view.sessionOpen && !view.running);
   }
 
 
@@ -1603,9 +1740,19 @@ function createSession(flow) {
     // Only enhancement and feature publish a branch with an optional merge
     // request. Spec issue files an issue; merge lands an integration branch.
     const showMr = !isMerge && flow !== 'specIssue';
+    // Merge starts from its target branch, so it has no separate base field.
+    const showBase = !isMerge;
+    const rowClass = showMr ? '' : showBase ? ' selection-row-no-mr' : ' selection-row-compact';
+    const basePlaceholder = state.config?.defaults?.base || 'detected';
 
     return `
-      <div class="selection-row${showMr ? '' : ' selection-row-compact'}">
+      <div class="selection-row${rowClass}">
+        ${showBase ? `<label class="field selection-base"><span>Base branch <em>(blank = detected)</em></span>
+          <span class="base-picker" data-base-picker>
+            <select data-role="base-select" aria-label="Base branch"></select>
+            <input data-role="base" class="base-custom hidden" value="${escapeText(selection.base ?? '')}" placeholder="${escapeText(basePlaceholder)}" autocomplete="off" spellcheck="false" aria-label="Custom base branch">
+          </span>
+        </label>` : ''}
         <label class="field"><span>Model</span>
           <span class="model-picker" data-model-picker>
             <select data-role="model-select" aria-label="Model"></select>
@@ -1618,12 +1765,13 @@ function createSession(flow) {
           <span>Open a merge request</span>
         </label>` : ''}
       </div>
-      <p class="hint">The selection is remembered for ${copy.title.toLowerCase()} and locked once the session starts. Choose Default to use the Claude environment.</p>
+      <p class="hint">The fields are remembered for ${copy.title.toLowerCase()} and locked once the session starts.${showBase ? ' A blank base uses the detected branch.' : ''} Choose Default to use the Claude environment.</p>
     `;
   }
 
   function selectedFromSetup() {
     return selectionFrom({
+      base: dom.setup.querySelector('[data-base-picker]'),
       modelPicker: dom.setup.querySelector('[data-model-picker]'),
       effort: dom.setup.querySelector('[data-role="effort"]'),
       mr: dom.setup.querySelector('[data-role="mr"]')
@@ -1631,6 +1779,7 @@ function createSession(flow) {
   }
 
   function wireSelection() {
+    const basePicker = dom.setup.querySelector('[data-base-picker]');
     const modelPicker = dom.setup.querySelector('[data-model-picker]');
     const effortSelect = dom.setup.querySelector('[data-role="effort"]');
     const mrBox = dom.setup.querySelector('[data-role="mr"]');
@@ -1641,6 +1790,10 @@ function createSession(flow) {
 
     const saved = workflowSettings(flow);
 
+    if (basePicker) {
+      fillBasePicker(basePicker, saved.base ?? '');
+    }
+
     fillModelPicker(modelPicker, saved.model);
     fillEffortSelect(effortSelect, saved.effort);
 
@@ -1650,6 +1803,7 @@ function createSession(flow) {
 
     const remember = () => rememberWorkflow(flow, selectedFromSetup());
 
+    wireBasePicker(basePicker, remember);
     wireModelPicker(modelPicker, remember);
     effortSelect.addEventListener('change', remember);
     mrBox?.addEventListener('change', remember);
@@ -1660,18 +1814,12 @@ function createSession(flow) {
       return '';
     }
 
-    const sourceOptions = `
-      <option value="jira">Jira</option>
-      <option value="github">GitHub</option>
-      <option value="gitlab">GitLab</option>
-    `;
-
     if (flow === 'specIssue') {
       return `
         <div class="session-import">
           <div class="session-import-row">
-            <label class="session-import-label" for="source-${flow}">File in</label>
-            <select id="source-${flow}" data-role="issue-source" aria-label="Issue tracker">${sourceOptions}</select>
+            <span class="session-import-label">File in</span>
+            <span class="session-import-source" data-role="issue-source-label" title="Change the issue source in Settings">${escapeText(trackerLabel(currentSource()))}</span>
           </div>
           <p class="session-import-status" data-role="issue-status" role="status"></p>
         </div>
@@ -1681,8 +1829,8 @@ function createSession(flow) {
     return `
       <div class="session-import">
         <div class="session-import-row">
-          <label class="session-import-label" for="source-${flow}">Start from</label>
-          <select id="source-${flow}" data-role="issue-source" aria-label="Issue source">${sourceOptions}</select>
+          <label class="session-import-label" for="issue-${flow}">Start from</label>
+          <span class="session-import-source" data-role="issue-source-label" title="Change the issue source in Settings">${escapeText(trackerLabel(currentSource()))}</span>
           <select id="issue-${flow}" data-role="issue-select" disabled>
             <option value="">Load open issues…</option>
           </select>
@@ -1694,57 +1842,48 @@ function createSession(flow) {
   }
 
   function syncIssueSource() {
-    const source = dom.setup.querySelector('[data-role="issue-source"]');
+    const source = currentSource();
+    const label = trackerLabel(source);
 
-    if (!source) {
-      return;
+    for (const node of dom.setup.querySelectorAll('[data-role="issue-source-label"]')) {
+      node.textContent = label;
     }
 
-    const saved = state.config?.settings?.[`${flow}Source`] ?? 'jira';
+    if (view.issueSource && view.issueSource !== source) {
+      issueChoices = [];
+      view.sourceIssue = null;
 
-    source.value = ['jira', 'github', 'gitlab'].includes(saved) ? saved : 'jira';
-  }
-
-  async function saveIssueSource() {
-    const source = dom.setup.querySelector('[data-role="issue-source"]');
-
-    if (!source) {
-      return;
-    }
-
-    try {
-      await api('/api/settings', { method: 'POST', body: JSON.stringify({ [`${flow}Source`]: source.value }) });
-
-      if (state.config?.settings) {
-        state.config.settings[`${flow}Source`] = source.value;
-      }
-    } catch (error) {
+      const select = dom.setup.querySelector('[data-role="issue-select"]');
       const status = dom.setup.querySelector('[data-role="issue-status"]');
 
+      if (select) {
+        select.replaceChildren(new Option('Load open issues…', ''));
+        select.disabled = true;
+      }
       if (status) {
-        status.textContent = `Could not save source: ${error.message}`;
+        status.textContent = '';
       }
     }
+
+    view.issueSource = source;
   }
 
   async function loadExternalIssues() {
-    const sourceSelect = dom.setup.querySelector('[data-role="issue-source"]');
     const issueSelect = dom.setup.querySelector('[data-role="issue-select"]');
     const loadButton = dom.setup.querySelector('[data-role="issue-load"]');
     const status = dom.setup.querySelector('[data-role="issue-status"]');
 
-    if (!sourceSelect || !issueSelect || !status) {
+    if (!issueSelect || !status) {
       return;
     }
 
-    const source = sourceSelect.value;
-    const settings = state.config?.settings ?? {};
+    const source = currentSource();
+    const target = currentTarget(source);
     const request = source === 'github'
-      ? { githubRepo: settings.githubRepo, ignoreLabels: true, limit: 100 }
+      ? { githubRepo: target, ignoreLabels: true, limit: 100 }
       : source === 'gitlab'
-        ? { gitlabProject: settings.gitlabProject, limit: 100 }
-        : { project: settings.project };
-    const target = source === 'github' ? request.githubRepo : source === 'gitlab' ? request.gitlabProject : request.project;
+        ? { gitlabProject: target, limit: 100 }
+        : { project: target };
     const endpoint = source === 'github' ? '/api/github/bugs' : source === 'gitlab' ? '/api/gitlab/issues' : '/api/jira/issues';
 
     if (loadButton) {
@@ -1795,12 +1934,11 @@ function createSession(flow) {
   }
 
   async function importSelectedIssue() {
-    const sourceSelect = dom.setup.querySelector('[data-role="issue-source"]');
     const issueSelect = dom.setup.querySelector('[data-role="issue-select"]');
     const loadButton = dom.setup.querySelector('[data-role="issue-load"]');
     const status = dom.setup.querySelector('[data-role="issue-status"]');
 
-    if (!sourceSelect || !issueSelect || !status) {
+    if (!issueSelect || !status) {
       return;
     }
 
@@ -1810,8 +1948,8 @@ function createSession(flow) {
       return;
     }
 
-    const source = sourceSelect.value;
-    const settings = state.config?.settings ?? {};
+    const source = currentSource();
+    const target = currentTarget(source);
     issueSelect.disabled = true;
 
     if (loadButton) {
@@ -1842,12 +1980,6 @@ function createSession(flow) {
         return;
       }
 
-      const target = source === 'github'
-        ? settings.githubRepo
-        : source === 'gitlab'
-          ? settings.gitlabProject
-          : settings.project;
-
       view.sourceIssue = { source, key: issue.key, url: issue.url ?? '', target: target ?? '' };
       dom.input.value = issueBrief(issue);
       autoGrow();
@@ -1865,23 +1997,10 @@ function createSession(flow) {
   }
 
   function wireIssueImport() {
-    const source = dom.setup.querySelector('[data-role="issue-source"]');
     const load = dom.setup.querySelector('[data-role="issue-load"]');
     const select = dom.setup.querySelector('[data-role="issue-select"]');
 
     syncIssueSource();
-
-    source?.addEventListener('change', () => {
-      issueChoices = [];
-      view.sourceIssue = null;
-      if (select) {
-        select.replaceChildren(new Option('Load open issues…', ''));
-        select.disabled = true;
-      }
-      const status = dom.setup.querySelector('[data-role="issue-status"]');
-      if (status) status.textContent = '';
-      saveIssueSource();
-    });
     load?.addEventListener('click', loadExternalIssues);
     select?.addEventListener('change', importSelectedIssue);
   }
@@ -2049,6 +2168,7 @@ function createSession(flow) {
       onEvent(event);
     }
 
+    stopTurnClock();
     view.running = false;
     view.awaiting = false;
     setSetupVisible(false);
@@ -2578,6 +2698,10 @@ function createSession(flow) {
     setComposerVisible(false);
     setInputEnabled(false);
 
+    const agentTurns = view.entries.filter((e) => e.role === 'agent').length;
+    const toolCalls = view.entries.filter((e) => e.role === 'tool').length;
+    const turnSummary = `${agentTurns} turn${agentTurns === 1 ? '' : 's'}${toolCalls ? ` · ${toolCalls} tool${toolCalls === 1 ? '' : 's'}` : ''}`;
+
     const readyLabel = kind === 'done'
       ? isMerge
         ? 'integration branch ready'
@@ -2590,7 +2714,7 @@ function createSession(flow) {
         ? 'stopped'
         : 'failed';
 
-    setStatus(kind === 'done' ? readyLabel : kind === 'stopped' ? 'stopped' : 'failed', false);
+    setStatus(`${readyLabel} · ${turnSummary}`, false);
 
     if (message) {
       addEntry('session', message);
@@ -2827,9 +2951,7 @@ function createSession(flow) {
 
     dom.setup.innerHTML = `
       <div class="session-start merge-setup" aria-label="Merge setup">
-        <p class="session-start-lede">The live Claude process dry-runs the merge in a worktree opened from the target,
-          asks one decision at a time, and builds the integration branch. It never touches the target; landing is a
-          separate, explicit step.</p>
+        <p class="session-start-lede">The agent dry-runs the merge in a worktree, asks about conflicts one at a time, and builds the integration branch. The target is untouched until you land it.</p>
 
         ${selectionMarkup()}
 
@@ -3043,7 +3165,7 @@ function createSession(flow) {
           brief,
           ...selection,
           ...(sourceIssue ? { issue: sourceIssue } : {}),
-          ...(flow === 'specIssue' ? { specIssueSource: dom.setup.querySelector('[data-role="issue-source"]')?.value ?? '' } : {}),
+          ...(flow === 'specIssue' ? { source: currentSource() } : {}),
           closeIssues: Boolean(el.form.closeIssues?.checked)
         })
       });
@@ -3441,14 +3563,6 @@ const sessionViews = {
   merge: createSession('merge')
 };
 
-const WORKFLOW_LABELS = {
-  enhancement: 'Enhancement',
-  feature: 'Feature',
-  specIssue: 'Spec issue',
-  merge: 'Merge',
-  bugSweep: 'Bug fixing'
-};
-
 const SECRET_ENV_KEYS = new Set([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -3562,7 +3676,6 @@ function saveClaudeEnv() {
   }).catch(() => {});
 
   loadClaudeModels();
-  renderWorkflowDefaults();
 }
 
 function addClaudeEnvRow() {
@@ -3581,63 +3694,6 @@ function addClaudeEnvRow() {
   el.claudeEnv.append(row);
   row.querySelector('[data-field="key"]').focus();
 }
-function renderWorkflowDefaults() {
-  if (!el.workflowDefaults) {
-    return;
-  }
-
-  el.workflowDefaults.replaceChildren();
-
-  for (const flow of state.config?.workflowsAvailable ?? Object.keys(WORKFLOW_LABELS)) {
-    const selection = workflowSettings(flow);
-    const row = document.createElement('div');
-
-    row.className = 'workflow-default';
-    row.dataset.flow = flow;
-    row.innerHTML = `
-      <p class="workflow-name">${escapeText(WORKFLOW_LABELS[flow] ?? flow)}</p>
-      <label class="field workflow-model"><span>Model</span>
-        <span class="model-picker" data-model-picker>
-          <select data-field="model-select" aria-label="Model"></select>
-          <input data-field="model" class="model-custom hidden" placeholder="Model id" autocomplete="off" aria-label="Custom model id">
-        </span>
-      </label>
-      <label class="field workflow-effort"><span>Effort</span><select data-field="effort"></select></label>
-      <label class="toggle workflow-mr"><input type="checkbox" data-field="mr" ${selection.mr !== false ? 'checked' : ''}><span>MR</span></label>
-    `;
-
-    const modelPicker = row.querySelector('[data-model-picker]');
-    const effortSelect = row.querySelector('[data-field="effort"]');
-
-    fillModelPicker(modelPicker, selection.model);
-    fillEffortSelect(effortSelect, selection.effort);
-    wireModelPicker(modelPicker, () => updateWorkflowFromRow(row));
-    effortSelect.addEventListener('change', () => updateWorkflowFromRow(row));
-    row.querySelector('[data-field="mr"]').addEventListener('change', () => updateWorkflowFromRow(row));
-    el.workflowDefaults.append(row);
-  }
-}
-
-function updateWorkflowFromRow(row) {
-  const flow = row.dataset.flow;
-
-  if (!flow) {
-    return;
-  }
-
-  const selection = {
-    model: modelPickerValue(row.querySelector('[data-model-picker]')),
-    effort: row.querySelector('[data-field="effort"]').value,
-    mr: row.querySelector('[data-field="mr"]').checked
-  };
-
-  rememberWorkflow(flow, selection);
-
-  if (flow === 'bugSweep') {
-    renderSweepSelection();
-  }
-}
-
 function loadMermaid() {
   if (window.mermaid) {
     return Promise.resolve(window.mermaid);
@@ -3807,6 +3863,18 @@ async function loadConfig() {
       el.repoInfo.textContent = `${config.cwd} · not a git repository`;
     }
 
+    // Fetch branches for the base branch picker
+    if (config.git?.repo) {
+      try {
+        const branchData = await api('/api/branches');
+        state.branches = branchData.branches ?? [];
+        state.remoteBranches = branchData.remoteBranches ?? [];
+      } catch {
+        state.branches = [];
+        state.remoteBranches = [];
+      }
+    }
+
     const jira = config.jira ?? {};
 
     // Remembered choices win; detected defaults fill the gaps.
@@ -3814,6 +3882,7 @@ async function loadConfig() {
     setFormValue('source', settings.source);
     setFormValue('githubRepo', settings.githubRepo || config.github?.repo);
     setFormValue('gitlabProject', settings.gitlabProject);
+    syncWorkspaceSource();
     el.githubInfo.textContent = config.github?.repo ? `GitHub CLI: ${config.github.repo}` : 'GitHub CLI: not configured';
     setFormValue('base', settings.base);
     const detectedJiraType = settings.jiraType || (
@@ -3840,7 +3909,6 @@ async function loadConfig() {
     updateTrackerStatus();
 
     renderClaudeEnv();
-    renderWorkflowDefaults();
     renderSweepSelection();
     loadClaudeModels();
 
@@ -3861,9 +3929,6 @@ async function loadConfig() {
       : (defaults.prPreset || 'github');
     togglePrCustom();
 
-    // Publishing always pushes now, so a legacy commit-only setting becomes a
-    // plain push and an independent push/pr pair still resolves to one choice.
-    el.form.publish.value = publishChoice(settings);
     if (el.form.closeIssues) {
       el.form.closeIssues.checked = settings.closeIssues === true;
     }
@@ -3970,6 +4035,10 @@ function init() {
   el.form.gitlabProject.addEventListener('change', () => loadBugs());
   el.form.gitlabProject.addEventListener('input', scheduleBugLoad);
   el.form.source.addEventListener('change', () => {
+    syncWorkspaceSource();
+    for (const set of Object.values(sessionViews)) {
+      set?.syncIssueSource?.();
+    }
     loadBugs({ force: true });
     updatePlan();
     queueSettingsSave();
@@ -4011,15 +4080,23 @@ function init() {
   });
   el.copyLog.addEventListener('click', copyLog);
   el.form.prPreset.addEventListener('change', togglePrCustom);
+  const sweepBasePicker = el.form.base?.closest('[data-base-picker]');
+
   const rememberSweep = () => {
     rememberWorkflow('bugSweep', selectionFrom({
+      base: sweepBasePicker,
       modelPicker: el.sweepModelPicker,
       effort: el.sweepEffort,
-      mr: null
+      mr: el.form.mr
     }));
-    renderWorkflowDefaults();
   };
 
+  if (sweepBasePicker) {
+    wireBasePicker(sweepBasePicker, rememberSweep);
+  } else {
+    el.form.base.addEventListener('input', rememberSweep);
+  }
+  el.form.mr.addEventListener('change', rememberSweep);
   wireModelPicker(el.sweepModelPicker, rememberSweep);
   el.sweepEffort.addEventListener('change', rememberSweep);
   el.claudeEnv?.addEventListener('change', saveClaudeEnv);
@@ -4045,7 +4122,7 @@ function init() {
     item.addEventListener('click', () => switchView(item.dataset.view));
   }
 
-  for (const name of ['project', 'base', 'publish', 'prPreset']) {
+  for (const name of ['project', 'base', 'mr', 'prPreset']) {
     el.form[name].addEventListener('input', updatePlan);
     el.form[name].addEventListener('change', updatePlan);
   }

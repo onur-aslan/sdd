@@ -40,9 +40,9 @@ The screen is meant to be used without thinking about settings: **pick the bugs,
 
 ### The queue
 
-Pick a bug source (**Jira**, **GitHub**, or **GitLab**) and a project or repository, and the dashboard loads the open bugs into a multi-select list. Every bug is checked by default; uncheck the ones to leave for later. The selection is sent to `sdd bug-sweep` as `--issues`, so no JQL has to be written.
+Choose the issue source (**Jira**, **GitHub**, or **GitLab**) and its target once in **Settings → Workspace**, and the dashboard loads the open bugs into a multi-select list. Every bug is checked by default; uncheck the ones to leave for later. The selection is sent to `sdd bug-sweep` as `--issues`, so no JQL has to be written.
 
-The source selector only changes which target the queue loads. **Settings** keeps the Jira project, GitHub repository, and GitLab project available at all times, because the enhancement and feature **Start from** pickers use them independently of the bug sweep.
+The source belongs to the project, not to an individual workflow. The bug queue, the enhancement/feature issue import, and the spec issue workflow all read the same source and target.
 
 The sweep form also chooses a **model** and **effort**. The model picker lists the ids the installed Claude Code picker reports, plus any model configured in the Claude environment; **Custom model…** accepts any other id. `Default` model and `Default` effort omit the matching CLI flag. The model and Claude environment are passed only to the sweep's child process and never mutate the Studio process environment.
 
@@ -66,11 +66,11 @@ Each bug gets a fresh agent session, so a previous fix cannot leak into the next
 
 The run view shows each bug moving from pending to running to fixed, not fixed, or flagged for human review, with a progress ruler, the live agent log, **Stop run**, and the merge request link when the run finishes. Changes to authentication, payments, migrations, infrastructure, or CI/CD are force-flagged for review.
 
-Only one sweep runs at a time. A running sweep also holds the same on-disk lock as the CLI, so a scheduled sweep cannot overlap it. Sweeps run in the main checkout and may run alongside any number of live sessions, which have their own worktrees.
+Only one sweep runs at a time. A running sweep also holds the same on-disk lock as the CLI, so a scheduled sweep cannot overlap it. A sweep fetches the base branch and runs in an isolated worktree, so it may run alongside any number of live sessions.
 
 ### Publishing
 
-Every sweep pushes its branch. The **Publish** choice decides whether it also opens a merge request: **Push branch** pushes without one, and **Push + pull request** pushes and opens one. Push is implied by the merge request, so an invalid combination cannot happen, and the old commit-only option is no longer offered.
+Every sweep pushes its branch. The **Open a merge request** checkbox in the queue decides whether it also opens one; it is checked by default. Turning it off pushes the branch only, so an invalid combination cannot happen and the old commit-only option is no longer offered.
 
 **Close the source issue when the work succeeds** is off by default and is shared by every workflow. The rule is the same everywhere: the issue closes only after the branch was pushed, with or without a merge request. A bug-sweep issue closes after its sweep push, an enhancement after its implementation push, and a feature after its build push — never when the spec session ends. Jira uses an available transition into the **Done** status category. GitHub and GitLab receive a normal close request. A tracker rejection is shown in the run log but never turns a successful fix, session, or build into a failure.
 
@@ -208,9 +208,9 @@ Once a session starts, its header is locked to the selected model and effort; th
 
 Both tabs run a guided interview as a conversation. Describe the change, and the agent asks one question at a time; type the answer in the composer and press **Send**. Nothing parses the agent's prose, so the only question on screen is the one you answer.
 
-An **enhancement** ends with a plan and report in the conversation. **Finish** ends the session at the report, the studio commits and pushes the worktree branch, and the optional merge request opens.
+An **enhancement** ends with a plan and report in the conversation. **Finish** ends the session at the report.
 
-A **feature** ends its interview when the agent writes `docs/sdd/features/<feature>/spec.md`. The same session then stays open and idle.
+A **feature** ends its interview when the agent writes `docs/sdd/features/<feature>/spec.md`. The same session then stays open for the build step.
 
 Each session has its own worktree at `.sdd/worktrees/<session-id>`, created from the base branch (or from the merge target for merge sessions). The main checkout is not modified while a session runs. Sessions in the same workflow, and sessions in different workflows, run in parallel.
 
@@ -225,13 +225,13 @@ When the spec is written, the session shows the two decisions the [feature workf
 
 **Start build** writes the build request to the same live process. Every pipeline step is a user turn in the same session, so the agent keeps the spec context. The transcript shows stage markers and one line per step (`step 1/2 spec-to-task ✓`, `step 2/2 feature-tdd running`), with tool calls folded into a one-line **working** detail. A failed step names itself and stops the rest.
 
-The build is part of the same job and the same SSE stream. There is no separate build job, no separate build panel, and no build event/cancel endpoint. When the build finishes, the studio commits and pushes the branch (and opens the optional merge request) before removing the worktree.
+The build is part of the same job and the same SSE stream. There is no separate build job, no separate build panel, and no build event/cancel endpoint. When the build finishes, the studio commits and pushes the branch before removing the worktree.
 
 ## Spec issue
 
 The **Spec issue** tab is a separate planning workflow. It runs the same `deep-spec` interview as **Feature**, but stops at the spec and files it as one tracker issue instead of offering a build.
 
-1. Pick the tracker under **File in**: Jira, GitHub, or GitLab. The choice is remembered as its own setting.
+1. The spec is filed into the project-wide issue source chosen in **Settings → Workspace**.
 2. Choose model and effort, then describe the feature and answer the interview one question at a time.
 3. When the agent writes `docs/sdd/features/<feature>/spec.md`, the studio copies the spec to the main checkout and creates one issue automatically. The title comes from the spec's `# Feature: <name>` heading and the body is the full file.
 
@@ -265,13 +265,13 @@ The Jira token is stored locally but never returned to the browser. The API only
 | Setting | Purpose |
 | --- | --- |
 | Claude environment | `ANTHROPIC_*`, `CLAUDE_*`, `AWS_*`, and `CLOUD_ML_*` variables passed to Claude Code |
-| Workflow defaults | Model, effort, and merge-request checkbox for enhancement, feature, spec issue, merge, and bug sweep |
-| Bug source, Jira project, GitHub repository, GitLab project | Where the queue loads bugs and issues |
-| Base branch | Blank uses the detected branch |
-| Publish | Push branch or push + merge request for bug sweeps |
+| Per-workflow selections | Base branch, model, effort, and MR are remembered from each workflow's start screen or queue; blank base uses the detected branch |
+| Issue source and target | One tracker for the bug queue, issue import, and spec issue filing; only the active source's target is shown |
+| Fix bugs merge request | Checked in the Fix bugs queue; off pushes the branch only |
 | Merge request preset, custom command | Which forge creates the merge request |
 | Jira deployment type, URL, email, token, auth mode, API version, CA, skip TLS | Jira connection |
-| Enhancement/Feature/Spec issue source | Per-tab tracker choice, saved separately for each |
+
+Workflow-specific choices live with the workflow, not in Settings: base, model, effort, and (for Enhancement and Feature) the merge request choice on the start screen, and the same choices plus publish behavior in the Fix bugs queue.
 
 The retired `agentPreset` and `agentCmd` values are ignored. Studio always runs Claude Code. Settings opens automatically on the first visit, while the project is still empty.
 

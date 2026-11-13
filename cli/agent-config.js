@@ -92,10 +92,12 @@ export function normalizeWorkflowSettings(value = {}) {
     const saved = input[flow] && typeof input[flow] === 'object' ? input[flow] : {};
     const effort = text(saved.effort, 20).toLowerCase();
     const model = text(saved.model, 200);
+    const base = text(saved.base, 255);
 
     workflows[flow] = {
       model: model.toLowerCase() === 'default' ? '' : model,
       effort: effort === 'default' ? '' : STUDIO_EFFORTS.includes(effort) ? effort : '',
+      base,
       mr: saved.mr === undefined ? defaults.mr : saved.mr === true || saved.mr === 'true'
     };
   }
@@ -120,6 +122,8 @@ export function resolveWorkflowSelection(settings = {}, flow, request = {}) {
   const effort = text(requestedEffort, 20).toLowerCase() === 'default'
     ? ''
     : text(requestedEffort, 20).toLowerCase();
+  const requestedBase = request.base !== undefined ? request.base : defaults.base;
+  const base = text(requestedBase, 255);
 
   if (effort && !STUDIO_EFFORTS.includes(effort)) {
     const error = new Error(
@@ -146,6 +150,7 @@ export function resolveWorkflowSelection(settings = {}, flow, request = {}) {
   return {
     model,
     effort,
+    base,
     mr,
     args,
     environment: normalizeClaudeEnv(settings.claudeEnv)

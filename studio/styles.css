@@ -726,6 +726,22 @@ main {
   font-size: 12px;
 }
 
+/* Base branch picker: select from local/remote branches, or type a custom one. */
+.base-picker {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.base-picker > * {
+  min-width: 0;
+}
+
+.base-picker .base-custom {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 input:not([type="checkbox"]),
 select,
 textarea {
@@ -794,6 +810,20 @@ input[type="checkbox"]:checked::before {
   transform: scale(1);
 }
 
+input[type="checkbox"]:indeterminate {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: white;
+  clip-path: none;
+  transform: scale(1);
+}
+
 input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -814,6 +844,10 @@ input[type="checkbox"]:disabled {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.sweep-options {
+  margin-top: 10px;
 }
 
 .sweep-model {
@@ -932,15 +966,27 @@ input[type="checkbox"]:disabled {
   outline-offset: 2px;
 }
 
+.queue-all {
+  gap: 7px;
+  min-height: 26px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.queue-all:has(input:disabled) {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 .bug-choice {
   display: grid;
-  grid-template-columns: 15px 62px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 10px;
-  align-items: center;
-  padding: 9px 10px;
+  align-items: start;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
-  transition: background var(--fast) var(--ease);
+  transition: background var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
 }
 
 .bug-choice:last-child {
@@ -953,26 +999,69 @@ input[type="checkbox"]:disabled {
 
 .bug-choice:has(input:checked) {
   background: var(--accent-soft);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.bug-choice input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.bug-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bug-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .bug-key {
-  color: var(--accent);
-  font: 11.5px/1.2 var(--mono);
+  color: var(--ink-2);
+  font: 600 11px/1.35 var(--mono);
   white-space: nowrap;
 }
 
 .bug-summary {
-  min-width: 0;
+  display: -webkit-box;
   overflow: hidden;
+  color: var(--ink-2);
   font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .bug-meta {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
   color: var(--muted);
-  font: 10px/1.2 var(--mono);
+  font: 9.5px/1.6 var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   white-space: nowrap;
+}
+
+.bug-meta:empty {
+  display: none;
+}
+
+.bug-choice:has(input:checked) .bug-key {
+  color: var(--accent);
+}
+
+.bug-choice:has(input:checked) .bug-summary {
+  color: var(--ink);
 }
 
 .plan-note {
@@ -1479,6 +1568,18 @@ input[type="checkbox"]:disabled {
   flex: none;
   color: var(--ink-2);
   font: 500 12px/1 var(--sans);
+}
+
+.session-import-source {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font: 500 10px/1.2 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .session-import select {
@@ -2834,11 +2935,7 @@ input[type="checkbox"]:disabled {
   }
 
   .bug-choice {
-    grid-template-columns: 15px 58px minmax(0, 1fr);
-  }
-
-  .bug-choice .bug-meta {
-    display: none;
+    padding: 8px 11px;
   }
 
   .bug {
@@ -2853,6 +2950,10 @@ input[type="checkbox"]:disabled {
   .grid-2,
   .check-grid {
     grid-template-columns: 1fr;
+  }
+
+  .sweep-mr {
+    padding-top: 0;
   }
 
   .settings {
@@ -3151,10 +3252,14 @@ body.live-mode .live-view:not(.hidden) .session-wrap {
 
 .selection-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.1fr) minmax(0, 0.7fr) auto;
   align-items: start;
   gap: 10px;
   margin: 16px 0 8px;
+}
+
+.selection-row-no-mr {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.1fr) minmax(0, 0.7fr);
 }
 
 .selection-row-compact {
@@ -3270,8 +3375,7 @@ body.live-mode .live-view:not(.hidden) .session-wrap {
   color: var(--danger, #b42318);
 }
 
-.env-list,
-.workflow-defaults {
+.env-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -3293,41 +3397,6 @@ body.live-mode .live-view:not(.hidden) .session-wrap {
   margin-bottom: 1px;
 }
 
-.workflow-default {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  grid-template-areas:
-    "name name mr"
-    "model effort mr";
-  align-items: start;
-  gap: 8px 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--paper-2);
-}
-
-.workflow-name {
-  grid-area: name;
-  margin: 0;
-  color: var(--ink);
-  font: 600 12px/1 var(--sans);
-}
-
-.workflow-model {
-  grid-area: model;
-}
-
-.workflow-effort {
-  grid-area: effort;
-}
-
-.workflow-mr {
-  grid-area: mr;
-  align-self: end;
-  white-space: nowrap;
-}
-
 .sweep-model {
   margin-top: 2px;
 }
@@ -3335,20 +3404,10 @@ body.live-mode .live-view:not(.hidden) .session-wrap {
 @media (max-width: 900px) {
   .selection-row,
   .env-row,
-  .sweep-model,
-  .workflow-default {
+  .sweep-model {
     grid-template-columns: 1fr;
   }
 
-  .workflow-default {
-    grid-template-areas:
-      "name"
-      "model"
-      "effort"
-      "mr";
-  }
-
-  .workflow-mr,
   .selection-mr {
     align-self: start;
     padding-top: 0;

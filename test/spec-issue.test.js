@@ -118,7 +118,7 @@ test('spec-issue uses the saved source and target when flags are absent', async 
 
   const result = await runSpecIssue([], {
     cwd,
-    settings: { specIssueSource: 'github', githubRepo: 'owner/repo' },
+    settings: { source: 'github', specIssueSource: 'jira', githubRepo: 'owner/repo' },
     githubToken: 'secret',
     fetchImpl
   });

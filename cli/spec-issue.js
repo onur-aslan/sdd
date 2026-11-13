@@ -220,7 +220,7 @@ export async function runSpecIssue(argv = [], dependencies = {}) {
   const specPath = resolveSpecPath(options.specPath, cwd);
   const body = fs.readFileSync(specPath, 'utf8');
   const title = specIssueTitle(body, path.basename(path.dirname(specPath)) || 'Feature spec');
-  const source = options.source || String(settings.specIssueSource ?? '').toLowerCase() || 'jira';
+  const source = options.source || String(settings.source || settings.specIssueSource || '').toLowerCase() || 'jira';
   const target = resolveTarget({ source, requested: options.target, settings });
   const plan = {
     source,

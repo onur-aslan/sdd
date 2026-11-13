@@ -112,24 +112,32 @@
             <div class="sheet-head">
               <div>
                 <h2>Queue</h2>
-                <p class="sheet-sub" id="bug-count">pick a project</p>
+                <p class="sheet-sub" id="bug-count" aria-live="polite">pick a project</p>
               </div>
               <div class="sheet-tools">
-                <button type="button" class="btn quiet sm" id="toggle-bugs" disabled>Select none</button>
+                <label class="toggle queue-all">
+                  <input type="checkbox" id="toggle-bugs" disabled>
+                  <span>Select all</span>
+                </label>
                 <button type="button" class="icon-btn" id="reload-bugs" title="Reload open bugs" aria-label="Reload open bugs">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
                 </button>
               </div>
             </div>
 
-            <label class="field queue-source">
-              <span>Bug source</span>
-              <select form="sweep-form" name="source" id="bug-source">
-                <option value="jira">Jira</option>
-                <option value="github">GitHub</option>
-                <option value="gitlab">GitLab</option>
-              </select>
-            </label>
+            <div class="grid-2 sweep-options">
+              <label class="field">
+                <span>Base branch <em>(blank = detected)</em></span>
+                <span class="base-picker" data-base-picker>
+                  <select form="sweep-form" aria-label="Base branch"></select>
+                  <input form="sweep-form" name="base" class="base-custom hidden" placeholder="detected" autocomplete="off" aria-label="Custom base branch">
+                </span>
+              </label>
+              <label class="toggle selection-mr sweep-mr">
+                <input type="checkbox" name="mr" id="sweep-mr" checked>
+                <span>Open a merge request</span>
+              </label>
+            </div>
 
             <div class="grid-3 sweep-model">
               <label class="field">
@@ -307,6 +315,15 @@
         <section class="settings-section">
           <h3>Workspace</h3>
 
+          <label class="field">
+            <span>Issue source</span>
+            <select form="sweep-form" name="source" id="bug-source">
+              <option value="jira">Jira</option>
+              <option value="github">GitHub</option>
+              <option value="gitlab">GitLab</option>
+            </select>
+          </label>
+
           <label class="field" id="jira-settings">
             <span>Jira project</span>
             <div class="input-row">
@@ -328,23 +345,9 @@
             <input form="sweep-form" name="gitlabProject" placeholder="group/subgroup/project" autocomplete="off">
           </label>
 
-          <p class="hint">Each workflow uses the target for its own source picker.</p>
+          <p class="hint">The issue source is shared by every workflow and the bug queue. Only its target is shown.</p>
 
-          <div class="grid-2">
-            <label class="field">
-              <span>Base branch <em>(blank = detected)</em></span>
-              <input form="sweep-form" name="base" placeholder="main" autocomplete="off">
-            </label>
-            <label class="field">
-              <span>Publish</span>
-              <select form="sweep-form" name="publish" id="publish-mode">
-                <option value="pr" selected>Push + pull request</option>
-                <option value="push">Push branch</option>
-              </select>
-            </label>
-          </div>
-
-          <p class="hint">Every session runs in its own worktree from the selected base branch. Dates, the owner branch, work directory, limits, and timeouts are computed at run time; per-run tags are opt-in.</p>
+          <p class="hint">Each workflow chooses its base when it starts; merge uses its target, and Fix bugs fetches its base. Every session runs in its own worktree. Dates, the owner branch, work directory, limits, and timeouts are computed at run time; per-run tags are opt-in.</p>
         </section>
 
         <section class="settings-section">
@@ -356,12 +359,6 @@
             <button type="button" class="btn quiet sm" id="refresh-models">Refresh models</button>
             <span class="check-result" id="model-source"></span>
           </div>
-        </section>
-
-        <section class="settings-section">
-          <h3>Workflow defaults</h3>
-          <p class="hint">Model, effort, and the merge-request checkbox are remembered per workflow. Choose Default to use the Claude environment. A session locks the selection shown in its header.</p>
-          <div id="workflow-defaults" class="workflow-defaults"></div>
         </section>
 
         <section class="settings-section">

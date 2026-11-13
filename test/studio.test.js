@@ -307,12 +307,13 @@ test('the workflow selection resolves model, effort, and the Claude environment'
       workflows: {}
     },
     'enhancement',
-    { model: 'nim-model', effort: 'high', mr: false }
+    { model: 'nim-model', effort: 'high', base: 'develop', mr: false }
   );
 
   assert.equal(selection.provider, undefined);
   assert.equal(selection.model, 'nim-model');
   assert.equal(selection.effort, 'high');
+  assert.equal(selection.base, 'develop');
   assert.equal(selection.mr, false);
   assert.deepEqual(selection.args, ['--model', 'nim-model', '--effort', 'high']);
   assert.deepEqual(selection.environment, {
@@ -329,6 +330,23 @@ test('the workflow selection resolves model, effort, and the Claude environment'
     resolveWorkflowSelection({}, 'feature', { model: 'some-custom-model' }).model,
     'some-custom-model'
   );
+
+  // A saved base is the fallback; an explicit blank means "detect it".
+  const savedBase = resolveWorkflowSelection(
+    { workflows: { enhancement: { base: 'release/1.0' } } },
+    'enhancement',
+    {}
+  );
+  assert.equal(savedBase.base, 'release/1.0');
+  assert.equal(
+    resolveWorkflowSelection(
+      { workflows: { enhancement: { base: 'release/1.0' } } },
+      'enhancement',
+      { base: '' }
+    ).base,
+    ''
+  );
+
   assert.throws(
     () => resolveWorkflowSelection({}, 'feature', { effort: 'extreme' }),
     /Unknown effort/
@@ -421,6 +439,7 @@ test('settings remember the Jira connection locally but keep the token off the A
     workflows.enhancement = {
       model: 'nim-model',
       effort: 'high',
+      base: '',
       mr: false
     };
 
@@ -776,11 +795,11 @@ test('studio exposes health, config, and the dashboard assets', async (t) => {
   const page = await (await fetch(`${base}/`)).text();
   assert.match(page, /sdd <em>studio<\/em>/);
 
-  // Settings is shared by every workflow, so its tracker targets are not
-  // filtered by the bug sweep's source, and the rail reports all of them
-  // instead of a Jira-only connection.
-  assert.doesNotMatch(page, /class="field hidden" id="(?:github|gitlab)-settings"/);
-  assert.match(page, /Each workflow uses the target for its own source picker\./);
+  // Settings owns one project-wide issue source; the target fields stay in
+  // the markup and JavaScript shows only the active source's target.
+  assert.match(page, /<span>Issue source<\/span>/);
+  assert.match(page, /The issue source is shared by every workflow and the bug queue\./);
+  assert.doesNotMatch(page, /<span>Bug source<\/span>/);
   assert.match(page, /id="tracker-info"/);
   assert.match(page, /Trackers: not configured/);
   assert.doesNotMatch(page, /id="jira-info"/);
@@ -887,6 +906,7 @@ test('studio runs a sweep and streams structured progress events', async (t) => 
   assert.deepEqual(settings.workflows.bugSweep, {
     model: 'nim-model',
     effort: 'high',
+    base: 'HEAD',
     mr: true
   });
 });
@@ -1337,20 +1357,31 @@ test('a feature session builds the chosen pipeline in the same job after the spe
   assert.equal(fs.existsSync(session.worktree), false);
 });
 
-test('resolveSpecIssueTarget prefers the imported issue, then the requested source, then the saved one', () => {
+test('resolveSpecIssueTarget prefers the imported issue, then the global source, then the saved one', () => {
   assert.deepEqual(
     resolveSpecIssueTarget({
       request: { issue: { source: 'gitlab', key: 'GL-2', target: 'group/repo' } },
-      saved: { specIssueSource: 'github', githubRepo: 'owner/repo' }
+      saved: { source: 'github', githubRepo: 'owner/repo' }
     }),
     { source: 'gitlab', target: 'group/repo' }
   );
 
   assert.deepEqual(
     resolveSpecIssueTarget({
-      request: { specIssueSource: 'github' },
-      saved: { specIssueSource: 'jira', project: 'ABC', githubRepo: 'owner/repo' }
+      request: { source: 'github' },
+      saved: { source: 'jira', specIssueSource: 'gitlab', project: 'ABC', githubRepo: 'owner/repo' }
     }),
+    { source: 'github', target: 'owner/repo' }
+  );
+
+  assert.deepEqual(
+    resolveSpecIssueTarget({ request: {}, saved: { source: 'gitlab', gitlabProject: 'group/repo' } }),
+    { source: 'gitlab', target: 'group/repo' }
+  );
+
+  // The legacy per-tab setting still works until it is migrated away.
+  assert.deepEqual(
+    resolveSpecIssueTarget({ request: { specIssueSource: 'github' }, saved: { specIssueSource: 'jira', githubRepo: 'owner/repo' } }),
     { source: 'github', target: 'owner/repo' }
   );
 
