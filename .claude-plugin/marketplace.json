@@ -1,8 +1,8 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "sdd-plugin-suite",
-  "description": "Spec-Driven Development (SDD) plugin suite — core workflows plus vibecoding utilities, from planning to implementation.",
-  "version": "4.2.0",
+  "description": "Spec-Driven Development (SDD) plugin suite — core workflows, a locked UI/UX design workflow, and vibecoding utilities, from planning to implementation.",
+  "version": "4.3.0",
   "owner": {
     "name": "Onur ASLAN"
   },
@@ -19,8 +19,8 @@
   "plugins": [
     {
       "name": "sdd",
-      "version": "4.2.0",
-      "description": "Core SDD workflow - spec-driven development from planning to implementation. Includes deep-spec, spec-to-task, feature-tdd, sdd-developer, feature-e2e-verifier, bug-fix, enhancement, and load-project-features skills. The enhancement workflow guides a thorough interview, an approved plan, implementation, and suitable verification.",
+      "version": "4.3.0",
+      "description": "Core SDD workflow - spec-driven development from planning to implementation. Includes deep-spec, spec-to-task, feature-tdd, sdd-developer, feature-e2e-verifier, bug-fix, enhancement, load-project-features, design-decisions, apply-design, and ui-prompt skills. The enhancement workflow guides a thorough interview, an approved plan, implementation, and suitable verification; the design workflow locks UI/UX decisions before they are applied and verified.",
       "author": {
         "name": "Onur ASLAN"
       },
@@ -41,7 +41,7 @@
     },
     {
       "name": "vibecoding",
-      "version": "4.2.0",
+      "version": "4.3.0",
       "description": "Vibecoding utilities for glossary management, working conventions, safe Git branch merging, and Playwright artifact cleanup. Includes ask-first, buy-before-build, glossary-builder, grounded-mode, using-glossary, merge, and git-cleanup-playwright-artifacts skills.",
       "author": {
         "name": "Onur ASLAN"
