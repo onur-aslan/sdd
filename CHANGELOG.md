@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-11-26
+
+### Added
+- `design-decisions` skill in `sdd`: collects UI/UX decisions in an HTML preview with selectable alternatives, then writes and locks `DESIGN.md` (Layer 1) and `design/pages/<slug>.md` (Layer 2), with a delta manifest for downstream application.
+- `apply-design` skill in `sdd`: applies pending locked design decisions to the code, records them in `design/applied.md`, and verifies the result in the browser with Playwright.
+- `ui-prompt` skill in `sdd`: runs a persistent, event-driven Playwright picker session that turns a selected element plus a typed prompt into a resolved, applied, and verified source change, with a design-delta review at exit when a locked `DESIGN.md` exists.
+
+### Changed
+- Updated the plugin, marketplace, and README descriptions to include the locked UI/UX design workflow.
+- Bumped the package and plugin marketplace metadata to `4.3.0`.
+
 ## [4.2.0] - 2026-10-22
 
 ### Added
