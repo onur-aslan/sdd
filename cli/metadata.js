@@ -21,10 +21,25 @@ export const skillsRemovedInFourOh = [
   'verify-with-playwright-mcp'
 ];
 
-// Skill directories that shipped in older releases and are gone today. Only a full uninstall
-// touches these, because a live install cannot prove it still owns such names.
+// Skills that were removed after 4.0.0. Older install records cannot name them either,
+// so keep them here so upgrades and full uninstalls can prune them.
+const skillsRetiredAfterFourOh = [
+  'apply-design',
+  'buy-before-build',
+  'design-decisions',
+  'enhancement',
+  'feature-e2e-verifier',
+  'glossary-builder',
+  'grounded-mode',
+  'ui-prompt',
+  'using-glossary'
+];
+
+// Skill directories that shipped in older releases and are gone today. A legacy install record
+// cannot name them, so upgrades and full uninstalls use this list to prune them.
 export const retiredSkillNames = [
   ...skillsRemovedInFourOh,
+  ...skillsRetiredAfterFourOh,
   'chicago-tdd',
   'code-slop-review',
   'gap-analysis',

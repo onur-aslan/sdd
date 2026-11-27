@@ -7,14 +7,12 @@ const workflowsDir = fileURLToPath(new URL('./workflows', import.meta.url));
 
 const workflowTypes = [
   { id: 'feature', name: 'Feature Development' },
-  { id: 'bug-fix', name: 'Bug Fix' },
-  { id: 'enhancement', name: 'Enhancement' }
+  { id: 'bug-fix', name: 'Bug Fix' }
 ];
 
 const templates = {
   feature: 'workflow-feature-development.md',
-  'bug-fix': 'workflow-bug-fix.md',
-  enhancement: 'workflow-enhancement.md'
+  'bug-fix': 'workflow-bug-fix.md'
 };
 
 export function getWorkflowTypes() {

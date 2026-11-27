@@ -302,9 +302,9 @@ test('reinstalling skills overwrites existing copies by default', async () => {
 test('an upgrade removes the skills a pre-4.0.0 install left behind', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-upgrade-'));
   const skillsRoot = path.join(tempRoot, '.cursor', 'skills');
-  // A pre-4.0.0 install: skills dropped in 4.0.0, a skill retired earlier, one that survives, and
-  // one that is not ours.
-  const legacySkills = ['deep-spec', 'feature-developer', 'handoff-resume', 'implementer', 'init-feature', 'my-own-skill'];
+  // A pre-4.0.0 install: skills dropped in 4.0.0, skills retired in 5.0.0, a skill retired
+  // earlier, one that survives, and one that is not ours.
+  const legacySkills = ['deep-spec', 'enhancement', 'feature-developer', 'feature-e2e-verifier', 'glossary-builder', 'handoff-resume', 'implementer', 'init-feature', 'my-own-skill'];
 
   for (const skillName of legacySkills) {
     fs.mkdirSync(path.join(skillsRoot, skillName), { recursive: true });
@@ -325,9 +325,9 @@ test('an upgrade removes the skills a pre-4.0.0 install left behind', async () =
     version: '4.0.0'
   });
 
-  assert.deepEqual(result.removedSkills, ['feature-developer', 'handoff-resume', 'implementer', 'init-feature']);
+  assert.deepEqual(result.removedSkills, ['enhancement', 'feature-developer', 'feature-e2e-verifier', 'glossary-builder', 'handoff-resume', 'implementer', 'init-feature']);
 
-  for (const removedSkill of ['feature-developer', 'handoff-resume', 'implementer', 'init-feature']) {
+  for (const removedSkill of ['enhancement', 'feature-developer', 'feature-e2e-verifier', 'glossary-builder', 'handoff-resume', 'implementer', 'init-feature']) {
     assert.ok(!fs.existsSync(path.join(skillsRoot, removedSkill)), `${removedSkill} must be pruned`);
   }
 
@@ -817,7 +817,7 @@ test('help output includes install, uninstall, and version commands', async () =
   assert.match(output, /install/);
   assert.match(output, /uninstall/);
   assert.match(output, /workflow/);
-  assert.match(output, /--type <feature\|bug-fix\|enhancement>/);
+  assert.match(output, /--type <feature\|bug-fix>/);
   assert.match(output, /--target <claude\|cursor\|codex\|opencode>/);
   assert.match(output, /--non-interactive/);
   assert.match(output, /--keep-mcp/);
@@ -932,7 +932,6 @@ test('workflow generation writes the selected template to docs/workflow.md', () 
 test('workflow templates are domain-agnostic and use the surviving skills', () => {
   const featureContent = buildWorkflowContent('feature');
   const bugFixContent = buildWorkflowContent('bug-fix');
-  const enhancementContent = buildWorkflowContent('enhancement');
 
   assert.match(featureContent, /\/sdd-developer/);
   assert.match(featureContent, /\/spec-to-task/);
@@ -946,14 +945,11 @@ test('workflow templates are domain-agnostic and use the surviving skills', () =
 
   assert.match(bugFixContent, /Bug Fix/);
   assert.match(bugFixContent, /\/bug-fix/);
-
-  assert.match(enhancementContent, /Enhancement/);
-  assert.match(enhancementContent, /\/enhancement/);
 });
 
-test('workflow types cover feature, bug-fix, and enhancement', () => {
+test('workflow types cover feature and bug-fix only', () => {
   const types = getWorkflowTypes().map((entry) => entry.id);
-  assert.deepEqual(types, ['feature', 'bug-fix', 'enhancement']);
+  assert.deepEqual(types, ['feature', 'bug-fix']);
 });
 
 test('unknown workflow selections are rejected', () => {

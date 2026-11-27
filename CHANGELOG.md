@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0] - 2026-11-27
+
+### Added
+- `afk` skill in `vibecoding`: execute a task end-to-end without questions, approvals, or progress updates, then return a single final report; irreversible actions are prepared but left for confirmation.
+
+### Removed
+- `enhancement` skill from `sdd`, along with the `enhancement` workflow type from `sdd workflow`; the remaining workflow types are `feature` and `bug-fix`.
+- `design-decisions`, `apply-design`, and `ui-prompt` skills from `sdd`, retiring the locked UI/UX design workflow.
+- `feature-e2e-verifier` skill from `sdd`; per-story E2E verification remains built into `sdd-developer` and `feature-tdd`.
+- `glossary-builder`, `using-glossary`, `buy-before-build`, and `grounded-mode` skills from `vibecoding`.
+- References to the removed skills from the plugin, marketplace, and README descriptions.
+
+### Changed
+- `bug-fix` supports two result modes: prose by default, or `--output json`, which commits the verified fix and returns a single JSON object defined in `references/json-output.md` (`status`, `bug`, `reproduction`, `fix`, `verification`, `commit`, `unresolved_issues`, `limitations`).
+- Legacy pre-4.0.0 upgrades and full uninstalls now also prune the skills retired in this release.
+- Bumped the package, `plugin.json`, and marketplace metadata to `5.0.0`.
+
 ## [4.3.0] - 2026-11-26
 
 ### Added
